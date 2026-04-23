@@ -1,4 +1,7 @@
+use embassy_futures::join::join;
 use embassy_futures::select::{select, Either};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
 use embedded_graphics::mono_font::ascii::FONT_6X10;
 use embedded_graphics::mono_font::MonoTextStyleBuilder;
 use embedded_graphics::pixelcolor::BinaryColor;
@@ -22,6 +25,23 @@ use ssd1306::prelude::*;
 use ssd1306::{I2CDisplayInterface, Ssd1306};
 use std::thread;
 use std::time::Duration;
+
+// --- Channel message types ---
+
+struct RxPacket {
+    data: heapless::Vec<u8, 255>,
+    rssi: i16,
+    snr: i16,
+}
+
+struct TxRequest {
+    data: heapless::Vec<u8, 255>,
+}
+
+// --- Channel instances (static, ISR-safe) ---
+
+static RX_CHAN: Channel<CriticalSectionRawMutex, RxPacket, 2> = Channel::new();
+static TX_CHAN: Channel<CriticalSectionRawMutex, TxRequest, 4> = Channel::new();
 
 /// Read the base MAC address from eFuse
 fn get_mac() -> [u8; 6] {
@@ -160,38 +180,69 @@ fn main() {
         adc.start().unwrap();
         log::info!("ADC DMA started at 8kHz");
 
-        // PTT loop state
-        let mut tx_count: u32 = 0;
-        let mut rx_buf = [0u8; 255];
-        let mut line_buf = heapless::String::<64>::new();
-        let mut mic_buf = [AdcMeasurement::new(); 320];
+        // --- Radio task: exclusively owns lora, mdltn, tx_params, rx_params ---
+        let radio = async {
+            let mut rx_buf = [0u8; 255];
 
-        // Show initial RX state
-        display.clear_buffer();
-        Text::new(&mac_str, Point::new(1, 10), style)
-            .draw(&mut display)
-            .unwrap();
-        Text::new("RX Listening", Point::new(16, 36), style)
-            .draw(&mut display)
-            .unwrap();
-        display.flush().unwrap();
+            loop {
+                lora.prepare_for_rx(RxMode::Continuous, &mdltn, &rx_params)
+                    .await
+                    .unwrap();
 
-        loop {
-            // Enter continuous RX
-            lora.prepare_for_rx(RxMode::Continuous, &mdltn, &rx_params)
-                .await
+                match select(lora.rx(&rx_params, &mut rx_buf), TX_CHAN.receive()).await {
+                    Either::First(rx_result) => match rx_result {
+                        Ok((len, status)) => {
+                            let mut data = heapless::Vec::new();
+                            let _ = data.extend_from_slice(&rx_buf[..len as usize]);
+                            RX_CHAN
+                                .send(RxPacket {
+                                    data,
+                                    rssi: status.rssi,
+                                    snr: status.snr,
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            log::error!("RX error: {:?}", e);
+                        }
+                    },
+                    Either::Second(tx_req) => {
+                        // TX request received — cancel RX, transmit, loop back to RX
+                        lora.enter_standby().await.unwrap();
+                        lora.prepare_for_tx(&mdltn, &mut tx_params, 22, &tx_req.data)
+                            .await
+                            .unwrap();
+                        lora.tx().await.unwrap();
+                    }
+                }
+            }
+        };
+
+        // --- App task: owns button, adc, display ---
+        let app = async {
+            let mut tx_count: u32 = 0;
+            let mut line_buf = heapless::String::<64>::new();
+            let mut mic_buf = [AdcMeasurement::new(); 320];
+
+            // Show initial RX state
+            display.clear_buffer();
+            Text::new(&mac_str, Point::new(1, 10), style)
+                .draw(&mut display)
                 .unwrap();
+            Text::new("RX Listening", Point::new(16, 36), style)
+                .draw(&mut display)
+                .unwrap();
+            display.flush().unwrap();
 
-            // Two-way select: RX packet or PTT button
-            match select(lora.rx(&rx_params, &mut rx_buf), button.wait_for_low()).await {
-                Either::First(rx_result) => match rx_result {
-                    Ok((len, status)) => {
-                        let msg = core::str::from_utf8(&rx_buf[..len as usize]).unwrap_or("???");
+            loop {
+                match select(RX_CHAN.receive(), button.wait_for_low()).await {
+                    Either::First(rx_pkt) => {
+                        let msg = core::str::from_utf8(&rx_pkt.data).unwrap_or("???");
                         log::info!(
                             "RX [{}B] rssi={}dBm snr={}dB: {}",
-                            len,
-                            status.rssi,
-                            status.snr,
+                            rx_pkt.data.len(),
+                            rx_pkt.rssi,
+                            rx_pkt.snr,
                             msg
                         );
 
@@ -206,67 +257,66 @@ fn main() {
                         line_buf.clear();
                         let _ = core::fmt::write(
                             &mut line_buf,
-                            format_args!("RSSI:{} SNR:{}", status.rssi, status.snr),
+                            format_args!("RSSI:{} SNR:{}", rx_pkt.rssi, rx_pkt.snr),
                         );
                         Text::new(&line_buf, Point::new(0, 48), style)
                             .draw(&mut display)
                             .unwrap();
                         display.flush().unwrap();
                     }
-                    Err(e) => {
-                        log::error!("RX error: {:?}", e);
-                    }
-                },
-                Either::Second(_) => {
-                    // PTT button pressed — cancel RX, enter TX mode
-                    log::info!("PTT pressed — switching to TX");
-                    lora.enter_standby().await.unwrap();
+                    Either::Second(_) => {
+                        // PTT button pressed — enter TX mode
+                        log::info!("PTT pressed — switching to TX");
 
-                    // Drain any stale mic data
-                    let _ = adc.read(&mut mic_buf, 0);
+                        // Drain any stale mic data
+                        let _ = adc.read(&mut mic_buf, 0);
 
-                    while button.is_low() {
-                        // Wait for a fresh mic frame from DMA
-                        let count = adc.read_async(&mut mic_buf).await.unwrap_or(0);
+                        while button.is_low() {
+                            // Wait for a fresh mic frame from DMA
+                            let count = adc.read_async(&mut mic_buf).await.unwrap_or(0);
 
-                        let msg = format!("TX #{} ({}samp)", tx_count, count);
-                        log::info!("{}", msg);
+                            let msg = format!("TX #{} ({}samp)", tx_count, count);
+                            log::info!("{}", msg);
 
-                        // TX the raw text for now (Codec2 next)
-                        lora.prepare_for_tx(&mdltn, &mut tx_params, 22, msg.as_bytes())
-                            .await
-                            .unwrap();
-                        lora.tx().await.unwrap();
+                            // Send TX request to radio task
+                            let mut data = heapless::Vec::new();
+                            let _ = data.extend_from_slice(msg.as_bytes());
+                            TX_CHAN.send(TxRequest { data }).await;
 
+                            // Update display
+                            display.clear_buffer();
+                            Text::new(&mac_str, Point::new(1, 10), style)
+                                .draw(&mut display)
+                                .unwrap();
+
+                            line_buf.clear();
+                            let _ =
+                                core::fmt::write(&mut line_buf, format_args!("TX #{}", tx_count));
+                            Text::new(&line_buf, Point::new(30, 36), style)
+                                .draw(&mut display)
+                                .unwrap();
+                            display.flush().unwrap();
+
+                            tx_count += 1;
+                        }
+
+                        log::info!("PTT released — back to RX");
+
+                        // Redraw RX screen
                         display.clear_buffer();
                         Text::new(&mac_str, Point::new(1, 10), style)
                             .draw(&mut display)
                             .unwrap();
-
-                        line_buf.clear();
-                        let _ = core::fmt::write(&mut line_buf, format_args!("TX #{}", tx_count));
-                        Text::new(&line_buf, Point::new(30, 36), style)
+                        Text::new("RX Listening", Point::new(16, 36), style)
                             .draw(&mut display)
                             .unwrap();
                         display.flush().unwrap();
-
-                        tx_count += 1;
                     }
-
-                    log::info!("PTT released — back to RX");
-                    lora.sleep(false).await.unwrap();
-
-                    // Redraw RX screen
-                    display.clear_buffer();
-                    Text::new(&mac_str, Point::new(1, 10), style)
-                        .draw(&mut display)
-                        .unwrap();
-                    Text::new("RX Listening", Point::new(16, 36), style)
-                        .draw(&mut display)
-                        .unwrap();
-                    display.flush().unwrap();
                 }
             }
-        }
+        };
+
+        // Run radio and app tasks concurrently
+        join(radio, app).await;
     });
 }
