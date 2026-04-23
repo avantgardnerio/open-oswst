@@ -65,25 +65,25 @@ fn main() {
     block_on(async {
         let radio_fut = radio::init(radio::Peripherals {
             spi: peripherals.spi2,
-            sck: peripherals.pins.gpio9,
-            mosi: peripherals.pins.gpio10,
-            miso: peripherals.pins.gpio11,
-            nss: peripherals.pins.gpio8,
-            reset: peripherals.pins.gpio12,
-            dio1: peripherals.pins.gpio14,
-            busy: peripherals.pins.gpio13,
+            sck: peripherals.pins.gpio9.into(),
+            mosi: peripherals.pins.gpio10.into(),
+            miso: peripherals.pins.gpio11.into(),
+            nss: peripherals.pins.gpio8.into(),
+            reset: peripherals.pins.gpio12.into(),
+            dio1: peripherals.pins.gpio14.into(),
+            busy: peripherals.pins.gpio13.into(),
         })
         .await;
 
         let app_fut = app::init(
             app::Peripherals {
-                ptt: peripherals.pins.gpio0,
+                ptt: peripherals.pins.gpio0.into(),
                 audio_in: peripherals.pins.gpio7,
                 adc: peripherals.adc1,
                 i2c: peripherals.i2c0,
-                oled_sda: peripherals.pins.gpio17,
-                oled_scl: peripherals.pins.gpio18,
-                oled_rst: peripherals.pins.gpio21,
+                oled_sda: peripherals.pins.gpio17.into(),
+                oled_scl: peripherals.pins.gpio18.into(),
+                oled_rst: peripherals.pins.gpio21.into(),
             },
             mac_str,
         )

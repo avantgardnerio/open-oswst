@@ -7,7 +7,7 @@ use embedded_graphics::text::Text;
 use esp_idf_svc::hal::adc::continuous::config::Config as AdcContConfig;
 use esp_idf_svc::hal::adc::continuous::{AdcDriver as AdcContDriver, AdcMeasurement, Attenuated};
 use esp_idf_svc::hal::adc::ADC1;
-use esp_idf_svc::hal::gpio::{Gpio0, Gpio17, Gpio18, Gpio21, Gpio7};
+use esp_idf_svc::hal::gpio::{AnyIOPin, Gpio7};
 use esp_idf_svc::hal::gpio::{Input, PinDriver, Pull};
 use esp_idf_svc::hal::i2c::config::Config as I2cConfig;
 use esp_idf_svc::hal::i2c::{I2cDriver, I2C0};
@@ -28,13 +28,13 @@ type Display<'a> = Ssd1306<
 >;
 
 pub struct Peripherals {
-    pub ptt: Gpio0<'static>,
-    pub audio_in: Gpio7<'static>,
+    pub ptt: AnyIOPin<'static>,
+    pub audio_in: Gpio7<'static>, // must stay concrete — ADCPin trait is pin-specific
     pub adc: ADC1<'static>,
     pub i2c: I2C0<'static>,
-    pub oled_sda: Gpio17<'static>,
-    pub oled_scl: Gpio18<'static>,
-    pub oled_rst: Gpio21<'static>,
+    pub oled_sda: AnyIOPin<'static>,
+    pub oled_scl: AnyIOPin<'static>,
+    pub oled_rst: AnyIOPin<'static>,
 }
 
 pub async fn init(p: Peripherals, mac_str: heapless::String<18>) -> impl Future<Output = ()> {

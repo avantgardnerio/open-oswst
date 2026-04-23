@@ -1,5 +1,5 @@
 use embassy_futures::select::{select, Either};
-use esp_idf_svc::hal::gpio::{Gpio10, Gpio11, Gpio12, Gpio13, Gpio14, Gpio8, Gpio9};
+use esp_idf_svc::hal::gpio::{AnyIOPin, AnyInputPin, AnyOutputPin};
 use esp_idf_svc::hal::gpio::{Input, Output, PinDriver, Pull};
 use esp_idf_svc::hal::spi::config::Config as SpiConfig;
 use esp_idf_svc::hal::spi::{SpiDeviceDriver, SpiDriver, SpiDriverConfig, SPI2};
@@ -18,13 +18,13 @@ type Radio<'a> =
 
 pub struct Peripherals {
     pub spi: SPI2<'static>,
-    pub sck: Gpio9<'static>,
-    pub mosi: Gpio10<'static>,
-    pub miso: Gpio11<'static>,
-    pub nss: Gpio8<'static>,
-    pub reset: Gpio12<'static>,
-    pub dio1: Gpio14<'static>,
-    pub busy: Gpio13<'static>,
+    pub sck: AnyIOPin<'static>,
+    pub mosi: AnyIOPin<'static>,
+    pub miso: AnyIOPin<'static>,
+    pub nss: AnyIOPin<'static>,
+    pub reset: AnyOutputPin<'static>,
+    pub dio1: AnyInputPin<'static>,
+    pub busy: AnyInputPin<'static>,
 }
 
 pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
@@ -39,10 +39,9 @@ pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
     )
     .unwrap();
 
-    // Degrade pins for type erasure (GenericSx126xInterfaceVariant needs uniform types)
-    let reset = PinDriver::output(p.reset.degrade_output()).unwrap();
-    let dio1 = PinDriver::input(p.dio1.degrade_input(), Pull::Floating).unwrap();
-    let busy = PinDriver::input(p.busy.degrade_input(), Pull::Floating).unwrap();
+    let reset = PinDriver::output(p.reset).unwrap();
+    let dio1 = PinDriver::input(p.dio1, Pull::Floating).unwrap();
+    let busy = PinDriver::input(p.busy, Pull::Floating).unwrap();
 
     let iv = GenericSx126xInterfaceVariant::new(reset, dio1, busy, None, None).unwrap();
 
