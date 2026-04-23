@@ -9,22 +9,34 @@ use embedded_graphics::prelude::*;
 use embedded_graphics::text::Text;
 use esp_idf_svc::hal::adc::continuous::config::Config as AdcContConfig;
 use esp_idf_svc::hal::adc::continuous::{AdcDriver as AdcContDriver, AdcMeasurement, Attenuated};
-use esp_idf_svc::hal::gpio::{PinDriver, Pull};
+use esp_idf_svc::hal::gpio::{Input, Output, PinDriver, Pull};
 use esp_idf_svc::hal::i2c::config::Config as I2cConfig;
 use esp_idf_svc::hal::i2c::I2cDriver;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::hal::spi::config::Config as SpiConfig;
-use esp_idf_svc::hal::spi::{SpiDeviceDriver, SpiDriverConfig};
+use esp_idf_svc::hal::spi::{SpiDeviceDriver, SpiDriver, SpiDriverConfig};
 use esp_idf_svc::hal::task::block_on;
 use esp_idf_svc::hal::units::Hertz;
 use lora_phy::iv::GenericSx126xInterfaceVariant;
 use lora_phy::mod_params::*;
 use lora_phy::sx126x::{self, Sx1262, Sx126x, TcxoCtrlVoltage};
 use lora_phy::LoRa;
+use ssd1306::mode::BufferedGraphicsMode;
 use ssd1306::prelude::*;
 use ssd1306::{I2CDisplayInterface, Ssd1306};
 use std::thread;
 use std::time::Duration;
+
+// --- Concrete type aliases ---
+
+type Iv<'a> = GenericSx126xInterfaceVariant<PinDriver<'a, Output>, PinDriver<'a, Input>>;
+type Radio<'a> =
+    LoRa<Sx126x<SpiDeviceDriver<'a, SpiDriver<'a>>, Iv<'a>, Sx1262>, embassy_time::Delay>;
+type Display<'a> = Ssd1306<
+    I2CInterface<I2cDriver<'a>>,
+    DisplaySize128x64,
+    BufferedGraphicsMode<DisplaySize128x64>,
+>;
 
 // --- Channel message types ---
 
@@ -42,6 +54,158 @@ struct TxRequest {
 
 static RX_CHAN: Channel<CriticalSectionRawMutex, RxPacket, 2> = Channel::new();
 static TX_CHAN: Channel<CriticalSectionRawMutex, TxRequest, 4> = Channel::new();
+
+// --- Radio task: exclusively owns LoRa hardware ---
+
+async fn radio_task(
+    mut lora: Radio<'_>,
+    mdltn: ModulationParams,
+    mut tx_params: PacketParams,
+    rx_params: PacketParams,
+) {
+    let mut rx_buf = [0u8; 255];
+
+    loop {
+        lora.prepare_for_rx(RxMode::Continuous, &mdltn, &rx_params)
+            .await
+            .unwrap();
+
+        match select(lora.rx(&rx_params, &mut rx_buf), TX_CHAN.receive()).await {
+            Either::First(rx_result) => match rx_result {
+                Ok((len, status)) => {
+                    let mut data = heapless::Vec::new();
+                    let _ = data.extend_from_slice(&rx_buf[..len as usize]);
+                    RX_CHAN
+                        .send(RxPacket {
+                            data,
+                            rssi: status.rssi,
+                            snr: status.snr,
+                        })
+                        .await;
+                }
+                Err(e) => {
+                    log::error!("RX error: {:?}", e);
+                }
+            },
+            Either::Second(tx_req) => {
+                lora.enter_standby().await.unwrap();
+                lora.prepare_for_tx(&mdltn, &mut tx_params, 22, &tx_req.data)
+                    .await
+                    .unwrap();
+                lora.tx().await.unwrap();
+            }
+        }
+    }
+}
+
+// --- App task: owns button, ADC, display ---
+
+async fn app_task(
+    mut button: PinDriver<'_, Input>,
+    mut adc: AdcContDriver<'_>,
+    mut display: Display<'_>,
+    mac_str: &str,
+) {
+    let style = MonoTextStyleBuilder::new()
+        .font(&FONT_6X10)
+        .text_color(BinaryColor::On)
+        .build();
+
+    let mut tx_count: u32 = 0;
+    let mut line_buf = heapless::String::<64>::new();
+    let mut mic_buf = [AdcMeasurement::new(); 320];
+
+    // Show initial RX state
+    draw_rx_screen(&mut display, mac_str, &style);
+
+    loop {
+        match select(RX_CHAN.receive(), button.wait_for_low()).await {
+            Either::First(rx_pkt) => {
+                let msg = core::str::from_utf8(&rx_pkt.data).unwrap_or("???");
+                log::info!(
+                    "RX [{}B] rssi={}dBm snr={}dB: {}",
+                    rx_pkt.data.len(),
+                    rx_pkt.rssi,
+                    rx_pkt.snr,
+                    msg
+                );
+
+                display.clear_buffer();
+                Text::new(mac_str, Point::new(1, 10), style)
+                    .draw(&mut display)
+                    .unwrap();
+                Text::new(msg, Point::new(0, 32), style)
+                    .draw(&mut display)
+                    .unwrap();
+
+                line_buf.clear();
+                let _ = core::fmt::write(
+                    &mut line_buf,
+                    format_args!("RSSI:{} SNR:{}", rx_pkt.rssi, rx_pkt.snr),
+                );
+                Text::new(&line_buf, Point::new(0, 48), style)
+                    .draw(&mut display)
+                    .unwrap();
+                display.flush().unwrap();
+            }
+            Either::Second(_) => {
+                // PTT button pressed — enter TX mode
+                log::info!("PTT pressed — switching to TX");
+
+                // Drain any stale mic data
+                let _ = adc.read(&mut mic_buf, 0);
+
+                while button.is_low() {
+                    // Wait for a fresh mic frame from DMA
+                    let count = adc.read_async(&mut mic_buf).await.unwrap_or(0);
+
+                    let msg = format!("TX #{} ({}samp)", tx_count, count);
+                    log::info!("{}", msg);
+
+                    // Send TX request to radio task
+                    let mut data = heapless::Vec::new();
+                    let _ = data.extend_from_slice(msg.as_bytes());
+                    TX_CHAN.send(TxRequest { data }).await;
+
+                    // Update display
+                    display.clear_buffer();
+                    Text::new(mac_str, Point::new(1, 10), style)
+                        .draw(&mut display)
+                        .unwrap();
+
+                    line_buf.clear();
+                    let _ = core::fmt::write(&mut line_buf, format_args!("TX #{}", tx_count));
+                    Text::new(&line_buf, Point::new(30, 36), style)
+                        .draw(&mut display)
+                        .unwrap();
+                    display.flush().unwrap();
+
+                    tx_count += 1;
+                }
+
+                log::info!("PTT released — back to RX");
+
+                // Redraw RX screen
+                draw_rx_screen(&mut display, mac_str, &style);
+            }
+        }
+    }
+}
+
+fn draw_rx_screen(
+    display: &mut Display<'_>,
+    mac_str: &str,
+    style: &embedded_graphics::mono_font::MonoTextStyle<BinaryColor>,
+) {
+    display.clear_buffer();
+    Text::new(mac_str, Point::new(1, 10), *style)
+        .draw(display)
+        .unwrap();
+    Text::new("RX Listening", Point::new(16, 36), *style)
+        .draw(display)
+        .unwrap();
+    display.flush().unwrap();
+}
 
 /// Read the base MAC address from eFuse
 fn get_mac() -> [u8; 6] {
@@ -63,7 +227,7 @@ fn main() {
     let peripherals = Peripherals::take().unwrap();
 
     // PRG button on GPIO0 — active LOW with internal pull-up
-    let mut button = PinDriver::input(peripherals.pins.gpio0, Pull::Up).unwrap();
+    let button = PinDriver::input(peripherals.pins.gpio0, Pull::Up).unwrap();
 
     // Continuous ADC for mic on GPIO7 (ADC1_CH6) — DMA at 8kHz
     let adc_config = AdcContConfig::new()
@@ -138,11 +302,6 @@ fn main() {
         display.set_brightness(Brightness::BRIGHTEST).unwrap();
         log::info!("OLED initialized, MAC: {}", mac_str);
 
-        let style = MonoTextStyleBuilder::new()
-            .font(&FONT_6X10)
-            .text_color(BinaryColor::On)
-            .build();
-
         // LoRa init
         let iv = GenericSx126xInterfaceVariant::new(lora_reset, lora_dio1, lora_busy, None, None)
             .unwrap();
@@ -168,7 +327,7 @@ fn main() {
             )
             .unwrap();
 
-        let mut tx_params = lora
+        let tx_params = lora
             .create_tx_packet_params(8, false, true, false, &mdltn)
             .unwrap();
 
@@ -180,143 +339,11 @@ fn main() {
         adc.start().unwrap();
         log::info!("ADC DMA started at 8kHz");
 
-        // --- Radio task: exclusively owns lora, mdltn, tx_params, rx_params ---
-        let radio = async {
-            let mut rx_buf = [0u8; 255];
-
-            loop {
-                lora.prepare_for_rx(RxMode::Continuous, &mdltn, &rx_params)
-                    .await
-                    .unwrap();
-
-                match select(lora.rx(&rx_params, &mut rx_buf), TX_CHAN.receive()).await {
-                    Either::First(rx_result) => match rx_result {
-                        Ok((len, status)) => {
-                            let mut data = heapless::Vec::new();
-                            let _ = data.extend_from_slice(&rx_buf[..len as usize]);
-                            RX_CHAN
-                                .send(RxPacket {
-                                    data,
-                                    rssi: status.rssi,
-                                    snr: status.snr,
-                                })
-                                .await;
-                        }
-                        Err(e) => {
-                            log::error!("RX error: {:?}", e);
-                        }
-                    },
-                    Either::Second(tx_req) => {
-                        // TX request received — cancel RX, transmit, loop back to RX
-                        lora.enter_standby().await.unwrap();
-                        lora.prepare_for_tx(&mdltn, &mut tx_params, 22, &tx_req.data)
-                            .await
-                            .unwrap();
-                        lora.tx().await.unwrap();
-                    }
-                }
-            }
-        };
-
-        // --- App task: owns button, adc, display ---
-        let app = async {
-            let mut tx_count: u32 = 0;
-            let mut line_buf = heapless::String::<64>::new();
-            let mut mic_buf = [AdcMeasurement::new(); 320];
-
-            // Show initial RX state
-            display.clear_buffer();
-            Text::new(&mac_str, Point::new(1, 10), style)
-                .draw(&mut display)
-                .unwrap();
-            Text::new("RX Listening", Point::new(16, 36), style)
-                .draw(&mut display)
-                .unwrap();
-            display.flush().unwrap();
-
-            loop {
-                match select(RX_CHAN.receive(), button.wait_for_low()).await {
-                    Either::First(rx_pkt) => {
-                        let msg = core::str::from_utf8(&rx_pkt.data).unwrap_or("???");
-                        log::info!(
-                            "RX [{}B] rssi={}dBm snr={}dB: {}",
-                            rx_pkt.data.len(),
-                            rx_pkt.rssi,
-                            rx_pkt.snr,
-                            msg
-                        );
-
-                        display.clear_buffer();
-                        Text::new(&mac_str, Point::new(1, 10), style)
-                            .draw(&mut display)
-                            .unwrap();
-                        Text::new(msg, Point::new(0, 32), style)
-                            .draw(&mut display)
-                            .unwrap();
-
-                        line_buf.clear();
-                        let _ = core::fmt::write(
-                            &mut line_buf,
-                            format_args!("RSSI:{} SNR:{}", rx_pkt.rssi, rx_pkt.snr),
-                        );
-                        Text::new(&line_buf, Point::new(0, 48), style)
-                            .draw(&mut display)
-                            .unwrap();
-                        display.flush().unwrap();
-                    }
-                    Either::Second(_) => {
-                        // PTT button pressed — enter TX mode
-                        log::info!("PTT pressed — switching to TX");
-
-                        // Drain any stale mic data
-                        let _ = adc.read(&mut mic_buf, 0);
-
-                        while button.is_low() {
-                            // Wait for a fresh mic frame from DMA
-                            let count = adc.read_async(&mut mic_buf).await.unwrap_or(0);
-
-                            let msg = format!("TX #{} ({}samp)", tx_count, count);
-                            log::info!("{}", msg);
-
-                            // Send TX request to radio task
-                            let mut data = heapless::Vec::new();
-                            let _ = data.extend_from_slice(msg.as_bytes());
-                            TX_CHAN.send(TxRequest { data }).await;
-
-                            // Update display
-                            display.clear_buffer();
-                            Text::new(&mac_str, Point::new(1, 10), style)
-                                .draw(&mut display)
-                                .unwrap();
-
-                            line_buf.clear();
-                            let _ =
-                                core::fmt::write(&mut line_buf, format_args!("TX #{}", tx_count));
-                            Text::new(&line_buf, Point::new(30, 36), style)
-                                .draw(&mut display)
-                                .unwrap();
-                            display.flush().unwrap();
-
-                            tx_count += 1;
-                        }
-
-                        log::info!("PTT released — back to RX");
-
-                        // Redraw RX screen
-                        display.clear_buffer();
-                        Text::new(&mac_str, Point::new(1, 10), style)
-                            .draw(&mut display)
-                            .unwrap();
-                        Text::new("RX Listening", Point::new(16, 36), style)
-                            .draw(&mut display)
-                            .unwrap();
-                        display.flush().unwrap();
-                    }
-                }
-            }
-        };
-
         // Run radio and app tasks concurrently
-        join(radio, app).await;
+        join(
+            radio_task(lora, mdltn, tx_params, rx_params),
+            app_task(button, adc, display, &mac_str),
+        )
+        .await;
     });
 }
