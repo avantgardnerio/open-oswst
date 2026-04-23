@@ -4,7 +4,11 @@ use embedded_graphics::mono_font::ascii::FONT_6X10;
 use embedded_graphics::mono_font::MonoTextStyleBuilder;
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
+use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
 use embedded_graphics::text::Text;
+use esp_idf_svc::hal::adc::attenuation::DB_12;
+use esp_idf_svc::hal::adc::oneshot::config::AdcChannelConfig;
+use esp_idf_svc::hal::adc::oneshot::*;
 use esp_idf_svc::hal::gpio::{PinDriver, Pull};
 use esp_idf_svc::hal::i2c::config::Config as I2cConfig;
 use esp_idf_svc::hal::i2c::I2cDriver;
@@ -22,6 +26,18 @@ use ssd1306::{I2CDisplayInterface, Ssd1306};
 use std::thread;
 use std::time::Duration;
 
+/// Read the base MAC address from eFuse
+fn get_mac() -> [u8; 6] {
+    let mut mac = [0u8; 6];
+    unsafe {
+        esp_idf_svc::sys::esp_read_mac(
+            mac.as_mut_ptr(),
+            esp_idf_svc::sys::esp_mac_type_t_ESP_MAC_WIFI_STA,
+        );
+    }
+    mac
+}
+
 fn main() {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
@@ -30,7 +46,15 @@ fn main() {
     let peripherals = Peripherals::take().unwrap();
 
     // PRG button on GPIO0 — active LOW with internal pull-up
-    let mut button = PinDriver::input(peripherals.pins.gpio0, Pull::Up).unwrap();
+    let button = PinDriver::input(peripherals.pins.gpio0, Pull::Up).unwrap();
+
+    // ADC for mic on GPIO7 (ADC1_CH6)
+    let adc = AdcDriver::new(peripherals.adc1).unwrap();
+    let adc_config = AdcChannelConfig {
+        attenuation: DB_12,
+        ..Default::default()
+    };
+    let mut mic_pin = AdcChannelDriver::new(&adc, peripherals.pins.gpio7, &adc_config).unwrap();
 
     // Enable Vext power (GPIO36 LOW = on) — must keep _vext alive or power turns off
     let mut _vext = PinDriver::output(peripherals.pins.gpio36).unwrap();
@@ -72,6 +96,17 @@ fn main() {
     let lora_busy =
         PinDriver::input(peripherals.pins.gpio13.degrade_input(), Pull::Floating).unwrap();
 
+    // Get MAC for display
+    let mac = get_mac();
+    let mut mac_str = heapless::String::<18>::new();
+    let _ = core::fmt::write(
+        &mut mac_str,
+        format_args!(
+            "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        ),
+    );
+
     block_on(async {
         // OLED init
         let interface = I2CDisplayInterface::new(i2c);
@@ -79,7 +114,7 @@ fn main() {
             .into_buffered_graphics_mode();
         display.init().unwrap();
         display.set_brightness(Brightness::BRIGHTEST).unwrap();
-        log::info!("OLED initialized");
+        log::info!("OLED initialized, MAC: {}", mac_str);
 
         let style = MonoTextStyleBuilder::new()
             .font(&FONT_6X10)
@@ -124,9 +159,9 @@ fn main() {
         let mut rx_buf = [0u8; 255];
         let mut line_buf = heapless::String::<64>::new();
 
-        // Show initial RX state
+        // Show initial RX state with MAC and VU meter
         display.clear_buffer();
-        Text::new("LORAUDIO", Point::new(30, 12), style)
+        Text::new(&mac_str, Point::new(1, 10), style)
             .draw(&mut display)
             .unwrap();
         Text::new("RX Listening", Point::new(16, 36), style)
@@ -135,87 +170,118 @@ fn main() {
         display.flush().unwrap();
 
         loop {
+            // Sample mic and update VU meter
+            let mut peak: u16 = 0;
+            for _ in 0..64 {
+                let sample = adc.read_raw(&mut mic_pin).unwrap_or(0);
+                let deviation = (sample as i32 - 2048).unsigned_abs() as u16;
+                if deviation > peak {
+                    peak = deviation;
+                }
+            }
+            let bar_width = ((peak as u32) * 128 / 2048).min(128) as u32;
 
-            // Enter continuous RX
+            // Draw VU bar at bottom of screen
+            Rectangle::new(Point::new(0, 56), Size::new(128, 8))
+                .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
+                .draw(&mut display)
+                .unwrap();
+            if bar_width > 0 {
+                Rectangle::new(Point::new(0, 56), Size::new(bar_width, 8))
+                    .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+                    .draw(&mut display)
+                    .unwrap();
+            }
+            display.flush().unwrap();
+
+            // Check PTT button (non-blocking)
+            if button.is_low() {
+                log::info!("PTT pressed — switching to TX");
+
+                // TX while button held
+                while button.is_low() {
+                    let msg = format!("LORAUDIO #{}", tx_count);
+                    log::info!("TX: {}", msg);
+
+                    lora.prepare_for_tx(&mdltn, &mut tx_params, 22, msg.as_bytes())
+                        .await
+                        .unwrap();
+                    lora.tx().await.unwrap();
+
+                    // Update OLED
+                    display.clear_buffer();
+                    Text::new(&mac_str, Point::new(1, 10), style)
+                        .draw(&mut display)
+                        .unwrap();
+
+                    line_buf.clear();
+                    let _ = core::fmt::write(&mut line_buf, format_args!("TX #{}", tx_count));
+                    Text::new(&line_buf, Point::new(30, 36), style)
+                        .draw(&mut display)
+                        .unwrap();
+                    display.flush().unwrap();
+
+                    tx_count += 1;
+                    Timer::after_millis(200).await;
+                }
+
+                log::info!("PTT released — back to RX");
+                lora.sleep(false).await.unwrap();
+
+                // Redraw RX screen
+                display.clear_buffer();
+                Text::new(&mac_str, Point::new(1, 10), style)
+                    .draw(&mut display)
+                    .unwrap();
+                Text::new("RX Listening", Point::new(16, 36), style)
+                    .draw(&mut display)
+                    .unwrap();
+                display.flush().unwrap();
+                continue;
+            }
+
+            // Short RX window — listen for a packet with timeout, then loop back for VU update
             lora.prepare_for_rx(RxMode::Continuous, &mdltn, &rx_params)
                 .await
                 .unwrap();
-            log::info!("Listening...");
 
-            // Race: RX packet vs PTT button press
-            match select(lora.rx(&rx_params, &mut rx_buf), button.wait_for_low()).await {
-                Either::First(rx_result) => {
-                    // Packet received
-                    match rx_result {
-                        Ok((len, status)) => {
-                            let msg =
-                                core::str::from_utf8(&rx_buf[..len as usize]).unwrap_or("???");
-                            log::info!(
-                                "RX [{}B] rssi={}dBm snr={}dB: {}",
-                                len,
-                                status.rssi,
-                                status.snr,
-                                msg
-                            );
+            match select(lora.rx(&rx_params, &mut rx_buf), Timer::after_millis(50)).await {
+                Either::First(rx_result) => match rx_result {
+                    Ok((len, status)) => {
+                        let msg = core::str::from_utf8(&rx_buf[..len as usize]).unwrap_or("???");
+                        log::info!(
+                            "RX [{}B] rssi={}dBm snr={}dB: {}",
+                            len,
+                            status.rssi,
+                            status.snr,
+                            msg
+                        );
 
-                            // Show received message on OLED
-                            display.clear_buffer();
-                            Text::new("LORAUDIO", Point::new(30, 12), style)
-                                .draw(&mut display)
-                                .unwrap();
-                            Text::new(msg, Point::new(0, 32), style)
-                                .draw(&mut display)
-                                .unwrap();
-
-                            line_buf.clear();
-                            let _ = core::fmt::write(
-                                &mut line_buf,
-                                format_args!("RSSI:{} SNR:{}", status.rssi, status.snr),
-                            );
-                            Text::new(&line_buf, Point::new(0, 48), style)
-                                .draw(&mut display)
-                                .unwrap();
-                            display.flush().unwrap();
-                        }
-                        Err(e) => {
-                            log::error!("RX error: {:?}", e);
-                        }
-                    }
-                }
-                Either::Second(_) => {
-                    // PTT button pressed — cancel RX, enter TX mode
-                    log::info!("PTT pressed — switching to TX");
-                    lora.enter_standby().await.unwrap();
-
-                    // TX while button held
-                    while button.is_low() {
-                        let msg = format!("LORAUDIO #{}", tx_count);
-                        log::info!("TX: {}", msg);
-
-                        lora.prepare_for_tx(&mdltn, &mut tx_params, 22, msg.as_bytes())
-                            .await
-                            .unwrap();
-                        lora.tx().await.unwrap();
-
-                        // Update OLED
                         display.clear_buffer();
-                        Text::new("LORAUDIO", Point::new(30, 12), style)
+                        Text::new(&mac_str, Point::new(1, 10), style)
+                            .draw(&mut display)
+                            .unwrap();
+                        Text::new(msg, Point::new(0, 32), style)
                             .draw(&mut display)
                             .unwrap();
 
                         line_buf.clear();
-                        let _ = core::fmt::write(&mut line_buf, format_args!("TX #{}", tx_count));
-                        Text::new(&line_buf, Point::new(30, 36), style)
+                        let _ = core::fmt::write(
+                            &mut line_buf,
+                            format_args!("RSSI:{} SNR:{}", status.rssi, status.snr),
+                        );
+                        Text::new(&line_buf, Point::new(0, 48), style)
                             .draw(&mut display)
                             .unwrap();
                         display.flush().unwrap();
-
-                        tx_count += 1;
-                        Timer::after_millis(200).await;
                     }
-
-                    log::info!("PTT released — back to RX");
-                    lora.sleep(false).await.unwrap();
+                    Err(e) => {
+                        log::error!("RX error: {:?}", e);
+                    }
+                },
+                Either::Second(_) => {
+                    // Timeout — no packet, loop back to update VU meter
+                    lora.enter_standby().await.unwrap();
                 }
             }
         }
