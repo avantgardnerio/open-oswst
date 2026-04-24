@@ -196,9 +196,11 @@ async fn app_loop(
                             stereo_frame[j * 2] = sample;
                             stereo_frame[j * 2 + 1] = sample;
                         }
-                        i2s_tx
-                            .write_all(pcm_as_bytes(&stereo_frame), esp_idf_svc::hal::delay::BLOCK)
-                            .unwrap();
+                        // Drop frame if DMA buffer is full rather than stalling the event loop
+                        let _ = i2s_tx.write_all(
+                            pcm_as_bytes(&stereo_frame),
+                            esp_idf_svc::hal::delay::TickType::new_millis(5).into(),
+                        );
                     }
                     let decode_ms = t0.elapsed().as_millis();
 
