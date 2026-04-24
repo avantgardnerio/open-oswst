@@ -217,9 +217,10 @@ async fn app_loop(
                     continue;
                 }
 
-                // Header-only = end of transmission
+                // Header-only = end of transmission — play squelch tail
                 if rx_pkt.data.len() == HEADER_BYTES {
                     log::info!("RX EOT from txid={}", txid);
+                    play_squelch_tail(&mut i2s_tx);
                     reset_rx_state(&mut cur_txid, &mut last_played_seq, &mut seq_buf);
                     continue;
                 }
@@ -369,6 +370,24 @@ async fn app_loop(
             }
         }
     }
+}
+
+/// Play ~250ms of white noise with fade-out as a squelch tail.
+fn play_squelch_tail(i2s_tx: &mut I2sDriver<'_, I2sTx>) {
+    const TAIL_SAMPLES: usize = 2000; // 250ms at 8kHz
+    const AMPLITUDE: i32 = 8000;
+    let mut buf = vec![0i16; TAIL_SAMPLES * 2].into_boxed_slice(); // stereo
+    for i in 0..TAIL_SAMPLES {
+        let fade = (TAIL_SAMPLES - i) as i32 * AMPLITUDE / TAIL_SAMPLES as i32;
+        let noise = ((unsafe { esp_idf_svc::sys::esp_random() } % (2 * fade as u32 + 1)) as i32
+            - fade) as i16;
+        buf[i * 2] = noise;
+        buf[i * 2 + 1] = noise;
+    }
+    let _ = i2s_tx.write_all(
+        pcm_as_bytes(&buf),
+        esp_idf_svc::hal::delay::TickType::new_millis(5).into(),
+    );
 }
 
 fn reset_rx_state(
