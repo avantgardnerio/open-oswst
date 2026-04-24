@@ -1,6 +1,7 @@
-//! Audio loopback test — hold PTT to record, release to play back.
+//! Audio loopback test with Codec2 — hold PTT to record, release to encode→decode→play.
 //! Build & flash: cargo build --bin audio_test && espflash flash -p /dev/ttyACM1 target/xtensa-esp32s3-espidf/debug/audio_test
 
+use codec2::{Codec2, Codec2Mode};
 use esp_idf_svc::hal::adc::continuous::config::Config as AdcContConfig;
 use esp_idf_svc::hal::adc::continuous::{AdcDriver as AdcContDriver, AdcMeasurement, Attenuated};
 use esp_idf_svc::hal::delay::BLOCK;
@@ -15,8 +16,13 @@ use esp_idf_svc::hal::units::Hertz;
 use std::thread;
 use std::time::Duration;
 
-/// Max recording: 5 seconds at 8kHz = 40000 mono samples
-const MAX_SAMPLES: usize = 8000 * 5;
+/// Codec2 MODE_1200: 320 samples (40ms) → 6 bytes per frame
+const FRAME_SAMPLES: usize = 320;
+const FRAME_BYTES: usize = 6;
+
+/// Max recording: 5 seconds = 125 Codec2 frames
+const MAX_FRAMES: usize = 125;
+const MAX_SAMPLES: usize = MAX_FRAMES * FRAME_SAMPLES; // 40000
 
 /// Convert 12-bit unsigned ADC to signed 16-bit PCM.
 fn adc_to_pcm(sample: &AdcMeasurement) -> i16 {
@@ -70,12 +76,19 @@ fn main() {
     .unwrap();
     i2s.tx_enable().unwrap();
 
-    // Heap buffers
-    let mut mic_buf = vec![AdcMeasurement::new(); 320];
-    let mut rec_buf = vec![0i16; MAX_SAMPLES]; // mono recording buffer
-    let mut stereo_buf = vec![0i16; 640]; // one frame stereo interleaved
+    // Codec2 encoder + decoder
+    let mut encoder = Box::new(Codec2::new(Codec2Mode::MODE_1200));
+    let mut decoder = Box::new(Codec2::new(Codec2Mode::MODE_1200));
+    log::info!("Codec2 initialized (MODE_1200)");
 
-    log::info!("Ready — hold PTT to record (max 5s), release to play back");
+    // Heap buffers
+    let mut mic_buf = vec![AdcMeasurement::new(); FRAME_SAMPLES];
+    let mut rec_buf = vec![0i16; MAX_SAMPLES]; // mono recording buffer
+    let mut codec_buf = vec![0u8; MAX_FRAMES * FRAME_BYTES]; // encoded frames
+    let mut decode_buf = vec![0i16; FRAME_SAMPLES];
+    let mut stereo_buf = vec![0i16; FRAME_SAMPLES * 2]; // one frame stereo interleaved
+
+    log::info!("Ready — hold PTT to record (max 5s), release to encode→decode→play");
 
     adc.start().unwrap();
 
@@ -99,25 +112,43 @@ fn main() {
             }
             rec_len += n;
         }
-        log::info!("Recorded {} samples ({}ms)", rec_len, rec_len / 8);
+        // Round down to whole Codec2 frames
+        let num_frames = rec_len / FRAME_SAMPLES;
+        let rec_len = num_frames * FRAME_SAMPLES;
+        log::info!(
+            "Recorded {} samples ({}ms, {} frames)",
+            rec_len,
+            rec_len / 8,
+            num_frames
+        );
 
-        // --- Play back ---
-        log::info!("Playing...");
-        let mut offset = 0;
-        while offset < rec_len {
-            let chunk = (rec_len - offset).min(320);
-            for i in 0..chunk {
-                stereo_buf[i * 2] = rec_buf[offset + i];
-                stereo_buf[i * 2 + 1] = rec_buf[offset + i];
+        // --- Encode ---
+        log::info!("Encoding...");
+        let t0 = std::time::Instant::now();
+        for f in 0..num_frames {
+            let pcm = &rec_buf[f * FRAME_SAMPLES..(f + 1) * FRAME_SAMPLES];
+            let coded = &mut codec_buf[f * FRAME_BYTES..(f + 1) * FRAME_BYTES];
+            encoder.encode(coded, pcm);
+        }
+        let enc_ms = t0.elapsed().as_millis();
+        log::info!(
+            "Encoded {} frames in {}ms ({}ms/frame)",
+            num_frames,
+            enc_ms,
+            enc_ms / num_frames as u128
+        );
+
+        // --- Decode + Play ---
+        log::info!("Decoding + playing...");
+        for f in 0..num_frames {
+            let coded = &codec_buf[f * FRAME_BYTES..(f + 1) * FRAME_BYTES];
+            decoder.decode(&mut decode_buf, coded);
+
+            for (i, &sample) in decode_buf.iter().enumerate() {
+                stereo_buf[i * 2] = sample;
+                stereo_buf[i * 2 + 1] = sample;
             }
-            // Zero-pad last chunk if short
-            for i in chunk..320 {
-                stereo_buf[i * 2] = 0;
-                stereo_buf[i * 2 + 1] = 0;
-            }
-            i2s.write_all(pcm_as_bytes(&stereo_buf[..chunk * 2]), BLOCK)
-                .unwrap();
-            offset += chunk;
+            i2s.write_all(pcm_as_bytes(&stereo_buf), BLOCK).unwrap();
         }
         log::info!("Playback done");
     }
