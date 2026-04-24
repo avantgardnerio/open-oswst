@@ -1072,10 +1072,12 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 [[package]]
 name = "lora-modulation"
 version = "0.1.5"
+source = "git+https://github.com/lora-rs/lora-rs?branch=main#1496e2dcd628195b4e8d0ba4a0b1fde12e1679d4"
 
 [[package]]
 name = "lora-phy"
 version = "3.0.2-alpha"
+source = "git+https://github.com/lora-rs/lora-rs?branch=main#1496e2dcd628195b4e8d0ba4a0b1fde12e1679d4"
 dependencies = [
  "document-features",
  "embedded-hal 1.0.0",

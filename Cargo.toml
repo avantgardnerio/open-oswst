@@ -25,7 +25,7 @@ esp-idf-svc = { version = "0.52.1", features = ["critical-section", "embassy-tim
 embassy-time = { version = "0.5", features = ["generic-queue-8"] }
 embassy-futures = "0.1"
 embassy-sync = "0.7"
-lora-phy = { path = "../lora-rs/lora-phy" }
+lora-phy = { git = "https://github.com/lora-rs/lora-rs", branch = "main" }
 ssd1306 = "0.9"
 embedded-graphics = "0.8"
 heapless = "0.8"
