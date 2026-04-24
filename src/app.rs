@@ -190,9 +190,9 @@ async fn app_loop(
 
         match select(RX_CHAN.receive(), button.wait_for_low()).await {
             Either::First(rx_pkt) => {
-                if rx_pkt.data.len() != PACKET_BYTES {
+                if rx_pkt.data.len() < HEADER_BYTES {
                     log::warn!(
-                        "RX [{}B] unexpected size, rssi={} snr={}",
+                        "RX [{}B] too short, rssi={} snr={}",
                         rx_pkt.data.len(),
                         rx_pkt.rssi,
                         rx_pkt.snr
@@ -202,9 +202,33 @@ async fn app_loop(
 
                 // Parse 2-byte header: |5b type|7b txid|4b seq|
                 let header = u16::from_be_bytes([rx_pkt.data[0], rx_pkt.data[1]]);
-                let _pkt_type = (header >> 11) as u8;
+                let pkt_type = (header >> 11) as u8;
                 let txid = ((header >> 4) & 0x7F) as u8;
                 let seq = (header & 0x0F) as u8;
+
+                if pkt_type != PKT_TYPE_VOICE {
+                    log::warn!(
+                        "RX unknown pkt_type={} header=0x{:04X} raw=[0x{:02X},0x{:02X}]",
+                        pkt_type,
+                        header,
+                        rx_pkt.data[0],
+                        rx_pkt.data[1]
+                    );
+                    continue;
+                }
+
+                // Header-only = end of transmission
+                if rx_pkt.data.len() == HEADER_BYTES {
+                    log::info!("RX EOT from txid={}", txid);
+                    reset_rx_state(&mut cur_txid, &mut last_played_seq, &mut seq_buf);
+                    continue;
+                }
+
+                if rx_pkt.data.len() != PACKET_BYTES {
+                    log::warn!("RX [{}B] unexpected size, ignoring", rx_pkt.data.len());
+                    continue;
+                }
+
                 let payload = &rx_pkt.data[HEADER_BYTES..];
 
                 if cur_txid.is_none() {
@@ -331,7 +355,14 @@ async fn app_loop(
                     seq = (seq + 1) & 0x0F; // wrap at 16
                 }
 
-                log::info!("PTT released — {} packets sent", tx_count);
+                // Send header-only EOT packet
+                let eot_header: u16 =
+                    (PKT_TYPE_VOICE as u16) << 11 | (txid as u16) << 4 | seq as u16;
+                let mut eot_data = heapless::Vec::new();
+                let _ = eot_data.extend_from_slice(&eot_header.to_be_bytes());
+                TX_CHAN.send(TxRequest { data: eot_data }).await;
+
+                log::info!("PTT released — {} packets sent + EOT", tx_count);
 
                 // Redraw RX screen
                 draw_rx_screen(&mut display, mac_str, &style, &mut line_buf);
