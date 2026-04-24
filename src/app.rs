@@ -170,82 +170,55 @@ async fn app_loop(
     let mut pcm_buf = vec![0i16; CODEC2_FRAME_SAMPLES].into_boxed_slice();
     let mut decode_buf = vec![0i16; CODEC2_FRAME_SAMPLES].into_boxed_slice();
 
+    // Track current transmitter for seq ordering
+    let mut cur_txid: Option<u8> = None;
+    let mut last_played_seq: u8 = 0;
+
     // Show initial RX state
     draw_rx_screen(&mut display, mac_str, &style, &mut line_buf);
 
     loop {
         match select(RX_CHAN.receive(), button.wait_for_low()).await {
             Either::First(rx_pkt) => {
-                if rx_pkt.data.len() == PACKET_BYTES {
-                    // Parse 2-byte header: |5b type|7b txid|4b seq|
-                    let header = u16::from_be_bytes([rx_pkt.data[0], rx_pkt.data[1]]);
-                    let _pkt_type = (header >> 11) as u8;
-                    let txid = ((header >> 4) & 0x7F) as u8;
-                    let seq = (header & 0x0F) as u8;
-                    let payload = &rx_pkt.data[HEADER_BYTES..];
-
-                    // Unpack, decode, and play each frame immediately
-                    let t0 = Instant::now();
-                    let mut stereo_frame = vec![0i16; CODEC2_FRAME_SAMPLES * 2].into_boxed_slice();
-                    for i in 0..FRAMES_PER_PACKET {
-                        let coded = &payload[i * CODEC2_FRAME_BYTES..(i + 1) * CODEC2_FRAME_BYTES];
-                        decoder.decode(&mut decode_buf, coded);
-
-                        // Interleave mono→stereo
-                        for (j, &sample) in decode_buf.iter().enumerate() {
-                            stereo_frame[j * 2] = sample;
-                            stereo_frame[j * 2 + 1] = sample;
-                        }
-                        // Drop frame if DMA buffer is full rather than stalling the event loop
-                        let _ = i2s_tx.write_all(
-                            pcm_as_bytes(&stereo_frame),
-                            esp_idf_svc::hal::delay::TickType::new_millis(5).into(),
-                        );
-                    }
-                    let decode_ms = t0.elapsed().as_millis();
-
-                    log::info!(
-                        "RX [{}B] txid={} seq={} rssi={} snr={} dec={}ms",
-                        rx_pkt.data.len(),
-                        txid,
-                        seq,
-                        rx_pkt.rssi,
-                        rx_pkt.snr,
-                        decode_ms,
-                    );
-
-                    display.clear_buffer();
-                    Text::new(mac_str, Point::new(1, 10), style)
-                        .draw(&mut display)
-                        .unwrap();
-                    Text::new("RX Audio", Point::new(28, 32), style)
-                        .draw(&mut display)
-                        .unwrap();
-
-                    line_buf.clear();
-                    let _ = core::fmt::write(
-                        &mut line_buf,
-                        format_args!("RSSI:{} SNR:{}", rx_pkt.rssi, rx_pkt.snr),
-                    );
-                    Text::new(&line_buf, Point::new(0, 48), style)
-                        .draw(&mut display)
-                        .unwrap();
-
-                    let pct = CHAN_USE_PCT.load(Ordering::Relaxed);
-                    line_buf.clear();
-                    let _ = core::fmt::write(&mut line_buf, format_args!("CH:{}%", pct));
-                    Text::new(&line_buf, Point::new(0, 60), style)
-                        .draw(&mut display)
-                        .unwrap();
-                    display.flush().unwrap();
-                } else {
+                if rx_pkt.data.len() != PACKET_BYTES {
                     log::warn!(
                         "RX [{}B] unexpected size, rssi={} snr={}",
                         rx_pkt.data.len(),
                         rx_pkt.rssi,
                         rx_pkt.snr
                     );
+                    continue;
                 }
+
+                // Parse 2-byte header: |5b type|7b txid|4b seq|
+                let header = u16::from_be_bytes([rx_pkt.data[0], rx_pkt.data[1]]);
+                let _pkt_type = (header >> 11) as u8;
+                let txid = ((header >> 4) & 0x7F) as u8;
+                let seq = (header & 0x0F) as u8;
+                let payload = &rx_pkt.data[HEADER_BYTES..];
+
+                if cur_txid.is_none() {
+                    cur_txid = Some(txid);
+                }
+
+                let expected_seq = (last_played_seq.wrapping_add(1)) & 0x0F;
+                let diff = (seq.wrapping_sub(expected_seq) & 0x0F) as i8;
+                let diff = if diff > 7 { diff - 16 } else { diff };
+
+                let decode_ms = decode_and_play(payload, &mut decoder, &mut decode_buf, &mut i2s_tx);
+                last_played_seq = seq;
+
+                log::info!(
+                    "RX [{}B] txid={} seq={} rssi={} snr={} dec={}ms",
+                    rx_pkt.data.len(),
+                    txid,
+                    seq,
+                    rx_pkt.rssi,
+                    rx_pkt.snr,
+                    decode_ms,
+                );
+
+                draw_rx_audio_screen(&mut display, mac_str, &style, &mut line_buf, rx_pkt.rssi, rx_pkt.snr);
             }
             Either::Second(_) => {
                 // PTT pressed — stream: read+encode 4 frames, send packet, repeat
@@ -302,6 +275,62 @@ async fn app_loop(
             }
         }
     }
+}
+
+fn decode_and_play(
+    payload: &[u8],
+    decoder: &mut Codec2,
+    decode_buf: &mut [i16],
+    i2s_tx: &mut I2sDriver<'_, I2sTx>,
+) -> u128 {
+    let t0 = Instant::now();
+    let mut stereo_frame = vec![0i16; CODEC2_FRAME_SAMPLES * 2].into_boxed_slice();
+    for i in 0..FRAMES_PER_PACKET {
+        let coded = &payload[i * CODEC2_FRAME_BYTES..(i + 1) * CODEC2_FRAME_BYTES];
+        decoder.decode(decode_buf, coded);
+
+        for (j, &sample) in decode_buf.iter().enumerate() {
+            stereo_frame[j * 2] = sample;
+            stereo_frame[j * 2 + 1] = sample;
+        }
+        // Drop frame if DMA buffer is full rather than stalling the event loop
+        let _ = i2s_tx.write_all(
+            pcm_as_bytes(&stereo_frame),
+            esp_idf_svc::hal::delay::TickType::new_millis(5).into(),
+        );
+    }
+    t0.elapsed().as_millis()
+}
+
+fn draw_rx_audio_screen(
+    display: &mut Display<'_>,
+    mac_str: &str,
+    style: &embedded_graphics::mono_font::MonoTextStyle<BinaryColor>,
+    line_buf: &mut heapless::String<64>,
+    rssi: i16,
+    snr: i16,
+) {
+    display.clear_buffer();
+    Text::new(mac_str, Point::new(1, 10), *style)
+        .draw(display)
+        .unwrap();
+    Text::new("RX Audio", Point::new(28, 32), *style)
+        .draw(display)
+        .unwrap();
+
+    line_buf.clear();
+    let _ = core::fmt::write(line_buf, format_args!("RSSI:{} SNR:{}", rssi, snr));
+    Text::new(line_buf, Point::new(0, 48), *style)
+        .draw(display)
+        .unwrap();
+
+    let pct = CHAN_USE_PCT.load(Ordering::Relaxed);
+    line_buf.clear();
+    let _ = core::fmt::write(line_buf, format_args!("CH:{}%", pct));
+    Text::new(line_buf, Point::new(0, 60), *style)
+        .draw(display)
+        .unwrap();
+    display.flush().unwrap();
 }
 
 fn draw_rx_screen(
