@@ -173,12 +173,21 @@ async fn app_loop(
     // Track current transmitter for seq ordering
     let mut cur_txid: Option<u8> = None;
     let mut last_played_seq: u8 = 0;
-    let mut seq_buf: [Option<Box<[u8]>>; 16] = Default::default();
+    // Buffered decoded stereo PCM per seq slot (4 frames × 320 samples × 2 channels)
+    const STEREO_PACKET_SAMPLES: usize = FRAMES_PER_PACKET * CODEC2_FRAME_SAMPLES * 2;
+    let mut seq_buf: [Option<Box<[i16]>>; 16] = Default::default();
+    let mut last_rx_time = Instant::now();
 
     // Show initial RX state
     draw_rx_screen(&mut display, mac_str, &style, &mut line_buf);
 
     loop {
+        // Auto-reset if no packet from current txid in 500ms
+        if cur_txid.is_some() && last_rx_time.elapsed() > Duration::from_millis(500) {
+            log::info!("RX timeout, resetting txid lock");
+            reset_rx_state(&mut cur_txid, &mut last_played_seq, &mut seq_buf);
+        }
+
         match select(RX_CHAN.receive(), button.wait_for_low()).await {
             Either::First(rx_pkt) => {
                 if rx_pkt.data.len() != PACKET_BYTES {
@@ -212,42 +221,44 @@ async fn app_loop(
                     continue;
                 }
 
+                last_rx_time = Instant::now();
                 let expected_seq = (last_played_seq.wrapping_add(1)) & 0x0F;
                 let diff = (seq.wrapping_sub(expected_seq) & 0x0F) as i8;
                 let diff = if diff > 7 { diff - 16 } else { diff };
 
                 match diff {
-                    -8..=-4 => {
-                        log::warn!(
-                            "RX seq={} unrealistically old (diff={}), resetting",
-                            seq,
-                            diff
-                        );
-                        reset_rx_state(&mut cur_txid, &mut last_played_seq, &mut seq_buf);
-                        continue;
-                    }
-                    -3..=-1 => {
+                    -2..=-1 => {
                         log::info!("RX seq={} old (diff={}), dropping", seq, diff);
                         continue;
                     }
-                    0..=3 => {
-                        seq_buf[seq as usize] = Some(payload.to_vec().into_boxed_slice());
+                    0..=2 => {
+                        // Decode all frames now, buffer stereo PCM
+                        let mut pcm = vec![0i16; STEREO_PACKET_SAMPLES].into_boxed_slice();
+                        for i in 0..FRAMES_PER_PACKET {
+                            let coded =
+                                &payload[i * CODEC2_FRAME_BYTES..(i + 1) * CODEC2_FRAME_BYTES];
+                            decoder.decode(&mut decode_buf, coded);
+                            let offset = i * CODEC2_FRAME_SAMPLES * 2;
+                            for (j, &sample) in decode_buf.iter().enumerate() {
+                                pcm[offset + j * 2] = sample;
+                                pcm[offset + j * 2 + 1] = sample;
+                            }
+                        }
+                        seq_buf[seq as usize] = Some(pcm);
                     }
                     _ => {
-                        // 4..=7
-                        log::warn!(
-                            "RX seq={} unrealistically new (diff={}), resetting",
-                            seq,
-                            diff
-                        );
+                        log::warn!("RX seq={} unexpected (diff={}), resetting", seq, diff);
                         reset_rx_state(&mut cur_txid, &mut last_played_seq, &mut seq_buf);
                         continue;
                     }
                 }
 
                 let mut play_seq = (last_played_seq.wrapping_add(1)) & 0x0F;
-                while let Some(buffered) = seq_buf[play_seq as usize].take() {
-                    decode_and_play(&buffered, &mut decoder, &mut decode_buf, &mut i2s_tx);
+                while let Some(pcm) = seq_buf[play_seq as usize].take() {
+                    let _ = i2s_tx.write_all(
+                        pcm_as_bytes(&pcm),
+                        esp_idf_svc::hal::delay::TickType::new_millis(5).into(),
+                    );
                     last_played_seq = play_seq;
                     play_seq = (play_seq.wrapping_add(1)) & 0x0F;
                 }
@@ -332,36 +343,11 @@ async fn app_loop(
 fn reset_rx_state(
     cur_txid: &mut Option<u8>,
     last_played_seq: &mut u8,
-    seq_buf: &mut [Option<Box<[u8]>>; 16],
+    seq_buf: &mut [Option<Box<[i16]>>; 16],
 ) {
     *cur_txid = None;
     *last_played_seq = 0;
     seq_buf.iter_mut().for_each(|s| *s = None);
-}
-
-fn decode_and_play(
-    payload: &[u8],
-    decoder: &mut Codec2,
-    decode_buf: &mut [i16],
-    i2s_tx: &mut I2sDriver<'_, I2sTx>,
-) -> u128 {
-    let t0 = Instant::now();
-    let mut stereo_frame = vec![0i16; CODEC2_FRAME_SAMPLES * 2].into_boxed_slice();
-    for i in 0..FRAMES_PER_PACKET {
-        let coded = &payload[i * CODEC2_FRAME_BYTES..(i + 1) * CODEC2_FRAME_BYTES];
-        decoder.decode(decode_buf, coded);
-
-        for (j, &sample) in decode_buf.iter().enumerate() {
-            stereo_frame[j * 2] = sample;
-            stereo_frame[j * 2 + 1] = sample;
-        }
-        // Drop frame if DMA buffer is full rather than stalling the event loop
-        let _ = i2s_tx.write_all(
-            pcm_as_bytes(&stereo_frame),
-            esp_idf_svc::hal::delay::TickType::new_millis(5).into(),
-        );
-    }
-    t0.elapsed().as_millis()
 }
 
 fn draw_rx_audio_screen(
