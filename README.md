@@ -2,6 +2,8 @@
 
 Stealth LoRa radio mesh where the primary design principle is "only speak when spoken to".
 
+![Two open-oswst radios in simplex voice mode](docs/simplex-duo.jpg)
+
 ## Hardware
 
 - **Board**: [Heltec WiFi LoRa 32 V4](https://heltec.org/project/wifi-lora-32-v4/) (ESP32-S3 + SX1262, 863-928 MHz)
