@@ -6,6 +6,7 @@ use esp_idf_svc::hal::spi::{SpiDeviceDriver, SpiDriver, SpiDriverConfig, SPI2};
 use esp_idf_svc::hal::units::Hertz;
 use lora_phy::iv::GenericSx126xInterfaceVariant;
 use lora_phy::mod_params::*;
+use lora_phy::mod_traits::IrqState;
 use lora_phy::sx126x::{self, Sx1262, Sx126x, TcxoCtrlVoltage};
 use lora_phy::LoRa;
 use std::future::Future;
@@ -153,6 +154,13 @@ const OUR_PREAMBLE: u32 = 8;
 const OUR_EXPLICIT_HEADER: bool = true;
 const OUR_CRC: bool = true;
 
+async fn enter_rx(lora: &mut Radio<'_>, mdltn: &ModulationParams, rx_params: &PacketParams) {
+    lora.prepare_for_rx(RxMode::Continuous, mdltn, rx_params)
+        .await
+        .unwrap();
+    lora.start_rx().await.unwrap();
+}
+
 async fn radio_loop(
     lora: &mut Radio<'_>,
     mdltn: &ModulationParams,
@@ -161,43 +169,83 @@ async fn radio_loop(
 ) {
     let mut rx_buf = [0u8; 255];
     let mut tracker = ChannelTracker::new();
+    let mut busy_since: Option<Instant> = None;
+
+    enter_rx(lora, mdltn, rx_params).await;
 
     loop {
-        lora.prepare_for_rx(RxMode::Continuous, mdltn, rx_params)
-            .await
-            .unwrap();
-
-        match select(lora.rx(rx_params, &mut rx_buf), TX_CHAN.receive()).await {
-            Either::First(rx_result) => match rx_result {
-                Ok((len, status)) => {
-                    let air_ms = lora_toa_ms(
-                        OUR_SF,
-                        OUR_BW_HZ,
-                        OUR_CR_DENOM,
-                        OUR_PREAMBLE,
-                        len as u32,
-                        OUR_EXPLICIT_HEADER,
-                        OUR_CRC,
-                    );
-                    tracker.record(air_ms);
-                    let pct = CHAN_USE_PCT.load(Ordering::Relaxed);
-                    log::info!("RX [{}B] air={}ms chan={}%", len, air_ms, pct);
-
-                    let mut data = heapless::Vec::new();
-                    let _ = data.extend_from_slice(&rx_buf[..len as usize]);
-                    RX_CHAN
-                        .send(RxPacket {
-                            data,
-                            rssi: status.rssi,
-                            snr: status.snr,
-                        })
-                        .await;
+        match select(lora.wait_for_irq(), TX_CHAN.receive()).await {
+            Either::First(irq_result) => {
+                if let Err(e) = irq_result {
+                    log::error!("IRQ error: {:?}", e);
+                    continue;
                 }
-                Err(e) => {
-                    log::error!("RX error: {:?}", e);
+                match lora.get_irq_state().await {
+                    Ok(Some(IrqState::PreambleReceived)) => {
+                        busy_since = Some(Instant::now());
+                    }
+                    Ok(Some(IrqState::Done)) => {
+                        busy_since = None;
+                        match lora.get_rx_result(rx_params, &mut rx_buf).await {
+                            Ok((len, status)) => {
+                                let air_ms = lora_toa_ms(
+                                    OUR_SF,
+                                    OUR_BW_HZ,
+                                    OUR_CR_DENOM,
+                                    OUR_PREAMBLE,
+                                    len as u32,
+                                    OUR_EXPLICIT_HEADER,
+                                    OUR_CRC,
+                                );
+                                tracker.record(air_ms);
+                                let pct = CHAN_USE_PCT.load(Ordering::Relaxed);
+                                log::info!("RX [{}B] air={}ms chan={}%", len, air_ms, pct);
+
+                                let mut data = heapless::Vec::new();
+                                let _ = data.extend_from_slice(&rx_buf[..len as usize]);
+                                RX_CHAN
+                                    .send(RxPacket {
+                                        data,
+                                        rssi: status.rssi,
+                                        snr: status.snr,
+                                    })
+                                    .await;
+                            }
+                            Err(e) => {
+                                log::error!("RX result error: {:?}", e);
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        // CRC/header error — channel is free, no good packet
+                        busy_since = None;
+                    }
+                    Err(e) => {
+                        log::error!("IRQ state error: {:?}", e);
+                        busy_since = None;
+                    }
                 }
-            },
+                lora.clear_irq_status().await.unwrap();
+                // RX continuous keeps running — no re-setup needed
+            }
             Either::Second(tx_req) => {
+                if let Some(t) = busy_since {
+                    if t.elapsed().as_millis() < 200 {
+                        log::info!("TX waiting: channel busy");
+                        // Wait for current RX to finish before TX
+                        loop {
+                            lora.wait_for_irq().await.unwrap();
+                            let state = lora.get_irq_state().await;
+                            lora.clear_irq_status().await.unwrap();
+                            match state {
+                                Ok(Some(IrqState::PreambleReceived)) => continue,
+                                _ => break,
+                            }
+                        }
+                    }
+                    busy_since = None;
+                }
+
                 lora.enter_standby().await.unwrap();
                 lora.prepare_for_tx(mdltn, tx_params, 22, &tx_req.data)
                     .await
@@ -217,6 +265,9 @@ async fn radio_loop(
                 tracker.record(air_ms);
                 let pct = CHAN_USE_PCT.load(Ordering::Relaxed);
                 log::info!("TX [{}B] air={}ms chan={}%", tx_len, air_ms, pct);
+
+                // Back to RX continuous
+                enter_rx(lora, mdltn, rx_params).await;
             }
         }
     }
