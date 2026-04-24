@@ -31,6 +31,16 @@ use crate::{TxRequest, RX_CHAN, TX_CHAN};
 const CODEC2_FRAME_BYTES: usize = 6;
 const CODEC2_FRAME_SAMPLES: usize = 320;
 
+/// Pack 4 Codec2 frames per LoRa packet (24 bytes, 160ms audio).
+/// At SF8/125kHz a 6-byte packet takes ~61ms (>40ms audio = broken),
+/// but 24 bytes takes ~113ms for 160ms audio = 47ms of slack.
+const FRAMES_PER_PACKET: usize = 4;
+const PACKET_BYTES: usize = CODEC2_FRAME_BYTES * FRAMES_PER_PACKET; // 24
+
+/// Jitter buffer: accumulate this many decoded frames before starting I2S playback.
+/// 4 frames × 40ms = 160ms (one packet's worth of lead time).
+const JITTER_FRAMES: usize = FRAMES_PER_PACKET;
+
 /// Convert i16 PCM slice to &[u8] for I2S write.
 fn pcm_as_bytes(pcm: &[i16]) -> &[u8] {
     unsafe { core::slice::from_raw_parts(pcm.as_ptr() as *const u8, pcm.len() * 2) }
@@ -156,8 +166,11 @@ async fn app_loop(
     let mut mic_buf = vec![AdcMeasurement::new(); 320].into_boxed_slice();
     let mut pcm_buf = vec![0i16; CODEC2_FRAME_SAMPLES].into_boxed_slice();
     let mut codec_buf = vec![0u8; CODEC2_FRAME_BYTES].into_boxed_slice();
-    let mut stereo_buf = vec![0i16; CODEC2_FRAME_SAMPLES * 2].into_boxed_slice();
     let mut decode_buf = vec![0i16; CODEC2_FRAME_SAMPLES].into_boxed_slice();
+
+    // Jitter buffer: ring of stereo frames, written to I2S once we have enough lead time
+    let mut jitter_buf: Vec<Box<[i16]>> = Vec::with_capacity(JITTER_FRAMES + 4);
+    let mut jitter_playing = false;
 
     // Show initial RX state
     draw_rx_screen(&mut display, mac_str, &style);
@@ -165,33 +178,51 @@ async fn app_loop(
     loop {
         match select(RX_CHAN.receive(), button.wait_for_low()).await {
             Either::First(rx_pkt) => {
-                if rx_pkt.data.len() == CODEC2_FRAME_BYTES {
-                    // Decode Codec2 voice frame
+                if rx_pkt.data.len() == PACKET_BYTES {
+                    // Unpack and decode all frames in this packet
                     let t0 = Instant::now();
-                    decoder.decode(&mut decode_buf, &rx_pkt.data);
+                    for i in 0..FRAMES_PER_PACKET {
+                        let coded = &rx_pkt.data
+                            [i * CODEC2_FRAME_BYTES..(i + 1) * CODEC2_FRAME_BYTES];
+                        decoder.decode(&mut decode_buf, coded);
+
+                        // Interleave mono→stereo into a new heap buffer
+                        let mut frame =
+                            vec![0i16; CODEC2_FRAME_SAMPLES * 2].into_boxed_slice();
+                        for (j, &sample) in decode_buf.iter().enumerate() {
+                            frame[j * 2] = sample;
+                            frame[j * 2 + 1] = sample;
+                        }
+                        jitter_buf.push(frame);
+                    }
                     let decode_ms = t0.elapsed().as_millis();
 
-                    // Interleave mono→stereo and write to speaker
-                    for (i, &sample) in decode_buf.iter().enumerate() {
-                        stereo_buf[i * 2] = sample;
-                        stereo_buf[i * 2 + 1] = sample;
+                    if !jitter_playing && jitter_buf.len() >= JITTER_FRAMES {
+                        log::info!(
+                            "Jitter buffer ready ({} frames), starting playback",
+                            jitter_buf.len()
+                        );
+                        jitter_playing = true;
                     }
-                    i2s_tx
-                        .write_all(
-                            pcm_as_bytes(&stereo_buf),
-                            esp_idf_svc::hal::delay::BLOCK,
-                        )
-                        .unwrap();
 
-                    // Compute peak amplitude for stats
-                    let peak = decode_buf.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+                    if jitter_playing {
+                        for f in jitter_buf.drain(..) {
+                            i2s_tx
+                                .write_all(
+                                    pcm_as_bytes(&f),
+                                    esp_idf_svc::hal::delay::BLOCK,
+                                )
+                                .unwrap();
+                        }
+                    }
+
                     log::info!(
-                        "RX Audio [{}B] rssi={}dBm snr={}dB decode={}ms peak={}",
+                        "RX [{}B] rssi={} snr={} dec={}ms jbuf={}",
                         rx_pkt.data.len(),
                         rx_pkt.rssi,
                         rx_pkt.snr,
                         decode_ms,
-                        peak
+                        jitter_buf.len()
                     );
 
                     display.clear_buffer();
@@ -213,7 +244,7 @@ async fn app_loop(
                     display.flush().unwrap();
                 } else {
                     log::warn!(
-                        "RX non-voice [{}B] rssi={}dBm snr={}dB",
+                        "RX [{}B] unexpected size, rssi={} snr={}",
                         rx_pkt.data.len(),
                         rx_pkt.rssi,
                         rx_pkt.snr
@@ -221,59 +252,81 @@ async fn app_loop(
                 }
             }
             Either::Second(_) => {
-                // PTT button pressed — enter TX mode (sine stops automatically)
-                log::info!("PTT pressed — switching to TX");
+                // PTT button pressed — record raw PCM, encode+TX on release
+                log::info!("PTT pressed — recording");
+                jitter_buf.clear();
+                jitter_playing = false;
 
-                // Drain any stale mic data
-                let _ = adc.read(&mut mic_buf, 0);
+                display.clear_buffer();
+                Text::new(mac_str, Point::new(1, 10), style)
+                    .draw(&mut display)
+                    .unwrap();
+                Text::new("Recording...", Point::new(10, 36), style)
+                    .draw(&mut display)
+                    .unwrap();
+                display.flush().unwrap();
 
-                while button.is_low() {
-                    // Wait for a fresh mic frame from DMA
+                // Record raw PCM into a heap buffer (max 5s)
+                const MAX_REC_SAMPLES: usize = 8000 * 5;
+                let mut rec_buf = vec![0i16; MAX_REC_SAMPLES];
+                let mut rec_len: usize = 0;
+
+                let _ = adc.read(&mut mic_buf, 0); // drain stale
+
+                while button.is_low() && rec_len < MAX_REC_SAMPLES {
                     let count = adc.read_async(&mut mic_buf).await.unwrap_or(0);
-
-                    // Convert ADC samples to PCM
-                    for (i, sample) in mic_buf[..count].iter().enumerate() {
-                        pcm_buf[i] = adc_to_pcm(sample);
+                    let n = count.min(MAX_REC_SAMPLES - rec_len);
+                    for i in 0..n {
+                        rec_buf[rec_len + i] = adc_to_pcm(&mic_buf[i]);
                     }
-                    // Zero-pad if short
-                    for s in pcm_buf[count..].iter_mut() {
-                        *s = 0;
+                    rec_len += n;
+                }
+
+                // Round down to whole packets (FRAMES_PER_PACKET Codec2 frames each)
+                let num_frames = rec_len / CODEC2_FRAME_SAMPLES;
+                let num_packets = num_frames / FRAMES_PER_PACKET;
+                log::info!(
+                    "PTT released — {}ms, {} frames, {} packets",
+                    rec_len / 8,
+                    num_frames,
+                    num_packets
+                );
+
+                display.clear_buffer();
+                Text::new(mac_str, Point::new(1, 10), style)
+                    .draw(&mut display)
+                    .unwrap();
+                line_buf.clear();
+                let _ = core::fmt::write(
+                    &mut line_buf,
+                    format_args!("TX {} pkts", num_packets),
+                );
+                Text::new(&line_buf, Point::new(10, 36), style)
+                    .draw(&mut display)
+                    .unwrap();
+                display.flush().unwrap();
+
+                // Encode FRAMES_PER_PACKET frames per LoRa packet
+                let mut pkt_buf = [0u8; PACKET_BYTES];
+                for p in 0..num_packets {
+                    for i in 0..FRAMES_PER_PACKET {
+                        let f = p * FRAMES_PER_PACKET + i;
+                        let pcm = &rec_buf
+                            [f * CODEC2_FRAME_SAMPLES..(f + 1) * CODEC2_FRAME_SAMPLES];
+                        encoder.encode(
+                            &mut pkt_buf[i * CODEC2_FRAME_BYTES..(i + 1) * CODEC2_FRAME_BYTES],
+                            pcm,
+                        );
                     }
 
-                    // Encode with Codec2
-                    let t0 = Instant::now();
-                    encoder.encode(&mut codec_buf, &pcm_buf);
-                    let encode_ms = t0.elapsed().as_millis();
-
-                    log::info!(
-                        "TX #{} ({}samp) encode={}ms",
-                        tx_count,
-                        count,
-                        encode_ms
-                    );
-
-                    // Send encoded frame to radio task
                     let mut data = heapless::Vec::new();
-                    let _ = data.extend_from_slice(&codec_buf);
+                    let _ = data.extend_from_slice(&pkt_buf);
                     TX_CHAN.send(TxRequest { data }).await;
-
-                    // Update display
-                    display.clear_buffer();
-                    Text::new(mac_str, Point::new(1, 10), style)
-                        .draw(&mut display)
-                        .unwrap();
-
-                    line_buf.clear();
-                    let _ = core::fmt::write(&mut line_buf, format_args!("TX #{}", tx_count));
-                    Text::new(&line_buf, Point::new(30, 36), style)
-                        .draw(&mut display)
-                        .unwrap();
-                    display.flush().unwrap();
 
                     tx_count += 1;
                 }
 
-                log::info!("PTT released — back to RX");
+                log::info!("TX done — {} packets sent", num_packets);
 
                 // Redraw RX screen
                 draw_rx_screen(&mut display, mac_str, &style);
