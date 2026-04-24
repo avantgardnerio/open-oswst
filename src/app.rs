@@ -252,8 +252,8 @@ async fn app_loop(
                 }
             }
             Either::Second(_) => {
-                // PTT button pressed — record raw PCM, encode+TX on release
-                log::info!("PTT pressed — recording");
+                // PTT pressed — stream: read+encode 4 frames, send packet, repeat
+                log::info!("PTT pressed — streaming");
                 jitter_buf.clear();
                 jitter_playing = false;
 
@@ -261,72 +261,40 @@ async fn app_loop(
                 Text::new(mac_str, Point::new(1, 10), style)
                     .draw(&mut display)
                     .unwrap();
-                Text::new("Recording...", Point::new(10, 36), style)
+                Text::new("TX Streaming", Point::new(10, 36), style)
                     .draw(&mut display)
                     .unwrap();
                 display.flush().unwrap();
-
-                // Record raw PCM into a heap buffer (max 5s)
-                const MAX_REC_SAMPLES: usize = 8000 * 5;
-                let mut rec_buf = vec![0i16; MAX_REC_SAMPLES];
-                let mut rec_len: usize = 0;
 
                 let _ = adc.read(&mut mic_buf, 0); // drain stale
 
-                while button.is_low() && rec_len < MAX_REC_SAMPLES {
-                    let count = adc.read_async(&mut mic_buf).await.unwrap_or(0);
-                    let n = count.min(MAX_REC_SAMPLES - rec_len);
-                    for i in 0..n {
-                        rec_buf[rec_len + i] = adc_to_pcm(&mic_buf[i]);
-                    }
-                    rec_len += n;
-                }
-
-                // Round down to whole packets (FRAMES_PER_PACKET Codec2 frames each)
-                let num_frames = rec_len / CODEC2_FRAME_SAMPLES;
-                let num_packets = num_frames / FRAMES_PER_PACKET;
-                log::info!(
-                    "PTT released — {}ms, {} frames, {} packets",
-                    rec_len / 8,
-                    num_frames,
-                    num_packets
-                );
-
-                display.clear_buffer();
-                Text::new(mac_str, Point::new(1, 10), style)
-                    .draw(&mut display)
-                    .unwrap();
-                line_buf.clear();
-                let _ = core::fmt::write(
-                    &mut line_buf,
-                    format_args!("TX {} pkts", num_packets),
-                );
-                Text::new(&line_buf, Point::new(10, 36), style)
-                    .draw(&mut display)
-                    .unwrap();
-                display.flush().unwrap();
-
-                // Encode FRAMES_PER_PACKET frames per LoRa packet
                 let mut pkt_buf = [0u8; PACKET_BYTES];
-                for p in 0..num_packets {
+                while button.is_low() {
+                    // Read and encode FRAMES_PER_PACKET frames (interleaved)
+                    // ADC DMA buffers next frame while we encode current one
                     for i in 0..FRAMES_PER_PACKET {
-                        let f = p * FRAMES_PER_PACKET + i;
-                        let pcm = &rec_buf
-                            [f * CODEC2_FRAME_SAMPLES..(f + 1) * CODEC2_FRAME_SAMPLES];
+                        let count = adc.read_async(&mut mic_buf).await.unwrap_or(0);
+                        for (j, sample) in mic_buf[..count].iter().enumerate() {
+                            pcm_buf[j] = adc_to_pcm(sample);
+                        }
+                        for s in pcm_buf[count..].iter_mut() {
+                            *s = 0;
+                        }
                         encoder.encode(
-                            &mut pkt_buf[i * CODEC2_FRAME_BYTES..(i + 1) * CODEC2_FRAME_BYTES],
-                            pcm,
+                            &mut pkt_buf
+                                [i * CODEC2_FRAME_BYTES..(i + 1) * CODEC2_FRAME_BYTES],
+                            &pcm_buf,
                         );
                     }
 
+                    // Send 4-frame packet to radio
                     let mut data = heapless::Vec::new();
                     let _ = data.extend_from_slice(&pkt_buf);
                     TX_CHAN.send(TxRequest { data }).await;
-
                     tx_count += 1;
                 }
 
-                log::info!("TX done — {} packets sent", num_packets);
+                log::info!("PTT released — {} packets sent", tx_count);
 
                 // Redraw RX screen
                 draw_rx_screen(&mut display, mac_str, &style);
