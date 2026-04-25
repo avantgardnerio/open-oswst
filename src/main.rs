@@ -7,7 +7,8 @@ use embassy_sync::channel::Channel;
 use esp_idf_svc::hal::gpio::PinDriver;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::hal::task::block_on;
-use std::sync::atomic::AtomicU8;
+use esp_idf_svc::nvs::{EspCustomNvsPartition, EspNvs};
+use std::sync::atomic::{AtomicBool, AtomicU8};
 use std::thread;
 use std::time::Duration;
 
@@ -30,6 +31,9 @@ pub(crate) static TX_CHAN: Channel<CriticalSectionRawMutex, TxRequest, 4> = Chan
 
 /// Channel occupancy percentage (0-100), written by radio task, read by app task.
 pub(crate) static CHAN_USE_PCT: AtomicU8 = AtomicU8::new(0);
+
+/// Whether this device is a repeater, read from NVS at boot.
+pub(crate) static IS_REPEATER: AtomicBool = AtomicBool::new(false);
 
 /// Read the base MAC address from eFuse
 fn get_mac() -> [u8; 6] {
@@ -54,6 +58,13 @@ fn main() {
     let mut _vext = PinDriver::output(peripherals.pins.gpio36).unwrap();
     _vext.set_low().unwrap();
     thread::sleep(Duration::from_millis(50));
+
+    // Read config from dedicated NVS partition
+    let nvs_partition = EspCustomNvsPartition::take("loraudio").unwrap();
+    let nvs = EspNvs::new(nvs_partition, "config", false).unwrap();
+    let repeater = nvs.get_u8("repeater").unwrap().unwrap_or(0) != 0;
+    IS_REPEATER.store(repeater, std::sync::atomic::Ordering::Relaxed);
+    log::info!("Config: repeater={}", repeater);
 
     // Get MAC for display
     let mac = get_mac();

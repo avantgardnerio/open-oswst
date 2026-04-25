@@ -15,5 +15,10 @@ CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=4096
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
 
+# Custom partition table with loraudio NVS partition
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../../../../../../partitions.csv"
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
 # Disable SPI ISR in IRAM to enable async SPI trait (embedded_hal_async::spi::SpiDevice)
 # CONFIG_SPI_MASTER_ISR_IN_IRAM is not set
