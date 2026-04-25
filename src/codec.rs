@@ -30,6 +30,16 @@ pub enum CodecRequest {
     },
 }
 
+impl CodecRequest {
+    pub fn encode(header: [u8; 2], pcm: Box<[i16]>) -> Self {
+        Self::Encode { header, pcm }
+    }
+
+    pub fn decode(seq: u8, txid: u8, payload: [u8; PAYLOAD_BYTES]) -> Self {
+        Self::Decode { seq, txid, payload }
+    }
+}
+
 pub enum CodecResponse {
     Encoded {
         packet: heapless::Vec<u8, 255>,
@@ -39,6 +49,16 @@ pub enum CodecResponse {
         txid: u8,
         pcm: Box<[i16]>, // 2560 stereo samples
     },
+}
+
+impl CodecResponse {
+    pub fn encoded(packet: heapless::Vec<u8, 255>) -> Self {
+        Self::Encoded { packet }
+    }
+
+    pub fn decoded(seq: u8, txid: u8, pcm: Box<[i16]>) -> Self {
+        Self::Decoded { seq, txid, pcm }
+    }
 }
 
 /// Single-slot reply channel — acts as a oneshot since app always awaits before next request.
@@ -69,7 +89,7 @@ pub fn run(rx: Receiver<CodecRequest>) {
                     let _ = packet.extend_from_slice(&frame_bytes);
                 }
 
-                CODEC_REPLY.try_send(CodecResponse::Encoded { packet }).ok();
+                CODEC_REPLY.try_send(CodecResponse::encoded(packet)).ok();
             }
             CodecRequest::Decode { seq, txid, payload } => {
                 let mut pcm = vec![0i16; STEREO_PACKET_SAMPLES].into_boxed_slice();
@@ -85,7 +105,7 @@ pub fn run(rx: Receiver<CodecRequest>) {
                 }
 
                 CODEC_REPLY
-                    .try_send(CodecResponse::Decoded { seq, txid, pcm })
+                    .try_send(CodecResponse::decoded(seq, txid, pcm))
                     .ok();
             }
         }

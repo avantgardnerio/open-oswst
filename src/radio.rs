@@ -192,7 +192,11 @@ async fn radio_loop(
                     .await
                     .unwrap();
                 lora.tx().await.unwrap();
-                log::info!("TX end [{}B] {}ms", tx_req.data.len(), tx_start.elapsed().as_millis());
+                log::info!(
+                    "TX end [{}B] {}ms",
+                    tx_req.data.len(),
+                    tx_start.elapsed().as_millis()
+                );
 
                 // Back to RX continuous
                 enter_rx(lora, mdltn, rx_params).await;

@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use std::sync::atomic::Ordering;
 
 use crate::codec::{
-    CodecRequest, CodecResponse, CODEC_REPLY, CODEC2_FRAME_SAMPLES, FRAMES_PER_PACKET,
+    CodecRequest, CodecResponse, CODEC2_FRAME_SAMPLES, CODEC_REPLY, FRAMES_PER_PACKET,
     HEADER_BYTES, PACKET_BYTES, PAYLOAD_BYTES,
 };
 use crate::{TxRequest, IS_REPEATER, RX_CHAN, TX_CHAN};
@@ -258,24 +258,15 @@ async fn app_loop(
                         let mut payload_arr = [0u8; PAYLOAD_BYTES];
                         payload_arr.copy_from_slice(payload);
                         codec_tx
-                            .send(CodecRequest::Decode {
-                                seq,
-                                txid,
-                                payload: payload_arr,
-                            })
+                            .send(CodecRequest::decode(seq, txid, payload_arr))
                             .unwrap();
-                        match CODEC_REPLY.receive().await {
-                            CodecResponse::Decoded {
-                                seq: d_seq,
-                                txid: d_txid,
-                                pcm,
-                            } => {
-                                // Ignore stale decode if txid changed during await
-                                if cur_txid == Some(d_txid) {
-                                    seq_buf[d_seq as usize] = Some(pcm);
-                                }
+                        if let CodecResponse::Decoded { seq, txid, pcm } =
+                            CODEC_REPLY.receive().await
+                        {
+                            // Ignore stale decode if txid changed during await
+                            if cur_txid == Some(txid) {
+                                seq_buf[seq as usize] = Some(pcm);
                             }
-                            _ => {}
                         }
                     }
                     _ => {
@@ -357,16 +348,10 @@ async fn app_loop(
 
                     // Send to codec thread, await encoded packet
                     codec_tx
-                        .send(CodecRequest::Encode {
-                            header: header_bytes,
-                            pcm,
-                        })
+                        .send(CodecRequest::encode(header_bytes, pcm))
                         .unwrap();
-                    match CODEC_REPLY.receive().await {
-                        CodecResponse::Encoded { packet } => {
-                            TX_CHAN.send(TxRequest { data: packet }).await;
-                        }
-                        _ => {}
+                    if let CodecResponse::Encoded { packet } = CODEC_REPLY.receive().await {
+                        TX_CHAN.send(TxRequest { data: packet }).await;
                     }
                     tx_count += 1;
                     seq = (seq + 1) & 0x0F; // wrap at 16
