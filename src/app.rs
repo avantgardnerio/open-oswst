@@ -1,4 +1,3 @@
-use codec2::{Codec2, Codec2Mode};
 use embassy_futures::select::{select, Either};
 use embedded_graphics::mono_font::ascii::FONT_6X10;
 use embedded_graphics::mono_font::MonoTextStyleBuilder;
@@ -22,24 +21,17 @@ use ssd1306::mode::BufferedGraphicsMode;
 use ssd1306::prelude::*;
 use ssd1306::{I2CDisplayInterface, Ssd1306};
 use std::future::Future;
+use std::sync::mpsc::SyncSender;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use std::sync::atomic::Ordering;
 
+use crate::codec::{
+    CodecRequest, CodecResponse, CODEC_REPLY, CODEC2_FRAME_SAMPLES, FRAMES_PER_PACKET,
+    HEADER_BYTES, PACKET_BYTES, PAYLOAD_BYTES,
+};
 use crate::{TxRequest, IS_REPEATER, RX_CHAN, TX_CHAN};
-
-/// Codec2 MODE_1200: 320 samples → 6 bytes per frame
-const CODEC2_FRAME_BYTES: usize = 6;
-const CODEC2_FRAME_SAMPLES: usize = 320;
-
-/// Pack 4 Codec2 frames per LoRa packet (24 bytes payload, 160ms audio).
-/// 2-byte header for repeater dedup/reorder: |5b type|7b txid|4b seq| = 16 bits.
-/// 26 bytes total sits in the same SF8 symbol bin as 24 — zero air time cost.
-const FRAMES_PER_PACKET: usize = 4;
-const HEADER_BYTES: usize = 2;
-const PAYLOAD_BYTES: usize = CODEC2_FRAME_BYTES * FRAMES_PER_PACKET; // 24
-const PACKET_BYTES: usize = HEADER_BYTES + PAYLOAD_BYTES; // 26
 
 /// Packet type constants (5 bits, upper bits of header)
 const PKT_TYPE_VOICE: u8 = 0x00;
@@ -74,7 +66,11 @@ pub struct Peripherals {
     pub spk_ws: AnyIOPin<'static>,
 }
 
-pub async fn init(p: Peripherals, mac_str: heapless::String<18>) -> impl Future<Output = ()> {
+pub async fn init(
+    p: Peripherals,
+    mac_str: heapless::String<18>,
+    codec_tx: SyncSender<CodecRequest>,
+) -> impl Future<Output = ()> {
     // PRG button on GPIO0 — active LOW with internal pull-up
     let button = PinDriver::input(p.ptt, Pull::Up).unwrap();
 
@@ -125,15 +121,7 @@ pub async fn init(p: Peripherals, mac_str: heapless::String<18>) -> impl Future<
         p.spk_ws,
     )
     .unwrap();
-    // Don't tx_enable yet — Codec2 init blocks for seconds and would starve DMA
     log::info!("I2S TX configured (8kHz mono 16-bit Philips)");
-
-    // Codec2 encoder + decoder (MODE_1200: 320 samples → 6 bytes)
-    // Box to avoid bloating the async future's stack frame
-    let encoder = Box::new(Codec2::new(Codec2Mode::MODE_1200));
-    log::info!("Codec2 encoder initialized");
-    let decoder = Box::new(Codec2::new(Codec2Mode::MODE_1200));
-    log::info!("Codec2 decoder initialized ({}B/frame)", CODEC2_FRAME_BYTES);
 
     // Start continuous ADC (DMA)
     adc.start().unwrap();
@@ -142,10 +130,9 @@ pub async fn init(p: Peripherals, mac_str: heapless::String<18>) -> impl Future<
     async move {
         // Keep oled_rst alive so the pin doesn't float low (holding OLED in reset)
         let _oled_rst = oled_rst;
-        // Enable I2S TX now — after Codec2 init so DMA doesn't starve
         i2s_tx.tx_enable().unwrap();
         log::info!("I2S TX enabled");
-        app_loop(button, adc, i2s_tx, display, &mac_str, encoder, decoder).await;
+        app_loop(button, adc, i2s_tx, display, &mac_str, codec_tx).await;
     }
 }
 
@@ -155,8 +142,7 @@ async fn app_loop(
     mut i2s_tx: I2sDriver<'_, I2sTx>,
     mut display: Display<'_>,
     mac_str: &str,
-    mut encoder: Box<Codec2>,
-    mut decoder: Box<Codec2>,
+    codec_tx: SyncSender<CodecRequest>,
 ) {
     let style = MonoTextStyleBuilder::new()
         .font(&FONT_6X10)
@@ -165,16 +151,12 @@ async fn app_loop(
 
     let mut tx_count: u32 = 0;
     let mut line_buf = heapless::String::<64>::new();
-    // Heap-allocate audio buffers — keeps async future small, ready for codec thread
     let mut mic_buf = vec![AdcMeasurement::new(); 320].into_boxed_slice();
     let mut pcm_buf = vec![0i16; CODEC2_FRAME_SAMPLES].into_boxed_slice();
-    let mut decode_buf = vec![0i16; CODEC2_FRAME_SAMPLES].into_boxed_slice();
 
     // Track current transmitter for seq ordering
     let mut cur_txid: Option<u8> = None;
     let mut last_played_seq: u8 = 0;
-    // Buffered decoded stereo PCM per seq slot (4 frames × 320 samples × 2 channels)
-    const STEREO_PACKET_SAMPLES: usize = FRAMES_PER_PACKET * CODEC2_FRAME_SAMPLES * 2;
     let mut seq_buf: [Option<Box<[i16]>>; 16] = Default::default();
     let mut last_rx_time = Instant::now();
 
@@ -272,19 +254,29 @@ async fn app_loop(
                             last_played_seq = seq;
                             continue; // skip decode — fast turnaround
                         }
-                        // Decode all frames now, buffer stereo PCM
-                        let mut pcm = vec![0i16; STEREO_PACKET_SAMPLES].into_boxed_slice();
-                        for i in 0..FRAMES_PER_PACKET {
-                            let coded =
-                                &payload[i * CODEC2_FRAME_BYTES..(i + 1) * CODEC2_FRAME_BYTES];
-                            decoder.decode(&mut decode_buf, coded);
-                            let offset = i * CODEC2_FRAME_SAMPLES * 2;
-                            for (j, &sample) in decode_buf.iter().enumerate() {
-                                pcm[offset + j * 2] = sample;
-                                pcm[offset + j * 2 + 1] = sample;
+                        // Send to codec thread for decode, await reply
+                        let mut payload_arr = [0u8; PAYLOAD_BYTES];
+                        payload_arr.copy_from_slice(payload);
+                        codec_tx
+                            .send(CodecRequest::Decode {
+                                seq,
+                                txid,
+                                payload: payload_arr,
+                            })
+                            .unwrap();
+                        match CODEC_REPLY.receive().await {
+                            CodecResponse::Decoded {
+                                seq: d_seq,
+                                txid: d_txid,
+                                pcm,
+                            } => {
+                                // Ignore stale decode if txid changed during await
+                                if cur_txid == Some(d_txid) {
+                                    seq_buf[d_seq as usize] = Some(pcm);
+                                }
                             }
+                            _ => {}
                         }
-                        seq_buf[seq as usize] = Some(pcm);
                     }
                     _ => {
                         log::warn!("RX seq={} unexpected (diff={}), resetting", seq, diff);
@@ -341,32 +333,41 @@ async fn app_loop(
 
                 let _ = adc.read(&mut mic_buf, 0); // drain stale
 
-                let mut pkt_buf = [0u8; PACKET_BYTES];
                 while button.is_low() {
                     // Pack 2-byte header: |5b type|7b txid|4b seq|
                     let header: u16 =
                         (PKT_TYPE_VOICE as u16) << 11 | (txid as u16) << 4 | seq as u16;
-                    let [h0, h1] = header.to_be_bytes();
-                    pkt_buf[0] = h0;
-                    pkt_buf[1] = h1;
+                    let header_bytes = header.to_be_bytes();
 
-                    // Read and encode FRAMES_PER_PACKET frames into payload area
+                    // Read FRAMES_PER_PACKET frames of PCM
+                    let total_samples = FRAMES_PER_PACKET * CODEC2_FRAME_SAMPLES;
+                    let mut pcm = vec![0i16; total_samples].into_boxed_slice();
                     for i in 0..FRAMES_PER_PACKET {
                         let count = adc.read_async(&mut mic_buf).await.unwrap_or(0);
+                        let start = i * CODEC2_FRAME_SAMPLES;
                         for (j, sample) in mic_buf[..count].iter().enumerate() {
                             pcm_buf[j] = adc_to_pcm(sample);
                         }
                         for s in pcm_buf[count..].iter_mut() {
                             *s = 0;
                         }
-                        let offset = HEADER_BYTES + i * CODEC2_FRAME_BYTES;
-                        encoder.encode(&mut pkt_buf[offset..offset + CODEC2_FRAME_BYTES], &pcm_buf);
+                        pcm[start..start + CODEC2_FRAME_SAMPLES]
+                            .copy_from_slice(&pcm_buf[..CODEC2_FRAME_SAMPLES]);
                     }
 
-                    // Send 26-byte packet (2B header + 24B voice) to radio
-                    let mut data = heapless::Vec::new();
-                    let _ = data.extend_from_slice(&pkt_buf);
-                    TX_CHAN.send(TxRequest { data }).await;
+                    // Send to codec thread, await encoded packet
+                    codec_tx
+                        .send(CodecRequest::Encode {
+                            header: header_bytes,
+                            pcm,
+                        })
+                        .unwrap();
+                    match CODEC_REPLY.receive().await {
+                        CodecResponse::Encoded { packet } => {
+                            TX_CHAN.send(TxRequest { data: packet }).await;
+                        }
+                        _ => {}
+                    }
                     tx_count += 1;
                     seq = (seq + 1) & 0x0F; // wrap at 16
                 }

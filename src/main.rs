@@ -1,4 +1,5 @@
 mod app;
+mod codec;
 mod radio;
 
 use embassy_futures::join::join;
@@ -74,6 +75,14 @@ fn main() {
         ),
     );
 
+    // Spawn codec thread with sync channel (capacity 2 to allow pipelining)
+    let (codec_tx, codec_rx) = std::sync::mpsc::sync_channel::<codec::CodecRequest>(2);
+    std::thread::Builder::new()
+        .name("codec".into())
+        .stack_size(32768)
+        .spawn(move || codec::run(codec_rx))
+        .unwrap();
+
     block_on(async {
         let radio_fut = radio::init(radio::Peripherals {
             spi: peripherals.spi2,
@@ -102,6 +111,7 @@ fn main() {
                 spk_ws: peripherals.pins.gpio4.into(),
             },
             mac_str,
+            codec_tx,
         )
         .await;
 
