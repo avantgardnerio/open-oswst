@@ -108,13 +108,18 @@ async fn radio_loop(
                 }
                 match lora.get_irq_state().await {
                     Ok(Some(IrqState::PreambleReceived)) => {
+                        log::info!("RX preamble");
                         busy_since = Some(Instant::now());
                     }
                     Ok(Some(IrqState::Done)) => {
+                        let rx_ms = busy_since.map(|t| t.elapsed().as_millis()).unwrap_or(0);
                         busy_since = None;
                         match lora.get_rx_result(rx_params, &mut rx_buf).await {
                             Ok((len, status)) => {
-                                log::info!("RX [{}B]", len);
+                                log::info!(
+                                    "RX end [{}B] {}ms rssi={} snr={}",
+                                    len, rx_ms, status.rssi, status.snr
+                                );
 
                                 let mut data = heapless::Vec::new();
                                 let _ = data.extend_from_slice(&rx_buf[..len as usize]);
@@ -127,12 +132,13 @@ async fn radio_loop(
                                     .await;
                             }
                             Err(e) => {
-                                log::error!("RX result error: {:?}", e);
+                                log::error!("RX error [{}ms]: {:?}", rx_ms, e);
                             }
                         }
                     }
                     Ok(None) => {
-                        // CRC/header error — channel is free, no good packet
+                        let rx_ms = busy_since.map(|t| t.elapsed().as_millis()).unwrap_or(0);
+                        log::warn!("RX CRC/header error [{}ms]", rx_ms);
                         busy_since = None;
                     }
                     Err(e) => {
