@@ -35,9 +35,9 @@ pub(crate) static TX_CHAN: Channel<CriticalSectionRawMutex, TxRequest, 4> = Chan
 /// Speaker requests next audio packet from app
 pub(crate) static SPK_REQ: Channel<CriticalSectionRawMutex, (), 1> = Channel::new();
 
-/// App responds: Some(pcm) = play audio, None = go idle
-pub(crate) static SPK_RESP: Channel<CriticalSectionRawMutex, Option<Arc<[i16]>>, 1> =
-    Channel::new();
+/// Audio frames for speaker — each is one 40ms stereo frame (640 i16).
+/// Capacity 8 = 2 packets worth of frames.
+pub(crate) static SPK_FRAMES: Channel<CriticalSectionRawMutex, Arc<[i16]>, 8> = Channel::new();
 
 /// Whether this device is a repeater, read from NVS at boot.
 pub(crate) static IS_REPEATER: AtomicBool = AtomicBool::new(false);

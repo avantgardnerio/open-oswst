@@ -27,17 +27,20 @@ use crate::codec::{
     CodecRequest, CodecResponse, CODEC2_FRAME_SAMPLES, CODEC_REPLY, FRAMES_PER_PACKET,
     HEADER_BYTES, PACKET_BYTES, PAYLOAD_BYTES, STEREO_PACKET_SAMPLES,
 };
-use crate::{TxRequest, IS_REPEATER, RX_CHAN, SPK_REQ, SPK_RESP, TX_CHAN};
+use crate::{TxRequest, IS_REPEATER, RX_CHAN, SPK_FRAMES, SPK_REQ, TX_CHAN};
 
 /// Packet type constants (5 bits, upper bits of header)
 const PKT_TYPE_VOICE: u8 = 0x00;
+
+/// Stereo samples per Codec2 frame (320 mono × 2 channels)
+const STEREO_FRAME_SAMPLES: usize = CODEC2_FRAME_SAMPLES * 2;
 
 /// Convert 12-bit unsigned ADC sample to signed 16-bit PCM centered at 0.
 fn adc_to_pcm(sample: &AdcMeasurement) -> i16 {
     (sample.data() as i16 - 2048) * 16
 }
 
-/// Generate 160ms squelch tail (white noise with fade-out), packet-sized for seq_buf.
+/// Generate 160ms squelch tail (white noise with fade-out), packet-sized.
 fn generate_squelch() -> Arc<[i16]> {
     const MONO_SAMPLES: usize = FRAMES_PER_PACKET * CODEC2_FRAME_SAMPLES; // 1280
     const AMPLITUDE: i32 = 8000;
@@ -50,6 +53,15 @@ fn generate_squelch() -> Arc<[i16]> {
         buf[i * 2 + 1] = noise;
     }
     buf.into()
+}
+
+/// Split a packet (4 × 40ms stereo frames) into individual frames and send to speaker.
+fn send_to_speaker(packet: &[i16]) {
+    for i in 0..FRAMES_PER_PACKET {
+        let offset = i * STEREO_FRAME_SAMPLES;
+        let frame: Arc<[i16]> = packet[offset..offset + STEREO_FRAME_SAMPLES].into();
+        let _ = SPK_FRAMES.try_send(frame);
+    }
 }
 
 type Display<'a> = Ssd1306<
@@ -102,7 +114,7 @@ pub async fn init(
     display.set_brightness(Brightness::BRIGHTEST).unwrap();
     log::info!("OLED initialized, MAC: {}", mac_str);
 
-    // Pre-generate audio buffers (Arc to avoid cloning 5KB on every gap)
+    // Pre-generate audio buffers
     let silence: Arc<[i16]> = vec![0i16; STEREO_PACKET_SAMPLES].into();
     let squelch = generate_squelch();
 
@@ -140,7 +152,7 @@ async fn app_loop(
     let mut last_played_seq: u8 = 0;
     let mut seq_buf: [Option<Arc<[i16]>>; 16] = Default::default();
     let mut last_rx_time = Instant::now();
-    let mut spk_active = false; // true once speaker has been kicked out of idle
+    let mut spk_active = false; // true once speaker has been kicked
 
     // Show initial RX state
     draw_rx_screen(&mut display, mac_str, &style);
@@ -149,9 +161,9 @@ async fn app_loop(
         // Auto-reset if no packet from current txid in 500ms
         if cur_txid.is_some() && last_rx_time.elapsed() > Duration::from_millis(500) {
             log::info!("RX timeout, resetting txid lock");
-            let next = (last_played_seq.wrapping_add(1)) & 0x0F;
-            seq_buf[next as usize] = Some(squelch.clone());
-            cur_txid = None;
+            send_to_speaker(&squelch);
+            reset_rx_state(&mut cur_txid, &mut last_played_seq, &mut seq_buf);
+            spk_active = false;
         }
 
         match select3(RX_CHAN.receive(), button.wait_for_low(), SPK_REQ.receive()).await {
@@ -192,10 +204,9 @@ async fn app_loop(
                         log::info!("RELAY EOT txid={}", txid);
                     }
                     log::info!("RX EOT from txid={}", txid);
-                    // Stuff squelch into seq_buf so speaker plays it naturally
-                    let next = (last_played_seq.wrapping_add(1)) & 0x0F;
-                    seq_buf[next as usize] = Some(squelch.clone());
-                    cur_txid = None;
+                    send_to_speaker(&squelch);
+                    reset_rx_state(&mut cur_txid, &mut last_played_seq, &mut seq_buf);
+                    spk_active = false;
                     continue;
                 }
 
@@ -206,8 +217,7 @@ async fn app_loop(
 
                 let payload = &rx_pkt.data[HEADER_BYTES..];
 
-                let was_idle = cur_txid.is_none();
-                if was_idle {
+                if cur_txid.is_none() {
                     cur_txid = Some(txid);
                     last_played_seq = seq.wrapping_sub(1) & 0x0F;
                 }
@@ -250,11 +260,10 @@ async fn app_loop(
                         if let CodecResponse::Decoded { seq, txid, pcm } =
                             CODEC_REPLY.receive().await
                         {
-                            // Ignore stale decode if txid changed during await
                             if cur_txid == Some(txid) {
                                 seq_buf[seq as usize] = Some(pcm.into());
 
-                                // Kick speaker once we have 2 consecutive packets buffered
+                                // Kick speaker once we have 2 consecutive packets
                                 if !spk_active {
                                     let next = (last_played_seq.wrapping_add(1)) & 0x0F;
                                     let next2 = (next.wrapping_add(1)) & 0x0F;
@@ -264,7 +273,7 @@ async fn app_loop(
                                         let pcm = seq_buf[next as usize].take().unwrap();
                                         last_played_seq = next;
                                         spk_active = true;
-                                        SPK_RESP.send(Some(pcm)).await;
+                                        send_to_speaker(&pcm);
                                     }
                                 }
                             }
@@ -297,10 +306,9 @@ async fn app_loop(
                 );
             }
             Either3::Second(_) => {
-                // PTT pressed — stop speaker immediately, reset RX state
+                // PTT pressed — reset RX state
                 reset_rx_state(&mut cur_txid, &mut last_played_seq, &mut seq_buf);
                 spk_active = false;
-                let _ = SPK_RESP.try_send(None);
 
                 // Generate random 7-bit txid for this PTT press (dedup key)
                 let txid = (unsafe { esp_idf_svc::sys::esp_random() } & 0x7F) as u8;
@@ -367,17 +375,14 @@ async fn app_loop(
                 let next = (last_played_seq.wrapping_add(1)) & 0x0F;
                 if let Some(pcm) = seq_buf[next as usize].take() {
                     last_played_seq = next;
-                    SPK_RESP.send(Some(pcm)).await;
+                    send_to_speaker(&pcm);
                 } else if cur_txid.is_some() {
                     // Gap — skip this seq, send silence
-                    last_played_seq = next;
+                    // last_played_seq = next;
                     log::info!("SPK gap at seq={}, sending silence", next);
-                    SPK_RESP.send(Some(Arc::clone(&silence))).await;
-                } else {
-                    // Transmission ended, nothing left — speaker goes idle
-                    spk_active = false;
-                    SPK_RESP.send(None).await;
+                    send_to_speaker(&silence);
                 }
+                // else: not receiving, nothing to send — DMA auto_clear handles silence
             }
         }
     }

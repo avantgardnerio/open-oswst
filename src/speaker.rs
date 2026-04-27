@@ -1,18 +1,13 @@
+use std::future::Future;
+
 use esp_idf_svc::hal::gpio::AnyIOPin;
 use esp_idf_svc::hal::i2s::config::{
     Config as I2sChannelConfig, DataBitWidth, SlotMode, StdClkConfig, StdConfig, StdGpioConfig,
     StdSlotConfig,
 };
 use esp_idf_svc::hal::i2s::{I2sDriver, I2sTx, I2S0};
-use std::future::Future;
 
-use crate::{SPK_REQ, SPK_RESP};
-
-/// Number of stereo samples per Codec2 frame (320 mono × 2 channels)
-const STEREO_FRAME_SAMPLES: usize = 320 * 2;
-
-/// Number of frames per packet
-const FRAMES_PER_PACKET: usize = 4;
+use crate::{SPK_FRAMES, SPK_REQ};
 
 pub struct Peripherals {
     pub i2s: I2S0<'static>,
@@ -21,14 +16,15 @@ pub struct Peripherals {
     pub spk_ws: AnyIOPin<'static>,
 }
 
-/// Convert i16 PCM slice to &[u8] for I2S write.
 fn pcm_as_bytes(pcm: &[i16]) -> &[u8] {
     unsafe { core::slice::from_raw_parts(pcm.as_ptr() as *const u8, pcm.len() * 2) }
 }
 
 pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
+    // 2 DMA buffers: one playing, one being filled. write_async on the 2nd
+    // blocks until DMA finishes the 1st — gives us 40ms pacing.
     let i2s_chan_cfg = I2sChannelConfig::new()
-        .dma_buffer_count(4)
+        .dma_buffer_count(2)
         .frames_per_buffer(320)
         .auto_clear(true);
     let std_config = StdConfig::new(
@@ -46,7 +42,7 @@ pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
         p.spk_ws,
     )
     .unwrap();
-    log::info!("I2S TX configured (8kHz stereo 16-bit Philips, 4 DMA bufs)");
+    log::info!("I2S TX configured (8kHz stereo 16-bit Philips, 2 DMA bufs)");
 
     async move {
         i2s_tx.tx_enable().unwrap();
@@ -57,33 +53,11 @@ pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
 
 async fn speaker_loop(mut i2s_tx: I2sDriver<'_, I2sTx>) {
     loop {
-        // Idle: wait for first audio to kick off playback
-        let Some(mut pcm) = SPK_RESP.receive().await else {
-            continue; // None while idle — ignore
-        };
+        let frame = SPK_FRAMES.receive().await;
+        i2s_tx.write_async(pcm_as_bytes(&frame)).await.unwrap();
 
-        // Playing loop
-        loop {
-            write_packet(&mut i2s_tx, &pcm).await;
-
-            // Get next response (should already be waiting)
-            match SPK_RESP.receive().await {
-                Some(next_pcm) => pcm = next_pcm,
-                None => break, // go idle
-            }
-        }
-    }
-}
-
-async fn write_packet(i2s_tx: &mut I2sDriver<'_, I2sTx>, pcm: &[i16]) {
-    for frame in 0..FRAMES_PER_PACKET {
-        let offset = frame * STEREO_FRAME_SAMPLES;
-        let frame_data = &pcm[offset..offset + STEREO_FRAME_SAMPLES];
-        i2s_tx.write_async(pcm_as_bytes(frame_data)).await.unwrap();
-
-        if frame == 1 {
-            // Request next packet — frames 2+3 still in DMA = ~80ms for app to respond
-            SPK_REQ.send(()).await;
+        if SPK_FRAMES.len() <= 1 {
+            let _ = SPK_REQ.try_send(());
         }
     }
 }

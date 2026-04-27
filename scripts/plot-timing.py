@@ -17,7 +17,7 @@ def parse_log(path):
     """Return list of (timestamp_ms, device, event) tuples."""
     events = []
     t0 = None
-    for line in open(path):
+    for line in open(path, errors="replace"):
         m = LOG_RE.match(line)
         if not m:
             continue
@@ -143,7 +143,6 @@ def plot(waves):
     out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "out", "timing.png")
     plt.savefig(out_path, dpi=150)
     print(f"Saved {out_path}")
-    plt.show()
 
 
 if __name__ == "__main__":
