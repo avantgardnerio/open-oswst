@@ -130,6 +130,16 @@ ptt_hole = Pos(WIDTH / 2, ptt_y, ptt_z) * Rot(0, 90, 0) * Cylinder(
 )
 bottom = bottom - ptt_hole
 
+# Kenwood jack through left wall (negative X), 3.5mm on top, 2.5mm below, 12mm apart
+KENWOOD_SPACING = 12
+kenwood_y_top = -(LENGTH / 2 - 45)  # 3.5mm jack 45mm from bottom
+kenwood_z = ptt_z
+for jack_dia, y_off in [(3.5, 0), (2.5, -KENWOOD_SPACING)]:
+    jack = Pos(-WIDTH / 2, kenwood_y_top + y_off, kenwood_z) * Rot(0, 90, 0) * Cylinder(
+        radius=jack_dia / 2, height=WALL * 3
+    )
+    bottom = bottom - jack
+
 # USB-C hole through right wall (positive X)
 USBC_W = 9    # along Y
 USBC_H = 4    # along Z
