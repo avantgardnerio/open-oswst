@@ -7,7 +7,7 @@ OUT = Path(__file__).parent
 
 # Overall dimensions
 WIDTH = 80
-LENGTH = 110
+LENGTH = 125
 HEIGHT = 30
 WALL = 2
 FILLET_R = 3
@@ -153,6 +153,33 @@ screen_hole = Pos(screen_center_x, screen_center_y, -HEIGHT / 2) * Box(
     SCREEN_W, SCREEN_H, WALL * 3  # oversized in Z to cut clean through
 )
 bottom = bottom - screen_hole
+
+# Speaker hole through floor (negative Z face), 28x28mm
+SPEAKER_SIZE = 28
+PA_BOARD_W = 26
+inner_left = -WIDTH / 2 + WALL
+speaker_center_x = inner_left + PA_BOARD_W + (WIDTH - 2 * WALL - PA_BOARD_W) / 2
+speaker_center_y = LENGTH / 2 - 12 - SPEAKER_SIZE / 2  # 12mm from top
+speaker_hole = Pos(speaker_center_x, speaker_center_y, -HEIGHT / 2) * Box(
+    SPEAKER_SIZE, SPEAKER_SIZE, WALL * 3
+)
+bottom = bottom - speaker_hole
+
+# Speaker screw holes, 36mm apart, centered on speaker
+for sx in [-18, 18]:
+    screw = Pos(speaker_center_x + sx, speaker_center_y, -HEIGHT / 2) * Cylinder(
+        radius=AMP_POST_ID / 2, height=WALL * 3
+    )
+    bottom = bottom - screw
+
+# Mic hole through floor, 53mm below top perfboard post, 4mm right of left post
+MIC_DIA = 10
+mic_x = 0  # centered horizontally
+mic_y = perf_top_post_y - 53
+mic_hole = Pos(mic_x, mic_y, -HEIGHT / 2) * Cylinder(
+    radius=MIC_DIA / 2, height=WALL * 3
+)
+bottom = bottom - mic_hole
 
 # Move both onto the bed (Z=0) and place lid next to bottom
 bottom = Pos(0, 0, -bottom.bounding_box().min.Z) * bottom
