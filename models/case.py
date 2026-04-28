@@ -121,6 +121,15 @@ for enc_x in [enc1_center_x, enc2_center_x]:
     )
     bottom = bottom - enc_hole
 
+# PTT button hole through right wall (positive X), 13mm from top wall
+PTT_DIA = 16
+ptt_y = LENGTH / 2 - 31  # 31mm from top (antenna end) — split the diff, tune after print
+ptt_z = -2.5  # centered on usable wall height, clears floor and rim
+ptt_hole = Pos(WIDTH / 2, ptt_y, ptt_z) * Rot(0, 90, 0) * Cylinder(
+    radius=PTT_DIA / 2, height=WALL * 3
+)
+bottom = bottom - ptt_hole
+
 # USB-C hole through right wall (positive X)
 USBC_W = 9    # along Y
 USBC_H = 4    # along Z
