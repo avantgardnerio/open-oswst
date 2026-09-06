@@ -56,7 +56,7 @@
   )
 
   (gr_rect (start 113 113) (end 183 163) (stroke (width 0.1) (type solid)) (fill none) (layer "Edge.Cuts"))
-  (gr_text "open-oswst  e1d08f2"
+  (gr_text "open-oswst  a2b3f21"
     (at 148.0 161)
     (layer "F.SilkS")
     (effects (font (size 0.8 0.8) (thickness 0.12)))
