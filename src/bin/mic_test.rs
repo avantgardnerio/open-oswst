@@ -19,7 +19,7 @@ use ssd1306::prelude::*;
 use ssd1306::{I2CDisplayInterface, Ssd1306};
 use std::fmt::Write as FmtWrite;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Display width = number of waveform samples to show
 const WAVE_W: usize = 128;
@@ -41,12 +41,13 @@ fn main() {
     vext.set_low().unwrap();
     thread::sleep(Duration::from_millis(50));
 
-    // ADC continuous for mic on GPIO7 at 8kHz
+    // ADC continuous for mic on GPIO4 (ADC1_CH3) at 8kHz — matches the PCB's MIC_OUT net.
+    // (The original radio was wired to GPIO7; the PCB moved MIC_OUT to GPIO4.)
     let adc_cfg = AdcContConfig::new()
         .sample_freq(Hertz(8000))
         .frame_measurements(320)
         .frames_count(2);
-    let mut adc = AdcContDriver::new(p.adc1, &adc_cfg, Attenuated::db12(p.pins.gpio7)).unwrap();
+    let mut adc = AdcContDriver::new(p.adc1, &adc_cfg, Attenuated::db12(p.pins.gpio4)).unwrap();
 
     // Reset OLED
     let mut oled_rst = PinDriver::output(p.pins.gpio21).unwrap();
@@ -83,8 +84,10 @@ fn main() {
     let mut wave_pos: usize = 0;
     let mut label_buf = heapless::String::<32>::new();
 
+    let mut last_log = Instant::now();
+
     adc.start().unwrap();
-    log::info!("ADC started — showing waveform + VU");
+    log::info!("ADC started on GPIO4 — showing waveform + VU");
 
     loop {
         // Read a batch of ADC samples
@@ -96,16 +99,40 @@ fn main() {
 
         // Feed into ring buffer + compute peak
         let mut peak: i32 = 0;
+        let mut raw_min = u16::MAX;
+        let mut raw_max = 0u16;
         for i in 0..count {
             let raw = adc_buf[i].data(); // 12-bit, 0-4095
             wave[wave_pos] = raw;
             wave_pos = (wave_pos + 1) % WAVE_W;
+
+            if raw < raw_min {
+                raw_min = raw;
+            }
+            if raw > raw_max {
+                raw_max = raw;
+            }
 
             let centered = (raw as i32) - 2048;
             let abs = centered.abs();
             if abs > peak {
                 peak = abs;
             }
+        }
+
+        // Throttled serial log. raw min/max matter more than `peak` here: the MAX9814 biases
+        // its output near 1.25V (~1550 counts), not mid-rail, so `peak` reads ~500 at silence.
+        // A live mic shows min/max spreading apart when you talk; a dead one stays pinned.
+        if last_log.elapsed() >= Duration::from_millis(250) {
+            log::info!(
+                "raw min={} max={} spread={} peak={} n={}",
+                raw_min,
+                raw_max,
+                raw_max.saturating_sub(raw_min),
+                peak,
+                count
+            );
+            last_log = Instant::now();
         }
 
         // Draw

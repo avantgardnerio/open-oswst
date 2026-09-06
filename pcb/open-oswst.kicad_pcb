@@ -56,7 +56,7 @@
   )
 
   (gr_rect (start 113 113) (end 183 163) (stroke (width 0.1) (type solid)) (fill none) (layer "Edge.Cuts"))
-  (gr_text "open-oswst  4d31d95"
+  (gr_text "open-oswst  e1d08f2"
     (at 148.0 161)
     (layer "F.SilkS")
     (effects (font (size 0.8 0.8) (thickness 0.12)))
@@ -120,7 +120,7 @@
   )
   (footprint "JST_PH_B2B"
     (layer "F.Cu")
-    (at 125 118)
+    (at 125 117)
     (fp_text reference "BAT" (at 0 -2.5) (layer "F.SilkS")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -141,7 +141,7 @@
   )
   (footprint "JST_PH_B2B"
     (layer "F.Cu")
-    (at 132 118)
+    (at 132 117)
     (fp_text reference "SW" (at 0 -2.5) (layer "F.SilkS")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -162,7 +162,7 @@
   )
   (footprint "JST_PH_B2B"
     (layer "F.Cu")
-    (at 139 118)
+    (at 139 117)
     (fp_text reference "PA" (at 0 -2.5) (layer "F.SilkS")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -183,7 +183,7 @@
   )
   (footprint "JST_PH_B4B"
     (layer "F.Cu")
-    (at 149 118)
+    (at 149 117)
     (fp_text reference "CHNL" (at 0 -2.5) (layer "F.SilkS")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -218,7 +218,7 @@
   )
   (footprint "JST_PH_B4B"
     (layer "F.Cu")
-    (at 160 118)
+    (at 160 117)
     (fp_text reference "VOL" (at 0 -2.5) (layer "F.SilkS")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -253,7 +253,7 @@
   )
   (footprint "JST_PH_B2B"
     (layer "F.Cu")
-    (at 170 118)
+    (at 170 117)
     (fp_text reference "PTT" (at 0 -2.5) (layer "F.SilkS")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -316,7 +316,7 @@
   )
   (footprint "PinHeader_1x18_P2.54mm"
     (layer "F.Cu")
-    (at 158.41 126.57)
+    (at 158.41 122.57)
     (fp_text reference "J3" (at 0 -2.5) (layer "F.SilkS")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -439,7 +439,7 @@
   )
   (footprint "PinHeader_1x18_P2.54mm"
     (layer "F.Cu")
-    (at 158.41 149.43)
+    (at 158.41 145.43)
     (fp_text reference "J2" (at 0 -2.5) (layer "F.SilkS")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -561,7 +561,7 @@
   )
   (footprint "PinHeader_1x5_P2.54mm"
     (layer "F.Cu")
-    (at 148.0 158)
+    (at 148.0 154)
     (fp_text reference "MIC" (at 0 -2.5) (layer "F.SilkS")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -601,7 +601,7 @@
   )
   (footprint "PinHeader_1x7_P2.54mm"
     (layer "F.Cu")
-    (at 123.62 155 180)
+    (at 123.62 151 180)
     (fp_text reference "AMP" (at 0 -2.5) (layer "F.SilkS")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -655,7 +655,7 @@
   )
   (footprint "PinHeader_1x2_P3.5mm"
     (layer "F.Cu")
-    (at 123.62 142.046 180)
+    (at 123.62 138.046 180)
     (fp_text reference "AMP_SPK" (at 0 -2.5) (layer "F.SilkS")
       (effects (font (size 1 1) (thickness 0.15)))
     )

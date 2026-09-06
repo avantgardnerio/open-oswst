@@ -20,7 +20,7 @@ for x in (BX + INSET_LR, BX + BW - INSET_LR):
         board.add_mounting_hole(x, y, drill=2.2)
 
 # Connectors along top edge — fit between drill holes (INSET_LR)
-cx, cy = BX + INSET_LR + 7, BY + 5
+cx, cy = BX + INSET_LR + 7, BY + 4
 board.add_jst_ph(cx, cy, pins=2, label="BAT",
                  pad_labels=["+", "-"], pad_nets=["VBAT", "GND"]); cx += 7
 board.add_jst_ph(cx, cy, pins=2, label="SW",
@@ -49,7 +49,7 @@ board.add_jst_ph(BX + 5, BY + INSET_TB + 14, pins=2, label="SPK", angle=90,
 # Heltec V4 headers — two 18-pin rows
 J3_SPAN = 17 * 2.54  # 18 pins, 17 gaps
 HELTEC_WIDTH = 22.86  # distance between J3 and J2 header rows
-HY = BY + BH / 2 - HELTEC_WIDTH / 2  # J3 y (top row)
+HY = BY + BH / 2 - HELTEC_WIDTH / 2 - 4  # J3 y (top row), shifted 4mm toward top-edge JSTs
 
 board.add_header(BX + BW - 3 - J3_SPAN / 2, HY, pins=18, label="J3",
                  pad_labels=["GPIO7", "GPIO6", "GPIO5", "GPIO4", "GPIO3", "GPIO2",
@@ -70,11 +70,11 @@ board.add_header(BX + BW - 3 - J2_SPAN / 2, HY + HELTEC_WIDTH, pins=18, label="J
                            None, None, "Ve", "Ve", None, "GND"])
 
 # Board headers along bottom edge
-board.add_header(BX + BW / 2, BY + BH - 5, pins=5, label="MIC",
+board.add_header(BX + BW / 2, BY + BH - 9, pins=5, label="MIC",
                  pad_labels=["AR", "OUT", "GAIN", "VDD", "GND"],
                  pad_nets=[None, "MIC_OUT", None, "Ve", "GND"])
 AMP_X = BX + 3 + 3 * 2.54
-AMP_Y = BY + BH - 3 - 5
+AMP_Y = BY + BH - 3 - 5 - 4
 board.add_header(AMP_X, AMP_Y, pins=7, label="AMP", angle=180,
                  pad_labels=["Vin", "GND", "SD", "GAIN", "DIN", "BCLK", "LRC"],
                  pad_nets=["Ve", "GND", None, None, "DIN", "BCLK", "LRC"])
