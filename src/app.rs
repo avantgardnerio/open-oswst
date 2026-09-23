@@ -17,11 +17,11 @@ use std::time::{Duration, Instant};
 
 use std::sync::atomic::Ordering;
 
-use crate::codec::{
+use crate::IS_REPEATER;
+use open_oswst::codec::{
     CodecRequest, CodecResponse, CODEC2_FRAME_SAMPLES, CODEC_REPLY, FRAMES_PER_PACKET,
     HEADER_BYTES, PACKET_BYTES, PAYLOAD_BYTES, STEREO_PACKET_SAMPLES,
 };
-use crate::IS_REPEATER;
 
 /// Packet type constants (5 bits, upper bits of header)
 const PKT_TYPE_VOICE: u8 = 0x00;

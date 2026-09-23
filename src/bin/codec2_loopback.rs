@@ -1,8 +1,7 @@
 //! Audio loopback test with Codec2 — hold PTT to record, release to encode→decode→play.
-//! Same Codec2 mode as the main app (MODE_1200), no radio.
+//! Goes through the main app's codec thread (codec.rs) in whole packets, no radio.
 //! Build & flash: cargo build --bin codec2_loopback && espflash flash -p /dev/ttyACM1 --partition-table target/xtensa-esp32s3-espidf/debug/partition-table.bin target/xtensa-esp32s3-espidf/debug/codec2_loopback
 
-use codec2::{Codec2, Codec2Mode};
 use embassy_futures::join::join;
 use embedded_graphics::mono_font::ascii::FONT_10X20;
 use embedded_graphics::mono_font::{MonoTextStyle, MonoTextStyleBuilder};
@@ -12,17 +11,20 @@ use embedded_graphics::text::Text;
 use esp_idf_svc::hal::gpio::{PinDriver, Pull};
 use esp_idf_svc::hal::task::block_on;
 use open_oswst::board;
+use open_oswst::codec::{
+    self, CodecRequest, CodecResponse, CODEC_REPLY, FRAMES_PER_PACKET, HEADER_BYTES, PAYLOAD_BYTES,
+};
 use open_oswst::mic::{self, FRAME_SAMPLES};
 use open_oswst::screen::{self, Screen};
 use open_oswst::speaker::{self, SPK_FRAMES};
 use std::sync::Arc;
 
-/// Codec2 MODE_1200: 320 samples (40ms) → 6 bytes per frame
-const FRAME_BYTES: usize = 6;
+/// Mono samples per packet (4 frames × 320 = 160ms)
+const PACKET_SAMPLES: usize = FRAMES_PER_PACKET * FRAME_SAMPLES;
 
-/// Max recording: 5 seconds = 125 frames
-const MAX_FRAMES: usize = 125;
-const MAX_SAMPLES: usize = MAX_FRAMES * FRAME_SAMPLES; // 40000
+/// Max recording: ~5 seconds = 31 packets
+const MAX_PACKETS: usize = 31;
+const MAX_SAMPLES: usize = MAX_PACKETS * PACKET_SAMPLES; // 39680
 
 fn show_status(screen: &Screen, style: MonoTextStyle<'_, BinaryColor>, msg: &str) {
     let mut frame = screen.frame();
@@ -44,12 +46,16 @@ fn main() {
         .text_color(BinaryColor::On)
         .build();
 
-    let mut encoder = Box::new(Codec2::new(Codec2Mode::MODE_1200));
-    let mut decoder = Box::new(Codec2::new(Codec2Mode::MODE_1200));
-    log::info!("Codec2 initialized (MODE_1200)");
+    // Codec thread, same as the main app
+    let (codec_tx, codec_rx) = std::sync::mpsc::sync_channel::<CodecRequest>(2);
+    std::thread::Builder::new()
+        .name("codec".into())
+        .stack_size(32768)
+        .spawn(move || codec::run(codec_rx))
+        .unwrap();
 
     let mut rec_buf = vec![0i16; MAX_SAMPLES];
-    let mut codec_buf = vec![0u8; MAX_FRAMES * FRAME_BYTES];
+    let mut payloads = vec![[0u8; PAYLOAD_BYTES]; MAX_PACKETS];
 
     block_on(async {
         let speaker_fut = speaker::init(board.speaker).await;
@@ -61,52 +67,66 @@ fn main() {
             loop {
                 button.wait_for_low().await.unwrap();
 
-                // --- Record ---
+                // --- Record (whole packets) ---
                 log::info!("Recording...");
                 show_status(&screen, style, "LISTENING");
                 mic.drain();
-                let mut num_frames = 0;
-                while button.is_low() && num_frames < MAX_FRAMES {
-                    let start = num_frames * FRAME_SAMPLES;
-                    mic.read(&mut rec_buf[start..start + FRAME_SAMPLES]).await;
-                    num_frames += 1;
+                let mut num_packets = 0;
+                while button.is_low() && num_packets < MAX_PACKETS {
+                    for i in 0..FRAMES_PER_PACKET {
+                        let start = num_packets * PACKET_SAMPLES + i * FRAME_SAMPLES;
+                        mic.read(&mut rec_buf[start..start + FRAME_SAMPLES]).await;
+                    }
+                    num_packets += 1;
                 }
-                log::info!("Recorded {} frames ({}ms)", num_frames, num_frames * 40);
-                if num_frames == 0 {
+                log::info!("Recorded {} packets ({}ms)", num_packets, num_packets * 160);
+                if num_packets == 0 {
                     continue;
                 }
 
                 // --- Encode ---
                 let t0 = std::time::Instant::now();
-                for f in 0..num_frames {
-                    let pcm = &rec_buf[f * FRAME_SAMPLES..(f + 1) * FRAME_SAMPLES];
-                    let coded = &mut codec_buf[f * FRAME_BYTES..(f + 1) * FRAME_BYTES];
-                    encoder.encode(coded, pcm);
+                for (p, payload) in payloads[..num_packets].iter_mut().enumerate() {
+                    let pcm: Box<[i16]> =
+                        rec_buf[p * PACKET_SAMPLES..(p + 1) * PACKET_SAMPLES].into();
+                    codec_tx
+                        .send(CodecRequest::encode([0; HEADER_BYTES], pcm))
+                        .unwrap();
+                    if let CodecResponse::Encoded { packet } = CODEC_REPLY.receive().await {
+                        payload.copy_from_slice(&packet[HEADER_BYTES..]);
+                    }
                 }
                 let enc_ms = t0.elapsed().as_millis();
 
-                // --- Decode (in place over the recording, before playback, so
-                // codec time can't starve the speaker) ---
+                // --- Decode (all before playback, so codec time can't starve the
+                // speaker). Output is stereo L=R; keep the left channel, back over
+                // the recording, to avoid a second 160KB buffer ---
                 let t0 = std::time::Instant::now();
-                for f in 0..num_frames {
-                    let coded = &codec_buf[f * FRAME_BYTES..(f + 1) * FRAME_BYTES];
-                    decoder.decode(
-                        &mut rec_buf[f * FRAME_SAMPLES..(f + 1) * FRAME_SAMPLES],
-                        coded,
-                    );
+                for (p, payload) in payloads[..num_packets].iter().enumerate() {
+                    let seq = (p & 0x0F) as u8;
+                    codec_tx
+                        .send(CodecRequest::decode(seq, 0, *payload))
+                        .unwrap();
+                    if let CodecResponse::Decoded { pcm, .. } = CODEC_REPLY.receive().await {
+                        let mono = &mut rec_buf[p * PACKET_SAMPLES..(p + 1) * PACKET_SAMPLES];
+                        for (dst, lr) in mono.iter_mut().zip(pcm.chunks(2)) {
+                            *dst = lr[0];
+                        }
+                    }
                 }
                 let dec_ms = t0.elapsed().as_millis();
                 log::info!(
-                    "Encoded {} frames in {}ms, decoded in {}ms",
-                    num_frames,
+                    "Encoded {} packets in {}ms ({}ms/packet), decoded in {}ms",
+                    num_packets,
                     enc_ms,
+                    enc_ms / num_packets as u128,
                     dec_ms
                 );
 
                 // --- Play ---
                 log::info!("Playing...");
                 show_status(&screen, style, "PLAYING");
-                for chunk in rec_buf[..num_frames * FRAME_SAMPLES].chunks(FRAME_SAMPLES) {
+                for chunk in rec_buf[..num_packets * PACKET_SAMPLES].chunks(FRAME_SAMPLES) {
                     // Mono → stereo interleave
                     let stereo: Arc<[i16]> = chunk.iter().flat_map(|&s| [s, s]).collect();
                     SPK_FRAMES.send(stereo).await;

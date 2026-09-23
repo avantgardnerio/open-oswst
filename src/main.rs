@@ -1,10 +1,9 @@
 mod app;
-mod codec;
 
 use embassy_futures::join::join3;
 use esp_idf_svc::hal::task::block_on;
 use esp_idf_svc::nvs::{EspCustomNvsPartition, EspNvs};
-use open_oswst::{board, mic, radio, screen, speaker};
+use open_oswst::{board, codec, mic, radio, screen, speaker};
 use std::sync::atomic::AtomicBool;
 
 /// Whether this device is a repeater, read from NVS at boot.
