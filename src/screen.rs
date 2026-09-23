@@ -1,8 +1,9 @@
 //! 128×64 SSD1306 OLED. Knows about pixels, nothing else.
 //!
-//! Double buffered: callers draw into a [`Frame`] (any embedded-graphics
-//! `DrawTarget` op works) and hand it to [`Screen::show`]. A dedicated thread
-//! pushes it over I2C (~90ms at 100kHz) so the caller never blocks on the bus.
+//! Double buffered, latest frame wins: callers draw into a [`Frame`] (any
+//! embedded-graphics `DrawTarget` op works) and hand it to [`Screen::show`].
+//! A dedicated thread pushes it over I2C (~90ms at 100kHz). Callers never
+//! block — a frame shown while the bus is busy replaces any still-pending one.
 
 use core::convert::Infallible;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -72,9 +73,10 @@ impl DrawTarget for Frame {
 }
 
 /// Frames circulate FREE → caller draws → READY → thread flushes → FREE.
-/// Two frames total: one being drawn while the other is on the bus.
+/// Two frames total. The thread holds at most one, so as long as the caller
+/// holds at most one too, the other is always in FREE or READY.
 static FREE: Channel<CriticalSectionRawMutex, Frame, 2> = Channel::new();
-static READY: Channel<CriticalSectionRawMutex, Frame, 2> = Channel::new();
+static READY: Channel<CriticalSectionRawMutex, Frame, 1> = Channel::new();
 
 pub struct Peripherals {
     pub i2c: I2C0<'static>,
@@ -87,15 +89,25 @@ pub struct Peripherals {
 pub struct Screen(());
 
 impl Screen {
-    /// Wait for a free frame. Contents are whatever was drawn last — clear it
-    /// if you want a blank slate.
-    pub async fn frame(&self) -> Frame {
-        FREE.receive().await
+    /// Get a blank frame to draw into. Never blocks: if a frame is still
+    /// waiting to be flushed, it's reclaimed — it would be overwritten anyway.
+    /// Hold at most one frame at a time.
+    pub fn frame(&self) -> Frame {
+        loop {
+            // Both can be momentarily empty while the thread swaps frames
+            if let Ok(mut frame) = READY.try_receive().or_else(|_| FREE.try_receive()) {
+                let _ = frame.clear(BinaryColor::Off);
+                return frame;
+            }
+            thread::yield_now();
+        }
     }
 
-    /// Queue a frame for display.
+    /// Display a frame, replacing any frame still waiting to be flushed.
     pub fn show(&self, frame: Frame) {
-        // Can't fail: only 2 frames exist and READY holds 2
+        if let Ok(stale) = READY.try_receive() {
+            let _ = FREE.try_send(stale);
+        }
         let _ = READY.try_send(frame);
     }
 }

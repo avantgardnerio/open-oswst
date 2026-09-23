@@ -9,7 +9,6 @@ use embedded_graphics::prelude::*;
 use embedded_graphics::text::Text;
 use esp_idf_svc::hal::gpio::PinDriver;
 use esp_idf_svc::hal::peripherals::Peripherals;
-use esp_idf_svc::hal::task::block_on;
 use open_oswst::screen;
 use std::thread;
 use std::time::Duration;
@@ -40,8 +39,7 @@ fn main() {
         .text_color(BinaryColor::On)
         .build();
 
-    let mut frame = block_on(screen.frame());
-    frame.clear(BinaryColor::Off).unwrap();
+    let mut frame = screen.frame();
     Text::new("Hello", Point::new(8, 24), style)
         .draw(&mut frame)
         .unwrap();

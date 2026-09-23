@@ -9,16 +9,11 @@ use esp_idf_svc::hal::adc::continuous::{AdcDriver as AdcContDriver, AdcMeasureme
 use esp_idf_svc::hal::adc::ADC1;
 use esp_idf_svc::hal::gpio::{AnyIOPin, Gpio7};
 use esp_idf_svc::hal::gpio::{Input, PinDriver, Pull};
-use esp_idf_svc::hal::i2c::config::Config as I2cConfig;
-use esp_idf_svc::hal::i2c::{I2cDriver, I2C0};
 use esp_idf_svc::hal::units::Hertz;
-use ssd1306::mode::BufferedGraphicsMode;
-use ssd1306::prelude::*;
-use ssd1306::{I2CDisplayInterface, Ssd1306};
+use open_oswst::screen::Screen;
 use std::future::Future;
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use std::sync::atomic::Ordering;
@@ -64,24 +59,15 @@ fn send_to_speaker(packet: &[i16]) {
     }
 }
 
-type Display<'a> = Ssd1306<
-    I2CInterface<I2cDriver<'a>>,
-    DisplaySize128x64,
-    BufferedGraphicsMode<DisplaySize128x64>,
->;
-
 pub struct Peripherals {
     pub ptt: AnyIOPin<'static>,
     pub audio_in: Gpio7<'static>, // must stay concrete — ADCPin trait is pin-specific
     pub adc: ADC1<'static>,
-    pub i2c: I2C0<'static>,
-    pub oled_sda: AnyIOPin<'static>,
-    pub oled_scl: AnyIOPin<'static>,
-    pub oled_rst: AnyIOPin<'static>,
 }
 
 pub async fn init(
     p: Peripherals,
+    screen: Screen,
     mac_str: heapless::String<18>,
     codec_tx: SyncSender<CodecRequest>,
 ) -> impl Future<Output = ()> {
@@ -96,23 +82,7 @@ pub async fn init(
 
     let mut adc = AdcContDriver::new(p.adc, &adc_config, Attenuated::db12(p.audio_in)).unwrap();
 
-    // Reset OLED
-    let mut oled_rst = PinDriver::output(p.oled_rst).unwrap();
-    oled_rst.set_low().unwrap();
-    thread::sleep(Duration::from_millis(50));
-    oled_rst.set_high().unwrap();
-    thread::sleep(Duration::from_millis(50));
-
-    // I2C for OLED
-    let i2c = I2cDriver::new(p.i2c, p.oled_sda, p.oled_scl, &I2cConfig::default()).unwrap();
-
-    // OLED init
-    let interface = I2CDisplayInterface::new(i2c);
-    let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
-        .into_buffered_graphics_mode();
-    display.init().unwrap();
-    display.set_brightness(Brightness::BRIGHTEST).unwrap();
-    log::info!("OLED initialized, MAC: {}", mac_str);
+    log::info!("MAC: {}", mac_str);
 
     // Pre-generate audio buffers
     let silence: Arc<[i16]> = vec![0i16; STEREO_PACKET_SAMPLES].into();
@@ -123,16 +93,14 @@ pub async fn init(
     log::info!("ADC DMA started at 8kHz");
 
     async move {
-        // Keep oled_rst alive so the pin doesn't float low (holding OLED in reset)
-        let _oled_rst = oled_rst;
-        app_loop(button, adc, display, &mac_str, codec_tx, silence, squelch).await;
+        app_loop(button, adc, screen, &mac_str, codec_tx, silence, squelch).await;
     }
 }
 
 async fn app_loop(
     mut button: PinDriver<'_, Input>,
     mut adc: AdcContDriver<'_>,
-    mut display: Display<'_>,
+    screen: Screen,
     mac_str: &str,
     codec_tx: SyncSender<CodecRequest>,
     silence: Arc<[i16]>,
@@ -155,7 +123,7 @@ async fn app_loop(
     let mut spk_active = false; // true once speaker has been kicked
 
     // Show initial RX state
-    draw_rx_screen(&mut display, mac_str, &style);
+    draw_rx_screen(&screen, mac_str, &style);
 
     loop {
         // Auto-reset if no packet from current txid in 500ms
@@ -297,7 +265,7 @@ async fn app_loop(
                 );
 
                 draw_rx_audio_screen(
-                    &mut display,
+                    &screen,
                     mac_str,
                     &style,
                     &mut line_buf,
@@ -315,14 +283,7 @@ async fn app_loop(
                 let mut seq: u8 = 0;
                 log::info!("PTT pressed — streaming (txid={})", txid);
 
-                display.clear_buffer();
-                Text::new(mac_str, Point::new(1, 10), style)
-                    .draw(&mut display)
-                    .unwrap();
-                Text::new("TX Streaming", Point::new(10, 36), style)
-                    .draw(&mut display)
-                    .unwrap();
-                display.flush().unwrap();
+                draw_tx_screen(&screen, mac_str, &style);
 
                 let _ = adc.read(&mut mic_buf, 0); // drain stale
 
@@ -368,7 +329,7 @@ async fn app_loop(
                 log::info!("PTT released — {} packets sent + EOT", seq);
 
                 // Redraw RX screen
-                draw_rx_screen(&mut display, mac_str, &style);
+                draw_rx_screen(&screen, mac_str, &style);
             }
             Either3::Third(_) => {
                 // Speaker wants next audio
@@ -399,41 +360,59 @@ fn reset_rx_state(
 }
 
 fn draw_rx_audio_screen(
-    display: &mut Display<'_>,
+    screen: &Screen,
     mac_str: &str,
-    style: &embedded_graphics::mono_font::MonoTextStyle<BinaryColor>,
+    style: &embedded_graphics::mono_font::MonoTextStyle<'_, BinaryColor>,
     line_buf: &mut heapless::String<64>,
     rssi: i16,
     snr: i16,
 ) {
-    display.clear_buffer();
+    let mut frame = screen.frame();
+    frame.clear(BinaryColor::Off).unwrap();
     Text::new(mac_str, Point::new(1, 10), *style)
-        .draw(display)
+        .draw(&mut frame)
         .unwrap();
     Text::new("RX Audio", Point::new(28, 32), *style)
-        .draw(display)
+        .draw(&mut frame)
         .unwrap();
 
     line_buf.clear();
     let _ = core::fmt::write(line_buf, format_args!("RSSI:{} SNR:{}", rssi, snr));
     Text::new(line_buf, Point::new(0, 48), *style)
-        .draw(display)
+        .draw(&mut frame)
         .unwrap();
 
-    display.flush().unwrap();
+    screen.show(frame);
 }
 
 fn draw_rx_screen(
-    display: &mut Display<'_>,
+    screen: &Screen,
     mac_str: &str,
-    style: &embedded_graphics::mono_font::MonoTextStyle<BinaryColor>,
+    style: &embedded_graphics::mono_font::MonoTextStyle<'_, BinaryColor>,
 ) {
-    display.clear_buffer();
+    let mut frame = screen.frame();
+    frame.clear(BinaryColor::Off).unwrap();
     Text::new(mac_str, Point::new(1, 10), *style)
-        .draw(display)
+        .draw(&mut frame)
         .unwrap();
     Text::new("RX Listening", Point::new(16, 36), *style)
-        .draw(display)
+        .draw(&mut frame)
         .unwrap();
-    display.flush().unwrap();
+    screen.show(frame);
+}
+
+fn draw_tx_screen(
+    screen: &Screen,
+    mac_str: &str,
+    style: &embedded_graphics::mono_font::MonoTextStyle<'_, BinaryColor>,
+) {
+    let mut frame = screen.frame();
+    frame.clear(BinaryColor::Off).unwrap();
+    Text::new(mac_str, Point::new(1, 10), *style)
+        .draw(&mut frame)
+        .unwrap();
+    Text::new("TX Streaming", Point::new(10, 36), *style)
+        .draw(&mut frame)
+        .unwrap();
+    screen.show(frame);
 }

@@ -10,6 +10,7 @@ use esp_idf_svc::hal::gpio::PinDriver;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::hal::task::block_on;
 use esp_idf_svc::nvs::{EspCustomNvsPartition, EspNvs};
+use open_oswst::screen;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::thread;
@@ -68,8 +69,14 @@ fn main() {
 
     // Read config from dedicated NVS partition
     let nvs_partition = EspCustomNvsPartition::take("open-oswst").unwrap();
-    let nvs = EspNvs::new(nvs_partition, "config", false).unwrap();
-    let repeater = nvs.get_u8("repeater").unwrap().unwrap_or(0) != 0;
+    // Unprovisioned boards have no config namespace — fall back to defaults
+    let repeater = match EspNvs::new(nvs_partition, "config", false) {
+        Ok(nvs) => nvs.get_u8("repeater").unwrap().unwrap_or(0) != 0,
+        Err(e) => {
+            log::warn!("No NVS config ({}), using defaults", e);
+            false
+        }
+    };
     IS_REPEATER.store(repeater, std::sync::atomic::Ordering::Relaxed);
     log::info!("Config: repeater={}", repeater);
 
@@ -113,16 +120,20 @@ fn main() {
         })
         .await;
 
+        let screen = screen::init(screen::Peripherals {
+            i2c: peripherals.i2c0,
+            sda: peripherals.pins.gpio17.into(),
+            scl: peripherals.pins.gpio18.into(),
+            rst: peripherals.pins.gpio21.into(),
+        });
+
         let app_fut = app::init(
             app::Peripherals {
                 ptt: peripherals.pins.gpio0.into(),
                 audio_in: peripherals.pins.gpio7,
                 adc: peripherals.adc1,
-                i2c: peripherals.i2c0,
-                oled_sda: peripherals.pins.gpio17.into(),
-                oled_scl: peripherals.pins.gpio18.into(),
-                oled_rst: peripherals.pins.gpio21.into(),
             },
+            screen,
             mac_str,
             codec_tx,
         )
