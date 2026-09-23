@@ -7,7 +7,15 @@ OUT = Path(__file__).parent
 
 # Overall dimensions
 WIDTH = 80
-LENGTH = 145
+# 145 -> 140: the south end had 7.80mm of dead space past the MIC daughterboard, which is the
+# southernmost part in the case (it hangs 12.1mm off the PCB's south edge). Trimmed 5mm, leaving
+# 2.80mm of margin for the mic wiring. Worth doing because the case only just fits its pouch.
+#
+# Everything here chains off LENGTH/2 (post_y1 -> post_y2 -> perf_center_y -> perf_top_post_y ->
+# mic_y/screen/usbc), so shrinking LENGTH walks the whole board assembly south by half the trim
+# while the south wall walks north by the other half: the south gap closes 1:1 with the trim, and
+# every north-end clearance (the RF/antenna section) is unchanged. Verified with fitcheck.py.
+LENGTH = 140
 HEIGHT = 34
 WALL = 2
 FILLET_R = 3
@@ -188,22 +196,48 @@ kenwood_recess = Pos(-WIDTH / 2, kenwood_mid_y, kenwood_z) * Box(
 )
 bottom = bottom - kenwood_recess
 
-# USB-C hole through right wall (positive X)
-USBC_W = 13   # along Y
-USBC_H = 8    # along Z
-usbc_center_z = -HEIGHT / 2 + FILLET_R + 3  # center fixed, grow symmetrically
-usbc_center_y = perf_top_post_y - 22 + 5              # centered on original position
+# USB-C hole through right wall (positive X) — centred on the Heltec's receptacle.
+#
+# Z: the Heltec's PCB front face sits at floor_z + PERF_POST_HEIGHT - 2.50 (its header plastic,
+# trapped between the boards) - 1.60 (its own PCB) = -8.10, and the receptacle hangs below that
+# on the component side, so its centre is a further 1.60 down. ⚠️ The 3.20mm receptacle height
+# is a standard USB-C figure, not measured off this board.
+#
+# Y: the module's short-axis centreline, which the J2/J3 header rows fix exactly — the same line
+# the screen sits on, so this legitimately equals screen_center_y now. It used to be aliased the
+# other way round (screen_center_y = usbc_center_y) by coincidence rather than for a reason.
+#
+# Sized for the cable, not the receptacle: the overmold measures 11.2 x 6.0, and bigger cables
+# want headroom. Kept clear of the bottom fillet (hole bottom lands at -13.95, fillet starts
+# around -14.0).
+USBC_W = 15.0   # along Y — 11.2 overmold + 1.9 per side
+USBC_H = 8.5    # along Z — 6.0 overmold + 1.25 per side
+usbc_center_z = floor_z + PERF_POST_HEIGHT - 2.50 - 1.60 - 1.60
+usbc_center_y = perf_top_post_y - 18.5
 usbc_hole = Pos(WIDTH / 2, usbc_center_y, usbc_center_z) * Box(
     WALL * 3, USBC_W, USBC_H  # oversized in X to cut clean through
 )
 bottom = bottom - usbc_hole
 
-# Screen hole through floor (negative Z face), 33x19mm
-SCREEN_W = 37   # along X (+4mm margin)
-SCREEN_H = 23   # along Y (+4mm margin)
+# Screen hole through floor (negative Z face) — centred on the Heltec's OLED glass.
+#
+# The glass is 33.00 x 18.60. That's the outer of two nested rectangles on the datasheet drawing
+# (section 5); the inner 22.00 x 11.40 is only the lit area. Confirmed by measuring the physical
+# screen at 33 x 18.7.
+#
+# It sits flush with the last FULL-WIDTH edge at the Heltec's antenna end — 3.81mm in from the
+# tip, where the 45-degree chamfers forming the antenna extension begin. It can't be flush with
+# the tip itself: the chamfers narrow the module to 25.40 - 2(3.81) = 17.78mm there, less than
+# the 18.60 glass. Across the short axis it's centred, which the J2/J3 header rows fix exactly.
+#
+# Centre derived and checked by models/fitcheck.py. The old values (-0.50, usbc_center_y) were
+# 5.82mm off in X and 1.50mm in Y, which left 3.82mm of the screen's USB-C edge behind solid
+# floor — the "screen hole isn't quite right" seen on the physical build.
+SCREEN_W = 34.5   # 33.00 glass + 0.75mm per side
+SCREEN_H = 20.0   # 18.60 glass + 0.70mm per side
 perf_left_post_x = perf_center_x - PERF_W / 2 + PERF_HOLE_FROM_LR
-screen_center_x = perf_left_post_x + 37.5 - 8  # shifted 8mm left
-screen_center_y = usbc_center_y  # centered on USB-C hole
+screen_center_x = 5.32                      # glass centre; fixed in X, nothing upstream moves it
+screen_center_y = perf_top_post_y - 18.5    # follows the board, like mic_y
 screen_hole = Pos(screen_center_x, screen_center_y, -HEIGHT / 2) * Box(
     SCREEN_W, SCREEN_H, WALL * 3  # oversized in Z to cut clean through
 )
@@ -234,10 +268,27 @@ for sx in [-18.5, 18.5]:
     hole = Pos(px, py, cz2) * Cylinder(radius=AMP_POST_ID / 2, height=h + 1)
     bottom = bottom - hole
 
-# Mic hole through floor, 53mm below top perfboard post, 4mm right of left post
-MIC_DIA = 14
-mic_x = 0  # centered horizontally
-mic_y = perf_top_post_y - 53
+# Mic hole through floor — centred on the MAX9814's capsule.
+#
+# board.py puts the MIC header at BY + BH - 9, which lands 38.5mm below the top perfboard post.
+# The daughterboard hangs south off it (25.4 x 14.10, header row 4.30mm in from its near edge),
+# putting the capsule a further 8.40mm south. Derived and checked by models/fitcheck.py.
+#
+# All measured off the physical parts: the capsule's near edge is 11.51mm from the board's
+# pin-end edge and it is 9.69mm across, so its centre is 16.36mm from that edge; the pin row is
+# 5.74mm in from the same edge. The capsule is NOT centred on the board and NOT aligned with the
+# pin row.
+#
+# ⚠️ One caveat before printing: an earlier measurement put the pin row 21.10mm from the FAR
+# edge, and 5.74 + 21.10 = 26.84 against a 25.40mm board — 1.44mm over. Resolving that shifts
+# this hole by up to 1.44mm, and at 0.4mm clearance per side the hole no longer absorbs it.
+MIC_CAPSULE_BELOW_HEADER = 16.36 - 5.74
+MIC_DIA = 10.5   # 9.69 capsule + 0.4mm per side
+mic_x = 0  # centred horizontally; the capsule is on the board's centreline
+mic_capsule_y = perf_top_post_y - 38.5 - MIC_CAPSULE_BELOW_HEADER
+# Pushed south until the hole's edge meets the floor-to-south-wall fillet, per the physical build.
+# This puts the hole 7.03mm south of the modelled capsule centre.
+mic_y = -(LENGTH / 2 - FILLET_R) + MIC_DIA / 2
 mic_hole = Pos(mic_x, mic_y, -HEIGHT / 2) * Cylinder(
     radius=MIC_DIA / 2, height=WALL * 3
 )
@@ -344,6 +395,12 @@ for sign in [-1, +1]:
 
 lid = lid + guides
 
+# Design-coordinate solids, before the print-plate shuffle below: origin at the centre of the
+# outer box, floor at floor_z, +Y the antenna end. fitcheck.py needs these to place the PCB
+# against the case, so keep them under separate names.
+bottom_design = bottom
+lid_design = lid
+
 # Move both onto the bed (Z=0) and place lid next to bottom
 bottom = Pos(0, 0, -bottom.bounding_box().min.Z) * bottom
 lid = Rot(180, 0, 0) * lid  # flip so flat top is on bed
@@ -352,10 +409,11 @@ lid = Pos(WIDTH + 5, 0, -lid.bounding_box().min.Z) * lid
 # Combine into single print plate
 plate = Compound(children=[bottom, lid])
 
-# Export
-export_step(plate, str(OUT / "case.step"))
-export_stl(plate, str(OUT / "case.stl"))
-print(f"Exported case: {WIDTH}x{LENGTH}x{HEIGHT}mm, lid={LID_HEIGHT}mm, wall={WALL}mm")
+# Export — skipped on import (fitcheck.py) so it doesn't rewrite the tracked artifacts
+if __name__ == "__main__":
+    export_step(plate, str(OUT / "case.step"))
+    export_stl(plate, str(OUT / "case.stl"))
+    print(f"Exported case: {WIDTH}x{LENGTH}x{HEIGHT}mm, lid={LID_HEIGHT}mm, wall={WALL}mm")
 
 # CQ-editor preview
 if "show_object" in dir():
