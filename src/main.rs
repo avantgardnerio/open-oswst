@@ -4,7 +4,7 @@ mod codec;
 use embassy_futures::join::join3;
 use esp_idf_svc::hal::task::block_on;
 use esp_idf_svc::nvs::{EspCustomNvsPartition, EspNvs};
-use open_oswst::{board, radio, screen, speaker};
+use open_oswst::{board, mic, radio, screen, speaker};
 use std::sync::atomic::AtomicBool;
 
 /// Whether this device is a repeater, read from NVS at boot.
@@ -65,13 +65,11 @@ fn main() {
         let radio_fut = radio::init(board.radio).await;
         let speaker_fut = speaker::init(board.speaker).await;
         let screen = screen::init(board.screen);
+        let mic = mic::init(board.mic);
 
         let app_fut = app::init(
-            app::Peripherals {
-                ptt: board.ptt,
-                audio_in: board.mic.pin,
-                adc: board.mic.adc,
-            },
+            app::Peripherals { ptt: board.ptt },
+            mic,
             screen,
             mac_str,
             codec_tx,

@@ -4,12 +4,9 @@ use embedded_graphics::mono_font::MonoTextStyleBuilder;
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
 use embedded_graphics::text::Text;
-use esp_idf_svc::hal::adc::continuous::config::Config as AdcContConfig;
-use esp_idf_svc::hal::adc::continuous::{AdcDriver as AdcContDriver, AdcMeasurement, Attenuated};
-use esp_idf_svc::hal::adc::ADC1;
-use esp_idf_svc::hal::gpio::{AnyIOPin, Gpio4};
+use esp_idf_svc::hal::gpio::AnyIOPin;
 use esp_idf_svc::hal::gpio::{Input, PinDriver, Pull};
-use esp_idf_svc::hal::units::Hertz;
+use open_oswst::mic::Mic;
 use open_oswst::radio::{TxRequest, RX_CHAN, TX_CHAN};
 use open_oswst::screen::Screen;
 use open_oswst::speaker::{SPK_FRAMES, SPK_REQ};
@@ -31,11 +28,6 @@ const PKT_TYPE_VOICE: u8 = 0x00;
 
 /// Stereo samples per Codec2 frame (320 mono × 2 channels)
 const STEREO_FRAME_SAMPLES: usize = CODEC2_FRAME_SAMPLES * 2;
-
-/// Convert 12-bit unsigned ADC sample to signed 16-bit PCM centered at 0.
-fn adc_to_pcm(sample: &AdcMeasurement) -> i16 {
-    (sample.data() as i16 - 2048) * 16
-}
 
 /// Generate 160ms squelch tail (white noise with fade-out), packet-sized.
 fn generate_squelch() -> Arc<[i16]> {
@@ -63,12 +55,11 @@ fn send_to_speaker(packet: &[i16]) {
 
 pub struct Peripherals {
     pub ptt: AnyIOPin<'static>,
-    pub audio_in: Gpio4<'static>, // must stay concrete — ADCPin trait is pin-specific
-    pub adc: ADC1<'static>,
 }
 
 pub async fn init(
     p: Peripherals,
+    mic: Mic,
     screen: Screen,
     mac_str: heapless::String<18>,
     codec_tx: SyncSender<CodecRequest>,
@@ -76,32 +67,20 @@ pub async fn init(
     // PRG button on GPIO0 — active LOW with internal pull-up
     let button = PinDriver::input(p.ptt, Pull::Up).unwrap();
 
-    // Continuous ADC for mic on GPIO4 (ADC1_CH3) — DMA at 8kHz
-    let adc_config = AdcContConfig::new()
-        .sample_freq(Hertz(8000))
-        .frame_measurements(320) // 320 samples = 40ms at 8kHz (one Codec2 frame)
-        .frames_count(2); // double buffer
-
-    let mut adc = AdcContDriver::new(p.adc, &adc_config, Attenuated::db12(p.audio_in)).unwrap();
-
     log::info!("MAC: {}", mac_str);
 
     // Pre-generate audio buffers
     let silence: Arc<[i16]> = vec![0i16; STEREO_PACKET_SAMPLES].into();
     let squelch = generate_squelch();
 
-    // Start continuous ADC (DMA)
-    adc.start().unwrap();
-    log::info!("ADC DMA started at 8kHz");
-
     async move {
-        app_loop(button, adc, screen, &mac_str, codec_tx, silence, squelch).await;
+        app_loop(button, mic, screen, &mac_str, codec_tx, silence, squelch).await;
     }
 }
 
 async fn app_loop(
     mut button: PinDriver<'_, Input>,
-    mut adc: AdcContDriver<'_>,
+    mut mic: Mic,
     screen: Screen,
     mac_str: &str,
     codec_tx: SyncSender<CodecRequest>,
@@ -114,8 +93,6 @@ async fn app_loop(
         .build();
 
     let mut line_buf = heapless::String::<64>::new();
-    let mut mic_buf = vec![AdcMeasurement::new(); 320].into_boxed_slice();
-    let mut pcm_buf = vec![0i16; CODEC2_FRAME_SAMPLES].into_boxed_slice();
 
     // Track current transmitter for seq ordering
     let mut cur_txid: Option<u8> = None;
@@ -287,7 +264,7 @@ async fn app_loop(
 
                 draw_tx_screen(&screen, mac_str, &style);
 
-                let _ = adc.read(&mut mic_buf, 0); // drain stale
+                mic.drain(); // discard stale
 
                 while button.is_low() {
                     // Pack 2-byte header: |5b type|7b txid|4b seq|
@@ -299,16 +276,9 @@ async fn app_loop(
                     let total_samples = FRAMES_PER_PACKET * CODEC2_FRAME_SAMPLES;
                     let mut pcm = vec![0i16; total_samples].into_boxed_slice();
                     for i in 0..FRAMES_PER_PACKET {
-                        let count = adc.read_async(&mut mic_buf).await.unwrap_or(0);
                         let start = i * CODEC2_FRAME_SAMPLES;
-                        for (j, sample) in mic_buf[..count].iter().enumerate() {
-                            pcm_buf[j] = adc_to_pcm(sample);
-                        }
-                        for s in pcm_buf[count..].iter_mut() {
-                            *s = 0;
-                        }
-                        pcm[start..start + CODEC2_FRAME_SAMPLES]
-                            .copy_from_slice(&pcm_buf[..CODEC2_FRAME_SAMPLES]);
+                        mic.read(&mut pcm[start..start + CODEC2_FRAME_SAMPLES])
+                            .await;
                     }
 
                     // Send to codec thread, await encoded packet

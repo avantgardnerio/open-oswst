@@ -1,24 +1,18 @@
 //! Pin map for the open-oswst PCB (v2) on a Heltec WiFi LoRa 32 V4.
 //! The one place pins are assigned — every app gets its peripherals from here.
 
-use esp_idf_svc::hal::adc::ADC1;
-use esp_idf_svc::hal::gpio::{AnyIOPin, Gpio4, Output, PinDriver};
+use esp_idf_svc::hal::gpio::{AnyIOPin, Output, PinDriver};
 use esp_idf_svc::hal::peripherals::Peripherals;
 use std::thread;
 use std::time::Duration;
 
-use crate::{radio, screen, speaker};
-
-pub struct Mic {
-    pub adc: ADC1<'static>,
-    pub pin: Gpio4<'static>, // must stay concrete — ADCPin trait is pin-specific
-}
+use crate::{mic, radio, screen, speaker};
 
 pub struct Board {
     pub radio: radio::Peripherals,
     pub speaker: speaker::Peripherals,
     pub screen: screen::Peripherals,
-    pub mic: Mic,
+    pub mic: mic::Peripherals,
     pub ptt: AnyIOPin<'static>,
     // Vext powers the OLED — must stay alive or power turns off
     _vext: PinDriver<'static, Output>,
@@ -56,7 +50,7 @@ pub fn take() -> Board {
             scl: p.pins.gpio18.into(),
             rst: p.pins.gpio21.into(),
         },
-        mic: Mic {
+        mic: mic::Peripherals {
             adc: p.adc1,
             pin: p.pins.gpio4,
         },

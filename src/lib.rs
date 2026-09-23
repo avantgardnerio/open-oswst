@@ -1,4 +1,5 @@
 pub mod board;
+pub mod mic;
 pub mod radio;
 pub mod screen;
 pub mod speaker;
