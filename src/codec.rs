@@ -40,6 +40,9 @@ impl CodecRequest {
     }
 }
 
+// Encoded is ~250B bigger than Decoded, but responses only ever sit in the
+// single-slot CODEC_REPLY, so boxing it would cost a heap alloc per packet for nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum CodecResponse {
     Encoded {
         packet: heapless::Vec<u8, 255>,

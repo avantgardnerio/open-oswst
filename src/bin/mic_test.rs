@@ -14,7 +14,6 @@ use esp_idf_svc::hal::i2c::config::Config as I2cConfig;
 use esp_idf_svc::hal::i2c::I2cDriver;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::hal::units::Hertz;
-use ssd1306::mode::BufferedGraphicsMode;
 use ssd1306::prelude::*;
 use ssd1306::{I2CDisplayInterface, Ssd1306};
 use std::fmt::Write as FmtWrite;
@@ -101,8 +100,8 @@ fn main() {
         let mut peak: i32 = 0;
         let mut raw_min = u16::MAX;
         let mut raw_max = 0u16;
-        for i in 0..count {
-            let raw = adc_buf[i].data(); // 12-bit, 0-4095
+        for sample in &adc_buf[..count] {
+            let raw = sample.data(); // 12-bit, 0-4095
             wave[wave_pos] = raw;
             wave_pos = (wave_pos + 1) % WAVE_W;
 

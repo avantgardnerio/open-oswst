@@ -102,7 +102,7 @@ fn main() {
         .text_color(BinaryColor::On)
         .build();
 
-    let mut show_status =
+    let show_status =
         |display: &mut ssd1306::Ssd1306<_, _, ssd1306::mode::BufferedGraphicsMode<_>>,
          msg: &str| {
             display.clear_buffer();
