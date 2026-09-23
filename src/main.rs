@@ -1,44 +1,11 @@
 mod app;
 mod codec;
-mod radio;
-mod speaker;
 
 use embassy_futures::join::join3;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Channel;
-use esp_idf_svc::hal::gpio::PinDriver;
-use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::hal::task::block_on;
 use esp_idf_svc::nvs::{EspCustomNvsPartition, EspNvs};
-use open_oswst::screen;
+use open_oswst::{board, radio, screen, speaker};
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
-
-// --- Channel message types ---
-
-pub(crate) struct RxPacket {
-    pub data: heapless::Vec<u8, 255>,
-    pub rssi: i16,
-    pub snr: i16,
-}
-
-pub(crate) struct TxRequest {
-    pub data: heapless::Vec<u8, 255>,
-}
-
-// --- Channel instances (static, ISR-safe) ---
-
-pub(crate) static RX_CHAN: Channel<CriticalSectionRawMutex, RxPacket, 2> = Channel::new();
-pub(crate) static TX_CHAN: Channel<CriticalSectionRawMutex, TxRequest, 4> = Channel::new();
-
-/// Speaker requests next audio packet from app
-pub(crate) static SPK_REQ: Channel<CriticalSectionRawMutex, (), 1> = Channel::new();
-
-/// Audio frames for speaker — each is one 40ms stereo frame (640 i16).
-/// Capacity 8 = 2 packets worth of frames.
-pub(crate) static SPK_FRAMES: Channel<CriticalSectionRawMutex, Arc<[i16]>, 8> = Channel::new();
 
 /// Whether this device is a repeater, read from NVS at boot.
 pub(crate) static IS_REPEATER: AtomicBool = AtomicBool::new(false);
@@ -60,12 +27,7 @@ fn main() {
     esp_idf_svc::log::EspLogger::initialize_default();
     log::info!("open-oswst starting...");
 
-    let peripherals = Peripherals::take().unwrap();
-
-    // Enable Vext power (GPIO36 LOW = on) — must keep _vext alive or power turns off
-    let mut _vext = PinDriver::output(peripherals.pins.gpio36).unwrap();
-    _vext.set_low().unwrap();
-    thread::sleep(Duration::from_millis(50));
+    let board = board::take();
 
     // Read config from dedicated NVS partition
     let nvs_partition = EspCustomNvsPartition::take("open-oswst").unwrap();
@@ -100,38 +62,15 @@ fn main() {
         .unwrap();
 
     block_on(async {
-        let radio_fut = radio::init(radio::Peripherals {
-            spi: peripherals.spi2,
-            sck: peripherals.pins.gpio9.into(),
-            mosi: peripherals.pins.gpio10.into(),
-            miso: peripherals.pins.gpio11.into(),
-            nss: peripherals.pins.gpio8.into(),
-            reset: peripherals.pins.gpio12.into(),
-            dio1: peripherals.pins.gpio14.into(),
-            busy: peripherals.pins.gpio13.into(),
-        })
-        .await;
-
-        let speaker_fut = speaker::init(speaker::Peripherals {
-            i2s: peripherals.i2s0,
-            spk_bclk: peripherals.pins.gpio3.into(),
-            spk_din: peripherals.pins.gpio5.into(),
-            spk_ws: peripherals.pins.gpio4.into(),
-        })
-        .await;
-
-        let screen = screen::init(screen::Peripherals {
-            i2c: peripherals.i2c0,
-            sda: peripherals.pins.gpio17.into(),
-            scl: peripherals.pins.gpio18.into(),
-            rst: peripherals.pins.gpio21.into(),
-        });
+        let radio_fut = radio::init(board.radio).await;
+        let speaker_fut = speaker::init(board.speaker).await;
+        let screen = screen::init(board.screen);
 
         let app_fut = app::init(
             app::Peripherals {
-                ptt: peripherals.pins.gpio0.into(),
-                audio_in: peripherals.pins.gpio7,
-                adc: peripherals.adc1,
+                ptt: board.ptt,
+                audio_in: board.mic.pin,
+                adc: board.mic.adc,
             },
             screen,
             mac_str,

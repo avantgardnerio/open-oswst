@@ -146,13 +146,10 @@ fn main() {
             // Map 0-4095 to 0..WAVE_H (inverted: high value = top)
             let y0 = WAVE_H - 1 - (wave[idx0] as i32 * (WAVE_H - 1) / 4095);
             let y1 = WAVE_H - 1 - (wave[idx1] as i32 * (WAVE_H - 1) / 4095);
-            Line::new(
-                Point::new(x as i32, y0),
-                Point::new(x as i32 + 1, y1),
-            )
-            .into_styled(line_style)
-            .draw(&mut display)
-            .unwrap();
+            Line::new(Point::new(x as i32, y0), Point::new(x as i32 + 1, y1))
+                .into_styled(line_style)
+                .draw(&mut display)
+                .unwrap();
         }
 
         // Center line (DC midpoint)

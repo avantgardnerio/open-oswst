@@ -1,4 +1,7 @@
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
 use std::future::Future;
+use std::sync::Arc;
 
 use esp_idf_svc::hal::gpio::AnyIOPin;
 use esp_idf_svc::hal::i2s::config::{
@@ -7,7 +10,12 @@ use esp_idf_svc::hal::i2s::config::{
 };
 use esp_idf_svc::hal::i2s::{I2sDriver, I2sTx, I2S0};
 
-use crate::{SPK_FRAMES, SPK_REQ};
+/// Speaker requests next audio packet from app
+pub static SPK_REQ: Channel<CriticalSectionRawMutex, (), 1> = Channel::new();
+
+/// Audio frames for speaker — each is one 40ms stereo frame (640 i16).
+/// Capacity 8 = 2 packets worth of frames.
+pub static SPK_FRAMES: Channel<CriticalSectionRawMutex, Arc<[i16]>, 8> = Channel::new();
 
 pub struct Peripherals {
     pub i2s: I2S0<'static>,

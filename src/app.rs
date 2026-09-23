@@ -7,10 +7,12 @@ use embedded_graphics::text::Text;
 use esp_idf_svc::hal::adc::continuous::config::Config as AdcContConfig;
 use esp_idf_svc::hal::adc::continuous::{AdcDriver as AdcContDriver, AdcMeasurement, Attenuated};
 use esp_idf_svc::hal::adc::ADC1;
-use esp_idf_svc::hal::gpio::{AnyIOPin, Gpio7};
+use esp_idf_svc::hal::gpio::{AnyIOPin, Gpio4};
 use esp_idf_svc::hal::gpio::{Input, PinDriver, Pull};
 use esp_idf_svc::hal::units::Hertz;
+use open_oswst::radio::{TxRequest, RX_CHAN, TX_CHAN};
 use open_oswst::screen::Screen;
+use open_oswst::speaker::{SPK_FRAMES, SPK_REQ};
 use std::future::Future;
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
@@ -22,7 +24,7 @@ use crate::codec::{
     CodecRequest, CodecResponse, CODEC2_FRAME_SAMPLES, CODEC_REPLY, FRAMES_PER_PACKET,
     HEADER_BYTES, PACKET_BYTES, PAYLOAD_BYTES, STEREO_PACKET_SAMPLES,
 };
-use crate::{TxRequest, IS_REPEATER, RX_CHAN, SPK_FRAMES, SPK_REQ, TX_CHAN};
+use crate::IS_REPEATER;
 
 /// Packet type constants (5 bits, upper bits of header)
 const PKT_TYPE_VOICE: u8 = 0x00;
@@ -61,7 +63,7 @@ fn send_to_speaker(packet: &[i16]) {
 
 pub struct Peripherals {
     pub ptt: AnyIOPin<'static>,
-    pub audio_in: Gpio7<'static>, // must stay concrete — ADCPin trait is pin-specific
+    pub audio_in: Gpio4<'static>, // must stay concrete — ADCPin trait is pin-specific
     pub adc: ADC1<'static>,
 }
 
@@ -74,7 +76,7 @@ pub async fn init(
     // PRG button on GPIO0 — active LOW with internal pull-up
     let button = PinDriver::input(p.ptt, Pull::Up).unwrap();
 
-    // Continuous ADC for mic on GPIO7 (ADC1_CH6) — DMA at 8kHz
+    // Continuous ADC for mic on GPIO4 (ADC1_CH3) — DMA at 8kHz
     let adc_config = AdcContConfig::new()
         .sample_freq(Hertz(8000))
         .frame_measurements(320) // 320 samples = 40ms at 8kHz (one Codec2 frame)

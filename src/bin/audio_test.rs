@@ -91,13 +91,7 @@ fn main() {
     thread::sleep(Duration::from_millis(50));
     oled_rst.set_high().unwrap();
     thread::sleep(Duration::from_millis(50));
-    let i2c = I2cDriver::new(
-        p.i2c0,
-        p.pins.gpio17,
-        p.pins.gpio18,
-        &I2cConfig::default(),
-    )
-    .unwrap();
+    let i2c = I2cDriver::new(p.i2c0, p.pins.gpio17, p.pins.gpio18, &I2cConfig::default()).unwrap();
     let interface = I2CDisplayInterface::new(i2c);
     let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
         .into_buffered_graphics_mode();
@@ -108,11 +102,13 @@ fn main() {
         .text_color(BinaryColor::On)
         .build();
 
-    let mut show_status = |display: &mut ssd1306::Ssd1306<_, _, ssd1306::mode::BufferedGraphicsMode<_>>, msg: &str| {
-        display.clear_buffer();
-        let _ = Text::new(msg, Point::new(10, 38), style).draw(display);
-        let _ = display.flush();
-    };
+    let mut show_status =
+        |display: &mut ssd1306::Ssd1306<_, _, ssd1306::mode::BufferedGraphicsMode<_>>,
+         msg: &str| {
+            display.clear_buffer();
+            let _ = Text::new(msg, Point::new(10, 38), style).draw(display);
+            let _ = display.flush();
+        };
 
     // Codec2 encoder + decoder
     let mut encoder = Box::new(Codec2::new(Codec2Mode::MODE_3200));

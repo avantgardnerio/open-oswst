@@ -149,7 +149,8 @@ fn screen_thread(p: Peripherals) {
     loop {
         let frame = block_on(READY.receive());
         // Reset the address pointer each frame so a short write can't skew the next one
-        oled.set_draw_area((0, 0), (WIDTH as u8, HEIGHT as u8)).unwrap();
+        oled.set_draw_area((0, 0), (WIDTH as u8, HEIGHT as u8))
+            .unwrap();
         oled.draw(&frame.0[..]).unwrap();
         let _ = FREE.try_send(frame);
     }

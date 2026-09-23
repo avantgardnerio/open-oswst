@@ -7,9 +7,7 @@ use embedded_graphics::mono_font::MonoTextStyleBuilder;
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
 use embedded_graphics::text::Text;
-use esp_idf_svc::hal::gpio::PinDriver;
-use esp_idf_svc::hal::peripherals::Peripherals;
-use open_oswst::screen;
+use open_oswst::{board, screen};
 use std::thread;
 use std::time::Duration;
 
@@ -18,21 +16,8 @@ fn main() {
     esp_idf_svc::log::EspLogger::initialize_default();
     log::info!("Hello World OLED test starting");
 
-    let p = Peripherals::take().unwrap();
-
-    // Vext power on (GPIO36 LOW) — OLED is dead without this.
-    let mut vext = PinDriver::output(p.pins.gpio36).unwrap();
-    vext.set_low().unwrap();
-    thread::sleep(Duration::from_millis(50));
-    log::info!("Vext enabled");
-
-    // OLED: SDA=GPIO17, SCL=GPIO18, RST=GPIO21.
-    let screen = screen::init(screen::Peripherals {
-        i2c: p.i2c0,
-        sda: p.pins.gpio17.into(),
-        scl: p.pins.gpio18.into(),
-        rst: p.pins.gpio21.into(),
-    });
+    let board = board::take();
+    let screen = screen::init(board.screen);
 
     let style = MonoTextStyleBuilder::new()
         .font(&FONT_9X18)
@@ -49,8 +34,6 @@ fn main() {
     screen.show(frame);
     log::info!("Drawn to screen — if you can read this, the board works.");
 
-    // Keep vext alive so the OLED stays powered.
-    let _vext = vext;
     loop {
         thread::sleep(Duration::from_secs(1));
     }
