@@ -6,13 +6,14 @@ use esp_idf_svc::hal::peripherals::Peripherals;
 use std::thread;
 use std::time::Duration;
 
-use crate::devices::{mic, radio, screen, speaker};
+use crate::devices::{encoder, mic, radio, screen, speaker};
 
 pub struct Board {
     pub radio: radio::Peripherals,
     pub speaker: speaker::Peripherals,
     pub screen: screen::Peripherals,
     pub mic: mic::Peripherals,
+    pub vol: encoder::Peripherals,
     pub ptt: AnyIOPin<'static>,
     // Vext powers the OLED — must stay alive or power turns off
     _vext: PinDriver<'static, Output>,
@@ -53,6 +54,11 @@ pub fn take() -> Board {
         mic: mic::Peripherals {
             adc: p.adc1,
             pin: p.pins.gpio4,
+        },
+        vol: encoder::Peripherals {
+            a: p.pins.gpio3.into(),
+            b: p.pins.gpio2.into(),
+            sw: p.pins.gpio1.into(),
         },
         ptt: p.pins.gpio0.into(),
         _vext: vext,

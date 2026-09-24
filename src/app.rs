@@ -1,12 +1,14 @@
 use embassy_futures::join::join;
-use embassy_futures::select::{select3, Either3};
+use embassy_futures::select::{select4, Either4};
 use embedded_graphics::mono_font::ascii::FONT_6X10;
 use embedded_graphics::mono_font::{MonoTextStyle, MonoTextStyleBuilder};
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
-use embedded_graphics::text::Text;
+use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
+use embedded_graphics::text::{Baseline, Text};
 use esp_idf_svc::hal::gpio::AnyIOPin;
 use esp_idf_svc::hal::gpio::{Input, PinDriver, Pull};
+use open_oswst::devices::encoder::{Encoder, Event};
 use open_oswst::devices::mic::Mic;
 use open_oswst::devices::radio::{RxPacket, TxRequest, RX_CHAN, TX_CHAN};
 use open_oswst::devices::screen::Screen;
@@ -18,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use std::sync::atomic::Ordering;
 
+use crate::menu::{Menu, Outcome, Setting};
 use crate::IS_REPEATER;
 use open_oswst::codec::{
     CodecRequest, CodecResponse, CODEC2_FRAME_SAMPLES, CODEC_REPLY, FRAMES_PER_PACKET,
@@ -40,6 +43,7 @@ pub struct Peripherals {
 pub async fn init(
     p: Peripherals,
     mic: Mic,
+    encoder: Encoder,
     screen: Screen,
     mac_str: heapless::String<18>,
     codec_tx: SyncSender<CodecRequest>,
@@ -52,6 +56,7 @@ pub async fn init(
     let app = App {
         button,
         mic,
+        encoder,
         screen,
         mac_str,
         codec_tx,
@@ -68,6 +73,7 @@ pub async fn init(
         seq_buf: Default::default(),
         last_rx_time: Instant::now(),
         spk_active: false,
+        locked: false,
     };
 
     async move {
@@ -79,6 +85,7 @@ pub async fn init(
 struct App {
     button: PinDriver<'static, Input>,
     mic: Mic,
+    encoder: Encoder,
     screen: Screen,
     mac_str: heapless::String<18>,
     codec_tx: SyncSender<CodecRequest>,
@@ -93,6 +100,8 @@ struct App {
     seq_buf: [Option<Arc<[i16]>>; 16],
     last_rx_time: Instant,
     spk_active: bool, // true once speaker has been kicked
+
+    locked: bool, // PTT ignored; the menu still opens, so it can be unlocked
 }
 
 impl App {
@@ -109,16 +118,27 @@ impl App {
                 self.spk_active = false;
             }
 
-            match select3(
+            let locked = self.locked;
+            let button = &mut self.button;
+            let ptt = async {
+                if locked {
+                    core::future::pending::<()>().await;
+                }
+                let _ = button.wait_for_low().await;
+            };
+            match select4(
                 RX_CHAN.receive(),
-                self.button.wait_for_low(),
+                ptt,
                 SPK_REQ.receive(),
+                self.encoder.next(),
             )
             .await
             {
-                Either3::First(rx_pkt) => self.on_rx_packet(rx_pkt).await,
-                Either3::Second(_) => self.on_ptt().await,
-                Either3::Third(_) => self.on_speaker_request(),
+                Either4::First(rx_pkt) => self.on_rx_packet(rx_pkt).await,
+                Either4::Second(_) => self.on_ptt().await,
+                Either4::Third(_) => self.on_speaker_request(),
+                Either4::Fourth(Event::Click) => self.run_menu().await,
+                Either4::Fourth(_) => {} // turning does nothing outside the menu (yet)
             }
         }
     }
@@ -315,6 +335,45 @@ impl App {
         // else: not receiving, nothing to send — DMA auto_clear handles silence
     }
 
+    /// Menu mode is only menuing: audio and RX stop until we leave, and PTT
+    /// is ignored.
+    async fn run_menu(&mut self) {
+        self.reset_rx_state();
+        self.spk_active = false;
+        let mut menu = Menu::new();
+        loop {
+            self.draw_menu(&menu);
+            match self.encoder.next().await {
+                Event::Cw => menu.rotate(1),
+                Event::Ccw => menu.rotate(-1),
+                Event::Click => match menu.click() {
+                    Outcome::Stay => {}
+                    Outcome::Exit => break,
+                    Outcome::Set(setting, value) => self.apply(setting, value),
+                },
+            }
+        }
+        // Drop whatever arrived while we were menuing
+        while RX_CHAN.try_receive().is_ok() {}
+        let _ = SPK_REQ.try_receive();
+        self.draw_rx_screen();
+    }
+
+    fn apply(&mut self, setting: Setting, value: bool) {
+        log::info!("Menu: {:?} = {}", setting, value);
+        match setting {
+            Setting::Lock => self.locked = value,
+            Setting::Repeater => IS_REPEATER.store(value, Ordering::Relaxed),
+        }
+    }
+
+    fn setting(&self, setting: Setting) -> bool {
+        match setting {
+            Setting::Lock => self.locked,
+            Setting::Repeater => IS_REPEATER.load(Ordering::Relaxed),
+        }
+    }
+
     fn reset_rx_state(&mut self) {
         self.cur_txid = None;
         self.last_played_seq = 0;
@@ -329,6 +388,11 @@ impl App {
         Text::new("RX Listening", Point::new(16, 36), self.style)
             .draw(&mut frame)
             .unwrap();
+        if self.locked {
+            Text::new("LOCKED", Point::new(46, 56), self.style)
+                .draw(&mut frame)
+                .unwrap();
+        }
         self.screen.show(frame);
     }
 
@@ -350,6 +414,46 @@ impl App {
             .draw(&mut frame)
             .unwrap();
 
+        self.screen.show(frame);
+    }
+
+    /// Title, then up to 4 rows; the cursor row is inverted, current values get a *.
+    fn draw_menu(&self, menu: &Menu) {
+        const TOP: i32 = 13;
+        const ROW_H: i32 = 11;
+        const VISIBLE: usize = 4;
+
+        let mut frame = self.screen.frame();
+        Text::new(menu.title(), Point::new(1, 9), self.style)
+            .draw(&mut frame)
+            .unwrap();
+
+        let inverted = MonoTextStyleBuilder::new()
+            .font(&FONT_6X10)
+            .text_color(BinaryColor::Off)
+            .build();
+        let rows = menu.rows(|setting, value| self.setting(setting) == value);
+        let first = menu.cursor().saturating_sub(VISIBLE - 1);
+        for (i, (label, current)) in rows.iter().enumerate().skip(first).take(VISIBLE) {
+            let y = TOP + (i - first) as i32 * ROW_H;
+            let style = if i == menu.cursor() {
+                Rectangle::new(Point::new(0, y), Size::new(128, ROW_H as u32))
+                    .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+                    .draw(&mut frame)
+                    .unwrap();
+                inverted
+            } else {
+                self.style
+            };
+            Text::with_baseline(label, Point::new(4, y + 1), style, Baseline::Top)
+                .draw(&mut frame)
+                .unwrap();
+            if *current {
+                Text::with_baseline("*", Point::new(118, y + 1), style, Baseline::Top)
+                    .draw(&mut frame)
+                    .unwrap();
+            }
+        }
         self.screen.show(frame);
     }
 
