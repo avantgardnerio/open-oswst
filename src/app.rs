@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 
 use std::sync::atomic::Ordering;
 
+use esp_idf_svc::nvs::{EspNvs, NvsCustom};
+
 use crate::menu::{Menu, Outcome, Setting};
 use crate::IS_REPEATER;
 use open_oswst::codec::{
@@ -46,6 +48,7 @@ pub async fn init(
     encoder: Encoder,
     screen: Screen,
     mac_str: heapless::String<18>,
+    nvs: Option<EspNvs<NvsCustom>>,
     codec_tx: SyncSender<CodecRequest>,
 ) -> impl Future<Output = ()> {
     // PRG button on GPIO0 — active LOW with internal pull-up
@@ -59,6 +62,7 @@ pub async fn init(
         encoder,
         screen,
         mac_str,
+        nvs,
         codec_tx,
         // Pre-generate audio buffers
         silence: vec![0i16; STEREO_PACKET_SAMPLES].into(),
@@ -88,6 +92,7 @@ struct App {
     encoder: Encoder,
     screen: Screen,
     mac_str: heapless::String<18>,
+    nvs: Option<EspNvs<NvsCustom>>, // saved settings; None if the partition couldn't open
     codec_tx: SyncSender<CodecRequest>,
     silence: Arc<[i16]>,
     squelch: Arc<[i16]>,
@@ -376,7 +381,20 @@ impl App {
         log::info!("Menu: {:?} = {}", setting, value);
         match setting {
             Setting::Lock => self.locked = value,
-            Setting::Repeater => IS_REPEATER.store(value, Ordering::Relaxed),
+            Setting::Repeater => {
+                IS_REPEATER.store(value, Ordering::Relaxed);
+                self.save_u8("repeater", value as u8);
+            }
+        }
+    }
+
+    /// Persist a setting so it survives a reboot.
+    fn save_u8(&mut self, key: &str, value: u8) {
+        let Some(nvs) = self.nvs.as_mut() else {
+            return;
+        };
+        if let Err(e) = nvs.set_u8(key, value) {
+            log::warn!("NVS save {}={} failed: {}", key, value, e);
         }
     }
 

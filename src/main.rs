@@ -31,16 +31,17 @@ fn main() {
 
     let board = board::take();
 
-    // Read config from dedicated NVS partition
+    // Config lives in the dedicated NVS partition. Opened read-write so the
+    // menu can save settings; that also creates the namespace on fresh boards.
     let nvs_partition = EspCustomNvsPartition::take("open-oswst").unwrap();
-    // Unprovisioned boards have no config namespace — fall back to defaults
-    let repeater = match EspNvs::new(nvs_partition, "config", false) {
-        Ok(nvs) => nvs.get_u8("repeater").unwrap().unwrap_or(0) != 0,
-        Err(e) => {
-            log::warn!("No NVS config ({}), using defaults", e);
-            false
-        }
-    };
+    let nvs = EspNvs::new(nvs_partition, "config", true)
+        .map_err(|e| log::warn!("NVS config unavailable ({}), settings won't persist", e))
+        .ok();
+    let repeater = nvs
+        .as_ref()
+        .and_then(|nvs| nvs.get_u8("repeater").ok().flatten())
+        .unwrap_or(0)
+        != 0;
     IS_REPEATER.store(repeater, std::sync::atomic::Ordering::Relaxed);
     log::info!("Config: repeater={}", repeater);
 
@@ -76,6 +77,7 @@ fn main() {
             encoder,
             screen,
             mac_str,
+            nvs,
             codec_tx,
         )
         .await;
