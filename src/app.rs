@@ -1,3 +1,4 @@
+use embassy_futures::join::join;
 use embassy_futures::select::{select3, Either3};
 use embedded_graphics::mono_font::ascii::FONT_6X10;
 use embedded_graphics::mono_font::{MonoTextStyle, MonoTextStyleBuilder};
@@ -26,34 +27,11 @@ use open_oswst::codec::{
 /// Packet type constants (5 bits, upper bits of header)
 const PKT_TYPE_VOICE: u8 = 0x00;
 
+/// Audio per packet: FRAMES_PER_PACKET × 40ms
+const PACKET_MS: u128 = FRAMES_PER_PACKET as u128 * 40;
+
 /// Stereo samples per Codec2 frame (320 mono × 2 channels)
 const STEREO_FRAME_SAMPLES: usize = CODEC2_FRAME_SAMPLES * 2;
-
-/// Generate 160ms squelch tail (white noise with fade-out), packet-sized.
-fn generate_squelch() -> Arc<[i16]> {
-    const MONO_SAMPLES: usize = FRAMES_PER_PACKET * CODEC2_FRAME_SAMPLES; // 1280
-    const AMPLITUDE: i32 = 8000;
-    let mut buf = vec![0i16; STEREO_PACKET_SAMPLES].into_boxed_slice();
-    for i in 0..MONO_SAMPLES {
-        let fade = (MONO_SAMPLES - i) as i32 * AMPLITUDE / MONO_SAMPLES as i32;
-        let noise = ((unsafe { esp_idf_svc::sys::esp_random() } % (2 * fade as u32 + 1)) as i32
-            - fade) as i16;
-        buf[i * 2] = noise;
-        buf[i * 2 + 1] = noise;
-    }
-    buf.into()
-}
-
-/// Split a packet (4 × 40ms stereo frames) into individual frames and send to speaker.
-fn send_to_speaker(packet: &[i16]) {
-    for i in 0..FRAMES_PER_PACKET {
-        let offset = i * STEREO_FRAME_SAMPLES;
-        let frame: Arc<[i16]> = packet[offset..offset + STEREO_FRAME_SAMPLES].into();
-        if SPK_FRAMES.try_send(frame).is_err() {
-            log::warn!("SPK queue full, dropped frame {} of packet", i);
-        }
-    }
-}
 
 pub struct Peripherals {
     pub ptt: AnyIOPin<'static>,
@@ -289,69 +267,37 @@ impl App {
 
         self.mic.drain(); // discard stale
 
-        // Pipelined: the codec thread encodes packet N while we capture N+1, so
-        // the mic is drained continuously. At most one encode is outstanding.
-        let mut encoding = false;
+        // Pipelined: each pass captures packet N+1 while packet N is encoded and
+        // sent, so the mic is drained continuously
+        let mic = &mut self.mic;
+        let codec_tx = &self.codec_tx;
+        let mut pending: Option<([u8; 2], Box<[i16]>)> = None;
         let mut packets = 0usize;
         while self.button.is_low() {
-            // Pack 2-byte header: |5b type|7b txid|4b seq|
-            let header: u16 = (PKT_TYPE_VOICE as u16) << 11 | (txid as u16) << 4 | seq as u16;
-            let header_bytes = header.to_be_bytes();
-
-            // Read FRAMES_PER_PACKET frames of PCM
-            let total_samples = FRAMES_PER_PACKET * CODEC2_FRAME_SAMPLES;
-            let mut pcm = vec![0i16; total_samples].into_boxed_slice();
-            for i in 0..FRAMES_PER_PACKET {
-                let start = i * CODEC2_FRAME_SAMPLES;
-                self.mic
-                    .read(&mut pcm[start..start + CODEC2_FRAME_SAMPLES])
-                    .await;
-            }
-
-            // Collect the previous packet's encode (ran during this capture) and send it
-            if encoding {
-                self.send_encoded().await;
-            }
-
-            // Hand this packet to the codec thread; collected next iteration
-            self.codec_tx
-                .send(CodecRequest::encode(header_bytes, pcm))
-                .unwrap();
-            encoding = true;
+            let header = voice_header(txid, seq);
+            let (pcm, ()) = join(capture_packet(mic), async {
+                if let Some((header, pcm)) = pending.take() {
+                    encode_and_send(codec_tx, header, pcm).await;
+                }
+            })
+            .await;
+            pending = Some((header, pcm));
             packets += 1;
             seq = (seq + 1) & 0x0F; // wrap at 16
         }
-
-        // Flush the last packet still in the encoder
-        if encoding {
-            self.send_encoded().await;
+        if let Some((header, pcm)) = pending {
+            encode_and_send(codec_tx, header, pcm).await;
         }
 
         // Send header-only EOT packet
-        let eot_header: u16 = (PKT_TYPE_VOICE as u16) << 11 | (txid as u16) << 4 | seq as u16;
         let mut eot_data = heapless::Vec::new();
-        let _ = eot_data.extend_from_slice(&eot_header.to_be_bytes());
+        let _ = eot_data.extend_from_slice(&voice_header(txid, seq));
         TX_CHAN.send(TxRequest { data: eot_data }).await;
 
         log::info!("PTT released — {} packets sent + EOT", packets);
 
         // Redraw RX screen
         self.draw_rx_screen();
-    }
-
-    /// Await the outstanding encode and queue it for the radio.
-    async fn send_encoded(&mut self) {
-        let t_wait = Instant::now();
-        let reply = CODEC_REPLY.receive().await;
-        // Any wait here means encoding took longer than a packet's capture, so
-        // the mic went undrained and audio was lost
-        let wait_ms = t_wait.elapsed().as_millis();
-        if wait_ms > 10 {
-            log::warn!("TX encoder behind: waited {}ms", wait_ms);
-        }
-        if let CodecResponse::Encoded { packet } = reply {
-            TX_CHAN.send(TxRequest { data: packet }).await;
-        }
     }
 
     fn on_speaker_request(&mut self) {
@@ -375,6 +321,17 @@ impl App {
         self.seq_buf.iter_mut().for_each(|s| *s = None);
     }
 
+    fn draw_rx_screen(&self) {
+        let mut frame = self.screen.frame();
+        Text::new(&self.mac_str, Point::new(1, 10), self.style)
+            .draw(&mut frame)
+            .unwrap();
+        Text::new("RX Listening", Point::new(16, 36), self.style)
+            .draw(&mut frame)
+            .unwrap();
+        self.screen.show(frame);
+    }
+
     fn draw_rx_audio_screen(&mut self, rssi: i16, snr: i16) {
         let mut frame = self.screen.frame();
         Text::new(&self.mac_str, Point::new(1, 10), self.style)
@@ -396,17 +353,6 @@ impl App {
         self.screen.show(frame);
     }
 
-    fn draw_rx_screen(&self) {
-        let mut frame = self.screen.frame();
-        Text::new(&self.mac_str, Point::new(1, 10), self.style)
-            .draw(&mut frame)
-            .unwrap();
-        Text::new("RX Listening", Point::new(16, 36), self.style)
-            .draw(&mut frame)
-            .unwrap();
-        self.screen.show(frame);
-    }
-
     fn draw_tx_screen(&self) {
         let mut frame = self.screen.frame();
         Text::new(&self.mac_str, Point::new(1, 10), self.style)
@@ -416,5 +362,63 @@ impl App {
             .draw(&mut frame)
             .unwrap();
         self.screen.show(frame);
+    }
+}
+
+/// Generate 160ms squelch tail (white noise with fade-out), packet-sized.
+fn generate_squelch() -> Arc<[i16]> {
+    const MONO_SAMPLES: usize = FRAMES_PER_PACKET * CODEC2_FRAME_SAMPLES; // 1280
+    const AMPLITUDE: i32 = 8000;
+    let mut buf = vec![0i16; STEREO_PACKET_SAMPLES].into_boxed_slice();
+    for i in 0..MONO_SAMPLES {
+        let fade = (MONO_SAMPLES - i) as i32 * AMPLITUDE / MONO_SAMPLES as i32;
+        let noise = ((unsafe { esp_idf_svc::sys::esp_random() } % (2 * fade as u32 + 1)) as i32
+            - fade) as i16;
+        buf[i * 2] = noise;
+        buf[i * 2 + 1] = noise;
+    }
+    buf.into()
+}
+
+/// Split a packet (4 × 40ms stereo frames) into individual frames and send to speaker.
+fn send_to_speaker(packet: &[i16]) {
+    for i in 0..FRAMES_PER_PACKET {
+        let offset = i * STEREO_FRAME_SAMPLES;
+        let frame: Arc<[i16]> = packet[offset..offset + STEREO_FRAME_SAMPLES].into();
+        if SPK_FRAMES.try_send(frame).is_err() {
+            log::warn!("SPK queue full, dropped frame {} of packet", i);
+        }
+    }
+}
+
+/// Pack the 2-byte voice header: |5b type|7b txid|4b seq|
+fn voice_header(txid: u8, seq: u8) -> [u8; 2] {
+    ((PKT_TYPE_VOICE as u16) << 11 | (txid as u16) << 4 | seq as u16).to_be_bytes()
+}
+
+/// Capture one packet's worth of PCM (FRAMES_PER_PACKET frames, 160ms).
+async fn capture_packet(mic: &mut Mic) -> Box<[i16]> {
+    let mut pcm = vec![0i16; FRAMES_PER_PACKET * CODEC2_FRAME_SAMPLES].into_boxed_slice();
+    for frame in pcm.chunks_mut(CODEC2_FRAME_SAMPLES) {
+        mic.read(frame).await;
+    }
+    pcm
+}
+
+/// Encode one packet on the codec thread and queue it for the radio.
+async fn encode_and_send(codec_tx: &SyncSender<CodecRequest>, header: [u8; 2], pcm: Box<[i16]>) {
+    let started = Instant::now();
+    codec_tx.send(CodecRequest::encode(header, pcm)).unwrap();
+    if let CodecResponse::Encoded { packet } = CODEC_REPLY.receive().await {
+        TX_CHAN.send(TxRequest { data: packet }).await;
+    }
+    // Longer than a packet's capture stalls the pipeline, so the mic goes undrained
+    let ms = started.elapsed().as_millis();
+    if ms > PACKET_MS {
+        log::warn!(
+            "TX encode+send took {}ms, longer than a {}ms packet",
+            ms,
+            PACKET_MS
+        );
     }
 }
