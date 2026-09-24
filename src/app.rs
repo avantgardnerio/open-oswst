@@ -11,8 +11,8 @@ use esp_idf_svc::hal::gpio::{Input, PinDriver, Pull};
 use open_oswst::devices::encoder::{Encoder, Event};
 use open_oswst::devices::mic::Mic;
 use open_oswst::devices::radio::{RxPacket, TxRequest, RX_CHAN, TX_CHAN};
-use open_oswst::devices::screen::Screen;
-use open_oswst::devices::speaker::{SPK_FRAMES, SPK_REQ};
+use open_oswst::devices::screen::{Frame, Screen};
+use open_oswst::devices::speaker::{self, MAX_VOLUME, SPK_FRAMES, SPK_REQ};
 use std::future::Future;
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
@@ -138,7 +138,8 @@ impl App {
                 Either4::Second(_) => self.on_ptt().await,
                 Either4::Third(_) => self.on_speaker_request(),
                 Either4::Fourth(Event::Click) => self.run_menu().await,
-                Either4::Fourth(_) => {} // turning does nothing outside the menu (yet)
+                Either4::Fourth(Event::Cw) => self.change_volume(1),
+                Either4::Fourth(Event::Ccw) => self.change_volume(-1),
             }
         }
     }
@@ -335,6 +336,18 @@ impl App {
         // else: not receiving, nothing to send — DMA auto_clear handles silence
     }
 
+    fn change_volume(&mut self, delta: i8) {
+        let level = speaker::volume()
+            .saturating_add_signed(delta)
+            .min(MAX_VOLUME);
+        speaker::set_volume(level);
+        log::info!("Volume {}", level);
+        // Mid-reception the next packet redraws within 160ms; don't flash "Listening"
+        if self.cur_txid.is_none() {
+            self.draw_rx_screen();
+        }
+    }
+
     /// Menu mode is only menuing: audio and RX stop until we leave, and PTT
     /// is ignored.
     async fn run_menu(&mut self) {
@@ -388,11 +401,7 @@ impl App {
         Text::new("RX Listening", Point::new(16, 36), self.style)
             .draw(&mut frame)
             .unwrap();
-        if self.locked {
-            Text::new("LOCKED", Point::new(46, 56), self.style)
-                .draw(&mut frame)
-                .unwrap();
-        }
+        self.draw_status(&mut frame);
         self.screen.show(frame);
     }
 
@@ -414,7 +423,22 @@ impl App {
             .draw(&mut frame)
             .unwrap();
 
+        self.draw_status(&mut frame);
         self.screen.show(frame);
+    }
+
+    /// Bottom line of the RX screens: volume, and LOCKED when locked.
+    fn draw_status(&self, frame: &mut Frame) {
+        let mut vol = heapless::String::<8>::new();
+        let _ = core::fmt::write(&mut vol, format_args!("Vol {}", speaker::volume()));
+        Text::new(&vol, Point::new(1, 62), self.style)
+            .draw(frame)
+            .unwrap();
+        if self.locked {
+            Text::new("LOCKED", Point::new(91, 62), self.style)
+                .draw(frame)
+                .unwrap();
+        }
     }
 
     /// Title, then up to 4 rows; the cursor row is inverted, current values get a *.
