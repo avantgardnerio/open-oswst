@@ -14,9 +14,9 @@ use open_oswst::board;
 use open_oswst::codec::{
     self, CodecRequest, CodecResponse, CODEC_REPLY, FRAMES_PER_PACKET, HEADER_BYTES, PAYLOAD_BYTES,
 };
-use open_oswst::mic::{self, FRAME_SAMPLES};
-use open_oswst::screen::{self, Screen};
-use open_oswst::speaker::{self, SPK_FRAMES};
+use open_oswst::devices::mic::{self, FRAME_SAMPLES};
+use open_oswst::devices::screen::{self, Screen};
+use open_oswst::devices::speaker::{self, SPK_FRAMES};
 use std::sync::Arc;
 
 /// Mono samples per packet (4 frames × 320 = 160ms)

@@ -6,7 +6,7 @@ use esp_idf_svc::hal::peripherals::Peripherals;
 use std::thread;
 use std::time::Duration;
 
-use crate::{mic, radio, screen, speaker};
+use crate::devices::{mic, radio, screen, speaker};
 
 pub struct Board {
     pub radio: radio::Peripherals,

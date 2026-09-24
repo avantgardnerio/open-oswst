@@ -10,9 +10,9 @@ use embedded_graphics::text::Text;
 use esp_idf_svc::hal::gpio::{PinDriver, Pull};
 use esp_idf_svc::hal::task::block_on;
 use open_oswst::board;
-use open_oswst::mic::{self, FRAME_SAMPLES};
-use open_oswst::screen::{self, Screen};
-use open_oswst::speaker::{self, SPK_FRAMES};
+use open_oswst::devices::mic::{self, FRAME_SAMPLES};
+use open_oswst::devices::screen::{self, Screen};
+use open_oswst::devices::speaker::{self, SPK_FRAMES};
 use std::sync::Arc;
 
 /// Max recording: 5 seconds at 8kHz (125 frames)

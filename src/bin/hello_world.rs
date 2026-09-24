@@ -7,7 +7,8 @@ use embedded_graphics::mono_font::MonoTextStyleBuilder;
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
 use embedded_graphics::text::Text;
-use open_oswst::{board, screen};
+use open_oswst::board;
+use open_oswst::devices::screen;
 use std::thread;
 use std::time::Duration;
 
