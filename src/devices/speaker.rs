@@ -60,8 +60,18 @@ pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
 }
 
 async fn speaker_loop(mut i2s_tx: I2sDriver<'_, I2sTx>) {
+    let mut last_frame = std::time::Instant::now();
     loop {
+        // Underrun: mid-stream (a frame played recently) but the queue was
+        // empty, so the DMA ran dry waiting for the next frame
+        let starved = SPK_FRAMES.is_empty();
+        let wait_start = std::time::Instant::now();
         let frame = SPK_FRAMES.receive().await;
+        let waited = wait_start.elapsed().as_millis();
+        if starved && last_frame.elapsed().as_millis() < 500 && waited > 5 {
+            log::warn!("SPK underrun: waited {}ms for next frame", waited);
+        }
+        last_frame = std::time::Instant::now();
         i2s_tx.write_async(pcm_as_bytes(&frame)).await.unwrap();
 
         if SPK_FRAMES.len() <= 1 {

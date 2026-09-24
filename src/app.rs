@@ -49,7 +49,9 @@ fn send_to_speaker(packet: &[i16]) {
     for i in 0..FRAMES_PER_PACKET {
         let offset = i * STEREO_FRAME_SAMPLES;
         let frame: Arc<[i16]> = packet[offset..offset + STEREO_FRAME_SAMPLES].into();
-        let _ = SPK_FRAMES.try_send(frame);
+        if SPK_FRAMES.try_send(frame).is_err() {
+            log::warn!("SPK queue full, dropped frame {} of packet", i);
+        }
     }
 }
 
@@ -287,6 +289,10 @@ impl App {
 
         self.mic.drain(); // discard stale
 
+        // Pipelined: the codec thread encodes packet N while we capture N+1, so
+        // the mic is drained continuously. At most one encode is outstanding.
+        let mut encoding = false;
+        let mut packets = 0usize;
         while self.button.is_low() {
             // Pack 2-byte header: |5b type|7b txid|4b seq|
             let header: u16 = (PKT_TYPE_VOICE as u16) << 11 | (txid as u16) << 4 | seq as u16;
@@ -302,14 +308,23 @@ impl App {
                     .await;
             }
 
-            // Send to codec thread, await encoded packet
+            // Collect the previous packet's encode (ran during this capture) and send it
+            if encoding {
+                self.send_encoded().await;
+            }
+
+            // Hand this packet to the codec thread; collected next iteration
             self.codec_tx
                 .send(CodecRequest::encode(header_bytes, pcm))
                 .unwrap();
-            if let CodecResponse::Encoded { packet } = CODEC_REPLY.receive().await {
-                TX_CHAN.send(TxRequest { data: packet }).await;
-            }
+            encoding = true;
+            packets += 1;
             seq = (seq + 1) & 0x0F; // wrap at 16
+        }
+
+        // Flush the last packet still in the encoder
+        if encoding {
+            self.send_encoded().await;
         }
 
         // Send header-only EOT packet
@@ -318,10 +333,25 @@ impl App {
         let _ = eot_data.extend_from_slice(&eot_header.to_be_bytes());
         TX_CHAN.send(TxRequest { data: eot_data }).await;
 
-        log::info!("PTT released — {} packets sent + EOT", seq);
+        log::info!("PTT released — {} packets sent + EOT", packets);
 
         // Redraw RX screen
         self.draw_rx_screen();
+    }
+
+    /// Await the outstanding encode and queue it for the radio.
+    async fn send_encoded(&mut self) {
+        let t_wait = Instant::now();
+        let reply = CODEC_REPLY.receive().await;
+        // Any wait here means encoding took longer than a packet's capture, so
+        // the mic went undrained and audio was lost
+        let wait_ms = t_wait.elapsed().as_millis();
+        if wait_ms > 10 {
+            log::warn!("TX encoder behind: waited {}ms", wait_ms);
+        }
+        if let CodecResponse::Encoded { packet } = reply {
+            TX_CHAN.send(TxRequest { data: packet }).await;
+        }
     }
 
     fn on_speaker_request(&mut self) {
