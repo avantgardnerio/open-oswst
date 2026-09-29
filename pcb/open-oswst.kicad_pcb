@@ -53,7 +53,7 @@
   )
 
   (gr_rect (start 113 113) (end 183 163) (stroke (width 0.1) (type solid)) (fill none) (layer "Edge.Cuts"))
-  (gr_text "open-oswst  dbc0ed0"
+  (gr_text "open-oswst  4468800"
     (at 148.0 161)
     (layer "F.SilkS")
     (effects (font (size 0.8 0.8) (thickness 0.12)))
@@ -326,7 +326,6 @@
       (size 1.7 1.7)
       (drill 1.0)
       (layers *.Cu *.Mask)
-      (net 6 "VOL_SW")
     )
     (pad "GPIO38" thru_hole circle
       (at -3.8099999999999987 0)
@@ -363,6 +362,7 @@
       (size 1.7 1.7)
       (drill 1.0)
       (layers *.Cu *.Mask)
+      (net 6 "VOL_SW")
     )
     (pad "GPIO46" thru_hole circle
       (at 11.430000000000003 0)
