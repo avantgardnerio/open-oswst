@@ -33,6 +33,11 @@ type Iv<'a> = GenericSx126xInterfaceVariant<PinDriver<'a, Output>, PinDriver<'a,
 type Radio<'a> =
     LoRa<Sx126x<SpiDeviceDriver<'a, SpiDriver<'a>>, Iv<'a>, Sx1262>, embassy_time::Delay>;
 
+/// SX1262 output power. The FEM adds ~13 dB, so this gives ~19 dBm into the
+/// Air Buddy amp (max input 20 dBm). At its max 11 dB gain that's ~30 dBm out,
+/// ~35 dBm EIRP on a 5 dBi antenna: under the FCC's 36 dBm.
+const TX_POWER_DBM: i32 = 6;
+
 pub struct Peripherals {
     pub spi: SPI2<'static>,
     pub sck: AnyIOPin<'static>,
@@ -42,6 +47,9 @@ pub struct Peripherals {
     pub reset: AnyOutputPin<'static>,
     pub dio1: AnyInputPin<'static>,
     pub busy: AnyInputPin<'static>,
+    /// Front-end TX switch: HIGH while transmitting, LOW otherwise. The
+    /// SX1262's DIO2 does the rest of the TX/RX switching on its own.
+    pub rf_switch_tx: Option<AnyOutputPin<'static>>,
 }
 
 pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
@@ -60,7 +68,9 @@ pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
     let dio1 = PinDriver::input(p.dio1, Pull::Floating).unwrap();
     let busy = PinDriver::input(p.busy, Pull::Floating).unwrap();
 
-    let iv = GenericSx126xInterfaceVariant::new(reset, dio1, busy, None, None).unwrap();
+    let rf_switch_tx = p.rf_switch_tx.map(|pin| PinDriver::output(pin).unwrap());
+
+    let iv = GenericSx126xInterfaceVariant::new(reset, dio1, busy, None, rf_switch_tx).unwrap();
 
     let config = sx126x::Config {
         chip: Sx1262,
@@ -212,7 +222,7 @@ async fn radio_loop(
                 log::info!("TX start [{}B]", tx_req.data.len());
                 let tx_start = Instant::now();
                 lora.enter_standby().await.unwrap();
-                lora.prepare_for_tx(mdltn, tx_params, 22, &tx_req.data)
+                lora.prepare_for_tx(mdltn, tx_params, TX_POWER_DBM, &tx_req.data)
                     .await
                     .unwrap();
                 lora.tx().await.unwrap();

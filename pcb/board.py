@@ -27,9 +27,10 @@ board.add_jst_ph(cx, cy, pins=2, label="SW",
                  pad_nets=["VBAT", "VSW"]); cx += 7
 board.add_jst_ph(cx, cy, pins=2, label="PA",
                  pad_labels=["+", "-"], pad_nets=["VSW", "GND"]); cx += 10
-board.add_jst_ph(cx, cy, pins=4, label="CHNL",
-                 pad_labels=["A", "B", "SW", "GND"],
-                 pad_nets=["CHNL_A", "CHNL_B", "CHNL_SW", "GND"]); cx += 11
+# (CHNL encoder was here — dropped: its pins GPIO7/GPIO5 belong to the V4.3's
+# RF front end. Channel is picked from the menu instead. Gap kept so VOL/PTT
+# don't move.)
+cx += 11
 board.add_jst_ph(cx, cy, pins=4, label="VOL",
                  pad_labels=["A", "B", "SW", "GND"],
                  pad_nets=["VOL_A", "VOL_B", "VOL_SW", "GND"]); cx += 10
@@ -55,7 +56,9 @@ board.add_header(BX + BW - 3 - J3_SPAN / 2, HY, pins=18, label="J3",
                  pad_labels=["GPIO7", "GPIO6", "GPIO5", "GPIO4", "GPIO3", "GPIO2",
                              "GPIO1", "GPIO38", "GPIO39", "GPIO40", "GPIO41", "GPIO42",
                              "GPIO45", "GPIO46", "GPIO37", "3V3a", "3V3b", "GND"],
-                 pad_nets=["CHNL_A", "CHNL_B", "CHNL_SW", "MIC_OUT", "VOL_A", "VOL_B",
+                 # GPIO7 (FEM power), GPIO5 (FEM CTX), GPIO2 (FEM CSD) must stay
+                 # unconnected: the Heltec V4.3 drives them.
+                 pad_nets=[None, "VOL_B", None, "MIC_OUT", "VOL_A", None,
                            "VOL_SW", None, None, None, None, None,
                            None, None, None, None, None, "GND"])
 

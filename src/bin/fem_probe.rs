@@ -136,6 +136,7 @@ fn main() {
         reset: p.pins.gpio12.into(),
         dio1: p.pins.gpio14.into(),
         busy: p.pins.gpio13.into(),
+        rf_switch_tx: None, // we drive CTX ourselves; this never transmits
     };
 
     log::info!(

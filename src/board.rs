@@ -6,9 +6,10 @@ use esp_idf_svc::hal::peripherals::Peripherals;
 use std::thread;
 use std::time::Duration;
 
-use crate::devices::{encoder, mic, radio, screen, speaker};
+use crate::devices::{encoder, fem, mic, radio, screen, speaker};
 
 pub struct Board {
+    pub fem: fem::Peripherals,
     pub radio: radio::Peripherals,
     pub speaker: speaker::Peripherals,
     pub screen: screen::Peripherals,
@@ -29,6 +30,10 @@ pub fn take() -> Board {
     thread::sleep(Duration::from_millis(50));
 
     Board {
+        fem: fem::Peripherals {
+            power: p.pins.gpio7.into(),
+            csd: p.pins.gpio2.into(),
+        },
         radio: radio::Peripherals {
             spi: p.spi2,
             sck: p.pins.gpio9.into(),
@@ -38,6 +43,7 @@ pub fn take() -> Board {
             reset: p.pins.gpio12.into(),
             dio1: p.pins.gpio14.into(),
             busy: p.pins.gpio13.into(),
+            rf_switch_tx: Some(p.pins.gpio5.into()), // FEM CTX
         },
         speaker: speaker::Peripherals {
             i2s: p.i2s0,
@@ -57,7 +63,7 @@ pub fn take() -> Board {
         },
         vol: encoder::Peripherals {
             a: p.pins.gpio3.into(),
-            b: p.pins.gpio2.into(),
+            b: p.pins.gpio6.into(), // GPIO2 is the FEM's
             sw: p.pins.gpio1.into(),
         },
         ptt: p.pins.gpio0.into(),

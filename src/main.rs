@@ -6,7 +6,7 @@ use esp_idf_svc::hal::task::block_on;
 use esp_idf_svc::nvs::{EspCustomNvsPartition, EspNvs};
 use open_oswst::board;
 use open_oswst::codec;
-use open_oswst::devices::{encoder, mic, radio, screen, speaker};
+use open_oswst::devices::{encoder, fem, mic, radio, screen, speaker};
 use std::sync::atomic::AtomicBool;
 
 /// Whether this device is a repeater, read from NVS at boot.
@@ -30,6 +30,7 @@ fn main() {
     log::info!("open-oswst starting...");
 
     let board = board::take();
+    let _fem = fem::init(board.fem);
 
     // Config lives in the dedicated NVS partition. Opened read-write so the
     // menu can save settings; that also creates the namespace on fresh boards.
