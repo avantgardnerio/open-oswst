@@ -63,8 +63,8 @@ pub fn take() -> Board {
         },
         vol: encoder::Peripherals {
             a: p.pins.gpio3.into(),
-            b: p.pins.gpio6.into(), // GPIO2 is the FEM's
-            sw: p.pins.gpio1.into(),
+            b: p.pins.gpio6.into(),   // GPIO2 is the FEM's
+            sw: p.pins.gpio45.into(), // GPIO1 is battery sense
         },
         ptt: p.pins.gpio0.into(),
         _vext: vext,

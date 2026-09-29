@@ -57,10 +57,12 @@ board.add_header(BX + BW - 3 - J3_SPAN / 2, HY, pins=18, label="J3",
                              "GPIO1", "GPIO38", "GPIO39", "GPIO40", "GPIO41", "GPIO42",
                              "GPIO45", "GPIO46", "GPIO37", "3V3a", "3V3b", "GND"],
                  # GPIO7 (FEM power), GPIO5 (FEM CTX), GPIO2 (FEM CSD) must stay
-                 # unconnected: the Heltec V4.3 drives them.
+                 # unconnected: the Heltec V4.3 drives them. GPIO1 + GPIO37 are
+                 # battery sense (ADC + divider enable). VOL_SW on GPIO45 is a
+                 # strapping pin, safe as a switch to GND (LOW is its default).
                  pad_nets=[None, "VOL_B", None, "MIC_OUT", "VOL_A", None,
-                           "VOL_SW", None, None, None, None, None,
-                           None, None, None, None, None, "GND"])
+                           None, None, None, None, None, None,
+                           "VOL_SW", None, None, None, None, "GND"])
 
 # Heltec V4 J2 header (right side, pin 18→1 top to bottom)
 J2_SPAN = J3_SPAN  # same 18 pins
