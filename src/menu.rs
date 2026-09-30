@@ -2,30 +2,33 @@
 //! Every list gets an implicit "Back" at the top, and the cursor starts there,
 //! so stray clicks only ever back out — they never change a setting.
 
+use crate::mode::Mode;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setting {
-    Lock,
-    Repeater,
+    Lock, // 0 = off, 1 = on
+    Mode, // a mode::Mode as u8
 }
 
 pub enum Item {
     Submenu(&'static str, &'static [Item]),
-    Choice(&'static str, Setting, bool),
+    Choice(&'static str, Setting, u8),
 }
 
 static ROOT: &[Item] = &[
     Item::Submenu(
         "Lock",
         &[
-            Item::Choice("true", Setting::Lock, true),
-            Item::Choice("false", Setting::Lock, false),
+            Item::Choice("true", Setting::Lock, 1),
+            Item::Choice("false", Setting::Lock, 0),
         ],
     ),
     Item::Submenu(
-        "Repeater",
+        "Mode",
         &[
-            Item::Choice("true", Setting::Repeater, true),
-            Item::Choice("false", Setting::Repeater, false),
+            Item::Choice("Normal", Setting::Mode, Mode::Normal as u8),
+            Item::Choice("Repeater", Setting::Mode, Mode::Repeater as u8),
+            Item::Choice("Echo", Setting::Mode, Mode::Echo as u8),
         ],
     ),
 ];
@@ -36,7 +39,7 @@ pub const BACK: &str = "Back";
 pub enum Outcome {
     Stay,
     Exit,
-    Set(Setting, bool),
+    Set(Setting, u8),
 }
 
 #[derive(Clone, Copy)]
@@ -107,7 +110,7 @@ impl Menu {
 
     /// Rows of the current list, "Back" first. `current` says whether a
     /// choice is the setting's present value (drawn with a *).
-    pub fn rows(&self, current: impl Fn(Setting, bool) -> bool) -> Vec<(&'static str, bool)> {
+    pub fn rows(&self, current: impl Fn(Setting, u8) -> bool) -> Vec<(&'static str, bool)> {
         let mut rows = vec![(BACK, false)];
         for item in self.level().items {
             rows.push(match item {

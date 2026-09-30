@@ -1,0 +1,116 @@
+//! Echo mode, for range testing without a second person: record a
+//! transmission as it's heard, then play it back over the air.
+//!
+//! Packets are stored exactly as received, never decoded and re-encoded, so
+//! the replay is what this station heard. A missing packet is replaced with
+//! encoded silence, so dropouts are heard where they happened, and the
+//! listener gets an unbroken sequence.
+
+use embassy_time::{Duration, Ticker, Timer};
+use open_oswst::codec::{FRAMES_PER_PACKET, PAYLOAD_BYTES};
+use open_oswst::devices::radio::{TxRequest, TX_CHAN};
+use std::time::Instant;
+
+use crate::packet::{self, TYPE_ECHO};
+
+type Payload = [u8; PAYLOAD_BYTES];
+
+/// Audio per packet: FRAMES_PER_PACKET × 40ms
+const PACKET_MS: u64 = FRAMES_PER_PACKET as u64 * 40;
+/// Recording limit: 30s of audio (~5KB)
+const MAX_PACKETS: usize = (30_000 / PACKET_MS) as usize;
+/// Talker gone quiet without an EOT (it was lost): replay anyway
+const TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+/// Pause before replaying, so the talker has let go of PTT
+const REPLAY_DELAY_MS: u64 = 1000;
+
+pub struct Recorder {
+    txid: Option<u8>, // who we're recording; None = idle
+    next_seq: u8,
+    packets: Vec<Payload>,
+    silence: Payload,
+    last_rx: Instant,
+}
+
+impl Recorder {
+    /// `silence` is one packet of encoded silence, used to fill gaps.
+    pub fn new(silence: Payload) -> Self {
+        Recorder {
+            txid: None,
+            next_seq: 0,
+            packets: Vec::new(),
+            silence,
+            last_rx: Instant::now(),
+        }
+    }
+
+    /// Who we're recording, if anyone.
+    pub fn txid(&self) -> Option<u8> {
+        self.txid
+    }
+
+    /// Store one packet. The first packet starts a recording; packets from
+    /// anyone else are ignored until it ends.
+    pub fn record(&mut self, txid: u8, seq: u8, payload: &[u8]) {
+        match self.txid {
+            None => {
+                self.txid = Some(txid);
+                self.next_seq = seq;
+            }
+            Some(current) if current != txid => return,
+            Some(_) => {}
+        }
+        self.last_rx = Instant::now();
+
+        // A backwards step is a duplicate, e.g. heard again via a repeater
+        let missing = seq.wrapping_sub(self.next_seq) & 0x0F;
+        if missing > 7 {
+            return;
+        }
+        for _ in 0..missing {
+            self.push(self.silence);
+        }
+        let mut stored = [0u8; PAYLOAD_BYTES];
+        stored.copy_from_slice(payload);
+        self.push(stored);
+        self.next_seq = seq.wrapping_add(1) & 0x0F;
+    }
+
+    fn push(&mut self, payload: Payload) {
+        if self.packets.len() < MAX_PACKETS {
+            self.packets.push(payload);
+        }
+    }
+
+    /// While recording, how long until we give up waiting for the EOT.
+    pub fn time_left(&self) -> Option<std::time::Duration> {
+        self.txid?;
+        Some(TIMEOUT.saturating_sub(self.last_rx.elapsed()))
+    }
+
+    /// End the recording and hand it over for replay.
+    pub fn take(&mut self) -> Vec<Payload> {
+        self.txid = None;
+        std::mem::take(&mut self.packets)
+    }
+}
+
+/// Send a recording back out at the pace it was spoken, then an EOT.
+pub async fn replay(packets: Vec<Payload>, txid: u8) {
+    Timer::after_millis(REPLAY_DELAY_MS).await;
+
+    let mut ticker = Ticker::every(Duration::from_millis(PACKET_MS));
+    let mut seq = 0u8;
+    for payload in &packets {
+        ticker.next().await;
+        let mut data = heapless::Vec::new();
+        let _ = data.extend_from_slice(&packet::pack(TYPE_ECHO, txid, seq));
+        let _ = data.extend_from_slice(payload);
+        TX_CHAN.send(TxRequest { data }).await;
+        seq = (seq + 1) & 0x0F;
+    }
+
+    let mut eot = heapless::Vec::new();
+    let _ = eot.extend_from_slice(&packet::pack(TYPE_ECHO, txid, seq));
+    TX_CHAN.send(TxRequest { data: eot }).await;
+}

@@ -1,5 +1,6 @@
 use embassy_futures::join::join;
 use embassy_futures::select::{select4, Either4};
+use embassy_time::with_timeout;
 use embedded_graphics::mono_font::ascii::FONT_6X10;
 use embedded_graphics::mono_font::{MonoTextStyle, MonoTextStyleBuilder};
 use embedded_graphics::pixelcolor::BinaryColor;
@@ -18,19 +19,16 @@ use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use std::sync::atomic::Ordering;
-
 use esp_idf_svc::nvs::{EspNvs, NvsCustom};
 
+use crate::echo::{self, Recorder};
 use crate::menu::{Menu, Outcome, Setting};
-use crate::IS_REPEATER;
+use crate::mode::{self, Mode};
+use crate::packet::{self, Header, TYPE_ECHO, TYPE_VOICE};
 use open_oswst::codec::{
     CodecRequest, CodecResponse, CODEC2_FRAME_SAMPLES, CODEC_REPLY, FRAMES_PER_PACKET,
     HEADER_BYTES, PACKET_BYTES, PAYLOAD_BYTES, STEREO_PACKET_SAMPLES,
 };
-
-/// Packet type constants (5 bits, upper bits of header)
-const PKT_TYPE_VOICE: u8 = 0x00;
 
 /// Audio per packet: FRAMES_PER_PACKET × 40ms
 const PACKET_MS: u128 = FRAMES_PER_PACKET as u128 * 40;
@@ -56,6 +54,16 @@ pub async fn init(
 
     log::info!("MAC: {}", mac_str);
 
+    // One packet of encoded silence, for echo mode to fill gaps with
+    let silent_pcm = vec![0i16; FRAMES_PER_PACKET * CODEC2_FRAME_SAMPLES].into_boxed_slice();
+    codec_tx
+        .send(CodecRequest::encode([0; 2], silent_pcm))
+        .unwrap();
+    let mut silence = [0u8; PAYLOAD_BYTES];
+    if let CodecResponse::Encoded { packet } = CODEC_REPLY.receive().await {
+        silence.copy_from_slice(&packet[HEADER_BYTES..]);
+    }
+
     let app = App {
         button,
         mic,
@@ -78,6 +86,7 @@ pub async fn init(
         last_rx_time: Instant::now(),
         spk_active: false,
         locked: false,
+        echo: Recorder::new(silence),
     };
 
     async move {
@@ -107,6 +116,8 @@ struct App {
     spk_active: bool, // true once speaker has been kicked
 
     locked: bool, // PTT ignored; the menu still opens, so it can be unlocked
+
+    echo: Recorder, // only used in echo mode
 }
 
 impl App {
@@ -123,6 +134,19 @@ impl App {
                 self.spk_active = false;
             }
 
+            // Echo mode: while recording, stop waiting once the talker has
+            // gone quiet, in case their EOT was lost
+            let echo_wait = self.echo.time_left();
+            let rx = async {
+                match echo_wait {
+                    Some(left) => {
+                        let left = embassy_time::Duration::from_micros(left.as_micros() as u64);
+                        with_timeout(left, RX_CHAN.receive()).await.ok()
+                    }
+                    None => Some(RX_CHAN.receive().await),
+                }
+            };
+
             let locked = self.locked;
             let button = &mut self.button;
             let ptt = async {
@@ -131,15 +155,9 @@ impl App {
                 }
                 let _ = button.wait_for_low().await;
             };
-            match select4(
-                RX_CHAN.receive(),
-                ptt,
-                SPK_REQ.receive(),
-                self.encoder.next(),
-            )
-            .await
-            {
-                Either4::First(rx_pkt) => self.on_rx_packet(rx_pkt).await,
+            match select4(rx, ptt, SPK_REQ.receive(), self.encoder.next()).await {
+                Either4::First(Some(rx_pkt)) => self.on_rx_packet(rx_pkt).await,
+                Either4::First(None) => self.replay_echo().await,
                 Either4::Second(_) => self.on_ptt().await,
                 Either4::Third(_) => self.on_speaker_request(),
                 Either4::Fourth(Event::Click) => self.run_menu().await,
@@ -160,26 +178,32 @@ impl App {
             return;
         }
 
-        // Parse 2-byte header: |5b type|7b txid|4b seq|
-        let header = u16::from_be_bytes([rx_pkt.data[0], rx_pkt.data[1]]);
-        let pkt_type = (header >> 11) as u8;
-        let txid = ((header >> 4) & 0x7F) as u8;
-        let seq = (header & 0x0F) as u8;
+        let Header {
+            pkt_type,
+            txid,
+            seq,
+        } = packet::unpack([rx_pkt.data[0], rx_pkt.data[1]]);
 
-        if pkt_type != PKT_TYPE_VOICE {
+        if pkt_type != TYPE_VOICE && pkt_type != TYPE_ECHO {
             log::warn!(
-                "RX unknown pkt_type={} header=0x{:04X} raw=[0x{:02X},0x{:02X}]",
+                "RX unknown pkt_type={} raw=[0x{:02X},0x{:02X}]",
                 pkt_type,
-                header,
                 rx_pkt.data[0],
                 rx_pkt.data[1]
             );
             return;
         }
 
+        // Echo mode records live voice instead of playing it. Echoes are never
+        // echoed, so they fall through and play like voice.
+        if mode::get() == Mode::Echo && pkt_type == TYPE_VOICE {
+            self.on_echo_packet(&rx_pkt, txid, seq).await;
+            return;
+        }
+
         // Header-only = end of transmission — relay if repeater, then squelch
         if rx_pkt.data.len() == HEADER_BYTES {
-            if IS_REPEATER.load(Ordering::Relaxed) {
+            if mode::get() == Mode::Repeater {
                 let mut relay = heapless::Vec::new();
                 let _ = relay.extend_from_slice(&rx_pkt.data);
                 TX_CHAN.send(TxRequest { data: relay }).await;
@@ -225,7 +249,7 @@ impl App {
             }
             0..=2 => {
                 // Repeater: relay after dedup (non-duplicate voice)
-                if IS_REPEATER.load(Ordering::Relaxed) {
+                if mode::get() == Mode::Repeater {
                     let mut relay = heapless::Vec::new();
                     let _ = relay.extend_from_slice(&rx_pkt.data);
                     TX_CHAN.send(TxRequest { data: relay }).await;
@@ -279,13 +303,45 @@ impl App {
         self.draw_rx_audio_screen(rx_pkt.rssi, rx_pkt.snr);
     }
 
+    /// Echo mode: record voice packets, and replay once the talker's EOT
+    /// arrives. (If the EOT is lost, the run loop's timeout replays instead.)
+    async fn on_echo_packet(&mut self, rx_pkt: &RxPacket, txid: u8, seq: u8) {
+        if rx_pkt.data.len() == HEADER_BYTES {
+            if self.echo.txid() == Some(txid) {
+                self.replay_echo().await;
+            }
+            return;
+        }
+        if rx_pkt.data.len() != PACKET_BYTES {
+            return;
+        }
+        self.echo.record(txid, seq, &rx_pkt.data[HEADER_BYTES..]);
+        log::info!(
+            "ECHO rec txid={} seq={} rssi={} snr={}",
+            txid,
+            seq,
+            rx_pkt.rssi,
+            rx_pkt.snr
+        );
+        self.draw_rx_audio_screen(rx_pkt.rssi, rx_pkt.snr);
+    }
+
+    async fn replay_echo(&mut self) {
+        let packets = self.echo.take();
+        log::info!("ECHO replaying {} packets", packets.len());
+        self.draw_tx_screen();
+        echo::replay(packets, random_txid()).await;
+        // Drop anything heard while we were transmitting it
+        while RX_CHAN.try_receive().is_ok() {}
+        self.draw_rx_screen();
+    }
+
     async fn on_ptt(&mut self) {
         // PTT pressed — reset RX state
         self.reset_rx_state();
         self.spk_active = false;
 
-        // Generate random 7-bit txid for this PTT press (dedup key)
-        let txid = (unsafe { esp_idf_svc::sys::esp_random() } & 0x7F) as u8;
+        let txid = random_txid();
         let mut seq: u8 = 0;
         log::info!("PTT pressed — streaming (txid={})", txid);
 
@@ -300,7 +356,7 @@ impl App {
         let mut pending: Option<([u8; 2], Box<[i16]>)> = None;
         let mut packets = 0usize;
         while self.button.is_low() {
-            let header = voice_header(txid, seq);
+            let header = packet::pack(TYPE_VOICE, txid, seq);
             let (pcm, ()) = join(capture_packet(mic), async {
                 if let Some((header, pcm)) = pending.take() {
                     encode_and_send(codec_tx, header, pcm).await;
@@ -317,7 +373,7 @@ impl App {
 
         // Send header-only EOT packet
         let mut eot_data = heapless::Vec::new();
-        let _ = eot_data.extend_from_slice(&voice_header(txid, seq));
+        let _ = eot_data.extend_from_slice(&packet::pack(TYPE_VOICE, txid, seq));
         TX_CHAN.send(TxRequest { data: eot_data }).await;
 
         log::info!("PTT released — {} packets sent + EOT", packets);
@@ -377,13 +433,13 @@ impl App {
         self.draw_rx_screen();
     }
 
-    fn apply(&mut self, setting: Setting, value: bool) {
+    fn apply(&mut self, setting: Setting, value: u8) {
         log::info!("Menu: {:?} = {}", setting, value);
         match setting {
-            Setting::Lock => self.locked = value,
-            Setting::Repeater => {
-                IS_REPEATER.store(value, Ordering::Relaxed);
-                self.save_u8("repeater", value as u8);
+            Setting::Lock => self.locked = value != 0,
+            Setting::Mode => {
+                mode::set(Mode::from_u8(value));
+                self.save_u8("mode", value);
             }
         }
     }
@@ -398,10 +454,10 @@ impl App {
         }
     }
 
-    fn setting(&self, setting: Setting) -> bool {
+    fn setting(&self, setting: Setting) -> u8 {
         match setting {
-            Setting::Lock => self.locked,
-            Setting::Repeater => IS_REPEATER.load(Ordering::Relaxed),
+            Setting::Lock => self.locked as u8,
+            Setting::Mode => mode::get() as u8,
         }
     }
 
@@ -537,9 +593,9 @@ fn send_to_speaker(packet: &[i16]) {
     }
 }
 
-/// Pack the 2-byte voice header: |5b type|7b txid|4b seq|
-fn voice_header(txid: u8, seq: u8) -> [u8; 2] {
-    ((PKT_TYPE_VOICE as u16) << 11 | (txid as u16) << 4 | seq as u16).to_be_bytes()
+/// Random 7-bit id for one transmission — the dedup key.
+fn random_txid() -> u8 {
+    (unsafe { esp_idf_svc::sys::esp_random() } & 0x7F) as u8
 }
 
 /// Capture one packet's worth of PCM (FRAMES_PER_PACKET frames, 160ms).

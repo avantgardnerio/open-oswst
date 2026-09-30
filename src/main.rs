@@ -1,16 +1,16 @@
 mod app;
+mod echo;
 mod menu;
+mod mode;
+mod packet;
 
 use embassy_futures::join::join3;
 use esp_idf_svc::hal::task::block_on;
 use esp_idf_svc::nvs::{EspCustomNvsPartition, EspNvs};
+use mode::Mode;
 use open_oswst::board;
 use open_oswst::codec;
 use open_oswst::devices::{encoder, fem, mic, radio, screen, speaker};
-use std::sync::atomic::AtomicBool;
-
-/// Whether this device is a repeater, read from NVS at boot.
-pub(crate) static IS_REPEATER: AtomicBool = AtomicBool::new(false);
 
 /// Read the base MAC address from eFuse
 fn get_mac() -> [u8; 6] {
@@ -38,13 +38,16 @@ fn main() {
     let nvs = EspNvs::new(nvs_partition, "config", true)
         .map_err(|e| log::warn!("NVS config unavailable ({}), settings won't persist", e))
         .ok();
-    let repeater = nvs
-        .as_ref()
-        .and_then(|nvs| nvs.get_u8("repeater").ok().flatten())
-        .unwrap_or(0)
-        != 0;
-    IS_REPEATER.store(repeater, std::sync::atomic::Ordering::Relaxed);
-    log::info!("Config: repeater={}", repeater);
+    let read_u8 = |key| nvs.as_ref().and_then(|nvs| nvs.get_u8(key).ok().flatten());
+    // "mode" replaced an older "repeater" on/off flag; boards saved before
+    // then only have that one
+    let mode = match (read_u8("mode"), read_u8("repeater")) {
+        (Some(mode), _) => Mode::from_u8(mode),
+        (None, Some(1)) => Mode::Repeater,
+        _ => Mode::Normal,
+    };
+    mode::set(mode);
+    log::info!("Config: mode={:?}", mode);
 
     // Get MAC for display
     let mac = get_mac();
