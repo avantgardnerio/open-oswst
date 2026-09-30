@@ -136,7 +136,9 @@ impl Log for Logger {
         );
 
         if record.level() <= self.serial_level {
-            print!("{}", line);
+            // Not print!: with no USB host attached (on battery), the console
+            // write fails, and print! panics on failure. Drop the line instead.
+            let _ = std::io::stdout().write_all(line.as_bytes());
         }
         if record.level() <= self.file_level {
             let mut buffer = self.buffer.lock().unwrap();
