@@ -10,7 +10,7 @@ use esp_idf_svc::nvs::{EspCustomNvsPartition, EspNvs};
 use mode::Mode;
 use open_oswst::board;
 use open_oswst::codec;
-use open_oswst::devices::{encoder, fem, mic, radio, screen, speaker, storage};
+use open_oswst::devices::{encoder, fem, gps, mic, radio, screen, speaker, storage};
 use open_oswst::logger;
 
 /// Read the base MAC address from eFuse
@@ -39,6 +39,7 @@ fn main() {
 
     let board = board::take();
     let _fem = fem::init(board.fem);
+    let gps = gps::init(board.gps);
 
     // Config lives in the dedicated NVS partition. Opened read-write so the
     // menu can save settings; that also creates the namespace on fresh boards.
@@ -85,9 +86,12 @@ fn main() {
 
         let app_fut = app::init(
             app::Peripherals { ptt: board.ptt },
-            mic,
-            encoder,
-            screen,
+            app::Devices {
+                mic,
+                encoder,
+                screen,
+                gps,
+            },
             mac_str,
             nvs,
             codec_tx,

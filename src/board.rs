@@ -6,10 +6,11 @@ use esp_idf_svc::hal::peripherals::Peripherals;
 use std::thread;
 use std::time::Duration;
 
-use crate::devices::{encoder, fem, mic, radio, screen, speaker};
+use crate::devices::{encoder, fem, gps, mic, radio, screen, speaker};
 
 pub struct Board {
     pub fem: fem::Peripherals,
+    pub gps: gps::Peripherals,
     pub radio: radio::Peripherals,
     pub speaker: speaker::Peripherals,
     pub screen: screen::Peripherals,
@@ -33,6 +34,16 @@ pub fn take() -> Board {
         fem: fem::Peripherals {
             power: p.pins.gpio7.into(),
             csd: p.pins.gpio2.into(),
+        },
+        // Heltec GNSS connector. Note RX/TX: Meshtastic's variant.h comments
+        // have them the other way round, and following those gives silence
+        gps: gps::Peripherals {
+            uart: p.uart1,
+            tx: p.pins.gpio38.into(),
+            rx: p.pins.gpio39.into(),
+            power: p.pins.gpio34.into(),
+            reset: p.pins.gpio42.into(),
+            wake: p.pins.gpio40.into(),
         },
         radio: radio::Peripherals {
             spi: p.spi2,

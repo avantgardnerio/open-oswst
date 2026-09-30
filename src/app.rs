@@ -1,3 +1,4 @@
+use core::fmt::Write as _;
 use embassy_futures::join::join;
 use embassy_futures::select::{select5, Either5};
 use embassy_time::Ticker;
@@ -10,6 +11,7 @@ use embedded_graphics::text::{Baseline, Text};
 use esp_idf_svc::hal::gpio::AnyIOPin;
 use esp_idf_svc::hal::gpio::{Input, PinDriver, Pull};
 use open_oswst::devices::encoder::{Encoder, Event as Knob};
+use open_oswst::devices::gps::{Fix, Gps};
 use open_oswst::devices::mic::Mic;
 use open_oswst::devices::radio::{RxPacket, TxRequest, RX_CHAN, TX_CHAN};
 use open_oswst::devices::screen::{Frame, Screen};
@@ -43,6 +45,8 @@ const HOUSEKEEPING_PERIOD: embassy_time::Duration = embassy_time::Duration::from
 const RX_TIMEOUT: Duration = Duration::from_millis(500);
 /// Air quiet this long before log lines are written to flash
 const LOG_FLUSH_IDLE: Duration = Duration::from_secs(3);
+/// How often the GPS fix goes in the log (also whenever it's gained or lost)
+const GPS_LOG_PERIOD: Duration = Duration::from_secs(10);
 
 /// What woke the app up
 // Rx is ~260B bigger than the rest, but an event lives only until it's matched,
@@ -60,11 +64,17 @@ pub struct Peripherals {
     pub ptt: AnyIOPin<'static>,
 }
 
+/// The already-started device drivers the app runs on
+pub struct Devices {
+    pub mic: Mic,
+    pub encoder: Encoder,
+    pub screen: Screen,
+    pub gps: Gps,
+}
+
 pub async fn init(
     p: Peripherals,
-    mic: Mic,
-    encoder: Encoder,
-    screen: Screen,
+    devices: Devices,
     mac_str: heapless::String<18>,
     nvs: Option<EspNvs<NvsCustom>>,
     codec_tx: SyncSender<CodecRequest>,
@@ -84,12 +94,22 @@ pub async fn init(
         silence.copy_from_slice(&packet[HEADER_BYTES..]);
     }
 
+    let Devices {
+        mic,
+        encoder,
+        screen,
+        gps,
+    } = devices;
     let app = App {
         button,
         mic,
         encoder,
         screen,
-        mac_str,
+        gps,
+        shown_fix: None,
+        last_gps_log: None,
+        // Last 3 bytes are enough to tell our boards apart, and leave room for the time
+        short_mac: heapless::String::try_from(&mac_str[mac_str.len() - 8..]).unwrap(),
         nvs,
         codec_tx,
         // Pre-generate audio buffers
@@ -121,7 +141,10 @@ struct App {
     mic: Mic,
     encoder: Encoder,
     screen: Screen,
-    mac_str: heapless::String<18>,
+    gps: Gps,
+    shown_fix: Option<Fix>, // what the screen shows, to redraw when it changes
+    last_gps_log: Option<(Instant, bool)>, // when, and whether it had a position
+    short_mac: heapless::String<8>, // e.g. A2:C6:2C
     nvs: Option<EspNvs<NvsCustom>>, // saved settings; None if the partition couldn't open
     codec_tx: SyncSender<CodecRequest>,
     silence: Arc<[i16]>,
@@ -207,12 +230,39 @@ impl App {
             self.replay_echo().await;
         }
 
+        self.log_gps();
+
+        // Idle: keep the clock and position on screen current
+        let receiving = self.cur_txid.is_some() || self.echo.txid().is_some();
+        if !receiving && self.gps.latest() != self.shown_fix {
+            self.draw_rx_screen();
+        }
+
         // Flash writes stall the chip, so logs only go to the file once the
         // air has been quiet a while, and one chunk per tick. Between chunks,
         // any packet or PTT press gets handled first.
-        let receiving = self.cur_txid.is_some() || self.echo.txid().is_some();
         if !receiving && self.last_activity.elapsed() > LOG_FLUSH_IDLE && logger::pending() {
             logger::flush_chunk();
+        }
+    }
+
+    /// Log the fix every GPS_LOG_PERIOD, and straight away when a position
+    /// is gained or lost. These lines tie the log to real time and place.
+    fn log_gps(&mut self) {
+        let fix = self.gps.latest();
+        let has_position = fix.is_some_and(|fix| fix.position.is_some());
+        let due = match self.last_gps_log {
+            None => true,
+            Some((at, had_position)) => {
+                at.elapsed() >= GPS_LOG_PERIOD || had_position != has_position
+            }
+        };
+        if due {
+            match fix {
+                Some(fix) => log::info!("GPS {}", fix),
+                None => log::info!("GPS not responding"),
+            }
+            self.last_gps_log = Some((Instant::now(), has_position));
         }
     }
 
@@ -519,24 +569,49 @@ impl App {
         self.seq_buf.iter_mut().for_each(|s| *s = None);
     }
 
-    fn draw_rx_screen(&self) {
+    fn draw_rx_screen(&mut self) {
         let mut frame = self.screen.frame();
-        Text::new(&self.mac_str, Point::new(1, 10), self.style)
-            .draw(&mut frame)
-            .unwrap();
-        Text::new("RX Listening", Point::new(16, 36), self.style)
+        self.draw_header(&mut frame);
+        Text::new("RX Listening", Point::new(28, 40), self.style)
             .draw(&mut frame)
             .unwrap();
         self.draw_status(&mut frame);
         self.screen.show(frame);
     }
 
+    /// Top two lines of every radio screen: short MAC and UTC time, then the
+    /// GPS position (or why there isn't one).
+    fn draw_header(&mut self, frame: &mut Frame) {
+        let fix = self.gps.latest();
+        self.shown_fix = fix;
+
+        let mut line = heapless::String::<24>::new();
+        let _ = write!(line, "{}", self.short_mac);
+        if let Some((h, m, s)) = fix.and_then(|fix| fix.time) {
+            let _ = write!(line, "   {:02}:{:02}:{:02}Z", h, m, s);
+        }
+        Text::new(&line, Point::new(1, 10), self.style)
+            .draw(frame)
+            .unwrap();
+
+        line.clear();
+        let _ = match fix {
+            Some(Fix {
+                position: Some((lat, lon)),
+                ..
+            }) => write!(line, "{:.5},{:.5}", lat, lon),
+            Some(fix) => write!(line, "No fix, {} sats", fix.satellites),
+            None => write!(line, "No GPS"),
+        };
+        Text::new(&line, Point::new(1, 22), self.style)
+            .draw(frame)
+            .unwrap();
+    }
+
     fn draw_rx_audio_screen(&mut self, rssi: i16, snr: i16) {
         let mut frame = self.screen.frame();
-        Text::new(&self.mac_str, Point::new(1, 10), self.style)
-            .draw(&mut frame)
-            .unwrap();
-        Text::new("RX Audio", Point::new(28, 32), self.style)
+        self.draw_header(&mut frame);
+        Text::new("RX Audio", Point::new(40, 36), self.style)
             .draw(&mut frame)
             .unwrap();
 
@@ -607,12 +682,10 @@ impl App {
         self.screen.show(frame);
     }
 
-    fn draw_tx_screen(&self) {
+    fn draw_tx_screen(&mut self) {
         let mut frame = self.screen.frame();
-        Text::new(&self.mac_str, Point::new(1, 10), self.style)
-            .draw(&mut frame)
-            .unwrap();
-        Text::new("TX Streaming", Point::new(10, 36), self.style)
+        self.draw_header(&mut frame);
+        Text::new("TX Streaming", Point::new(28, 40), self.style)
             .draw(&mut frame)
             .unwrap();
         self.screen.show(frame);
