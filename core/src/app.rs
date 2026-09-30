@@ -31,6 +31,7 @@ use crate::echo::{self, Recorder};
 use crate::menu::{Menu, Outcome, Setting};
 use crate::mode::{self, Mode};
 use crate::packet::{self, Header, TYPE_ECHO, TYPE_VOICE};
+use crate::rx_buffer::{Next, RxBuffer, Verdict};
 
 /// Audio per packet: FRAMES_PER_PACKET × 40ms
 const PACKET_MS: u128 = FRAMES_PER_PACKET as u128 * 40;
@@ -114,11 +115,8 @@ pub async fn init<P: Platform>(
             .text_color(BinaryColor::On)
             .build(),
         line_buf: heapless::String::new(),
-        cur_txid: None,
-        last_played_seq: 0,
-        seq_buf: Default::default(),
+        rx: RxBuffer::default(),
         last_rx_time: Instant::now(),
-        spk_active: false,
         locked: false,
         echo: Recorder::new(silence),
         last_activity: Instant::now(),
@@ -147,11 +145,8 @@ struct App<P: Platform> {
     line_buf: heapless::String<64>,
 
     // Track current transmitter for seq ordering
-    cur_txid: Option<u8>,
-    last_played_seq: u8,
-    seq_buf: [Option<Arc<[i16]>>; 16],
+    rx: RxBuffer<Arc<[i16]>>, // the talker we're hearing, in seq order
     last_rx_time: Instant,
-    spk_active: bool, // true once speaker has been kicked
 
     locked: bool, // PTT ignored; the menu still opens, so it can be unlocked
 
@@ -212,11 +207,10 @@ impl<P: Platform> App<P> {
     /// inside their handlers, so none of this ever runs while transmitting.
     async fn housekeeping(&mut self) {
         // RX went quiet without an EOT (lost, or the talker went out of range)
-        if self.cur_txid.is_some() && self.last_rx_time.elapsed() > RX_TIMEOUT {
+        if self.rx.txid().is_some() && self.last_rx_time.elapsed() > RX_TIMEOUT {
             log::info!("RX timeout, resetting txid lock");
             send_to_speaker(&self.squelch);
-            self.reset_rx_state();
-            self.spk_active = false;
+            self.rx.end();
         }
 
         // Echo mode: the talker went quiet without an EOT. Replay anyway
@@ -227,7 +221,7 @@ impl<P: Platform> App<P> {
         self.log_gps();
 
         // Idle: keep the clock and position on screen current
-        let receiving = self.cur_txid.is_some() || self.echo.txid().is_some();
+        let receiving = self.rx.txid().is_some() || self.echo.txid().is_some();
         if !receiving && self.gps.latest() != self.shown_fix {
             self.draw_rx_screen();
         }
@@ -305,8 +299,7 @@ impl<P: Platform> App<P> {
             }
             log::info!("RX EOT from txid={}", txid);
             send_to_speaker(&self.squelch);
-            self.reset_rx_state();
-            self.spk_active = false;
+            self.rx.end();
             return;
         }
 
@@ -317,70 +310,43 @@ impl<P: Platform> App<P> {
 
         let payload = &rx_pkt.data[HEADER_BYTES..];
 
-        if self.cur_txid.is_none() {
-            self.cur_txid = Some(txid);
-            self.last_played_seq = seq.wrapping_sub(1) & 0x0F;
-        }
-
-        if self.cur_txid != Some(txid) {
-            log::warn!(
-                "RX ignoring txid={} (locked to {})",
-                txid,
-                self.cur_txid.unwrap()
-            );
+        let verdict = self.rx.check(txid, seq);
+        if let Verdict::OtherTxid { locked } = verdict {
+            log::warn!("RX ignoring txid={} (locked to {})", txid, locked);
             return;
         }
-
         self.last_rx_time = Instant::now();
-        let expected_seq = (self.last_played_seq.wrapping_add(1)) & 0x0F;
-        let diff = (seq.wrapping_sub(expected_seq) & 0x0F) as i8;
-        let diff = if diff > 7 { diff - 16 } else { diff };
-
-        match diff {
-            -2..=-1 => {
+        match verdict {
+            Verdict::Old(diff) => {
                 log::info!("RX seq={} old (diff={}), dropping", seq, diff);
                 return;
             }
-            0..=2 => {
-                // Repeater: relay after dedup (non-duplicate voice)
-                if mode::get() == Mode::Repeater {
-                    let mut relay = heapless::Vec::new();
-                    let _ = relay.extend_from_slice(&rx_pkt.data);
-                    TX_CHAN.send(TxRequest { data: relay }).await;
-                    log::info!("RELAY [{}B] txid={} seq={}", rx_pkt.data.len(), txid, seq);
-                    self.last_played_seq = seq;
-                    return; // skip decode — fast turnaround
-                }
-                // Send to codec thread for decode, await reply
-                let mut payload_arr = [0u8; PAYLOAD_BYTES];
-                payload_arr.copy_from_slice(payload);
-                self.codec_tx
-                    .send(CodecRequest::decode(seq, txid, payload_arr))
-                    .unwrap();
-                if let CodecResponse::Decoded { seq, txid, pcm } = CODEC_REPLY.receive().await {
-                    if self.cur_txid == Some(txid) {
-                        self.seq_buf[seq as usize] = Some(pcm.into());
-
-                        // Kick speaker once we have 2 consecutive packets
-                        if !self.spk_active {
-                            let next = (self.last_played_seq.wrapping_add(1)) & 0x0F;
-                            let next2 = (next.wrapping_add(1)) & 0x0F;
-                            if self.seq_buf[next as usize].is_some()
-                                && self.seq_buf[next2 as usize].is_some()
-                            {
-                                let pcm = self.seq_buf[next as usize].take().unwrap();
-                                self.last_played_seq = next;
-                                self.spk_active = true;
-                                send_to_speaker(&pcm);
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {
+            Verdict::Unexpected(diff) => {
                 log::warn!("RX seq={} unexpected (diff={}), resetting", seq, diff);
-                self.reset_rx_state();
                 return;
+            }
+            Verdict::OtherTxid { .. } | Verdict::Take => {}
+        }
+
+        // Repeater: relay after dedup (non-duplicate voice)
+        if mode::get() == Mode::Repeater {
+            let mut relay = heapless::Vec::new();
+            let _ = relay.extend_from_slice(&rx_pkt.data);
+            TX_CHAN.send(TxRequest { data: relay }).await;
+            log::info!("RELAY [{}B] txid={} seq={}", rx_pkt.data.len(), txid, seq);
+            self.rx.relayed(seq);
+            return; // skip decode — fast turnaround
+        }
+        // Send to codec thread for decode, await reply
+        let mut payload_arr = [0u8; PAYLOAD_BYTES];
+        payload_arr.copy_from_slice(payload);
+        self.codec_tx
+            .send(CodecRequest::decode(seq, txid, payload_arr))
+            .unwrap();
+        if let CodecResponse::Decoded { seq, txid, pcm } = CODEC_REPLY.receive().await {
+            // The speaker starts once two in a row are here
+            if let Some(first) = self.rx.insert(txid, seq, pcm.into()) {
+                send_to_speaker(&first);
             }
         }
 
@@ -389,7 +355,7 @@ impl<P: Platform> App<P> {
             rx_pkt.data.len(),
             txid,
             seq,
-            self.last_played_seq,
+            self.rx.last_played(),
             rx_pkt.rssi,
             rx_pkt.snr,
         );
@@ -433,8 +399,7 @@ impl<P: Platform> App<P> {
 
     async fn on_ptt(&mut self) {
         // PTT pressed — reset RX state
-        self.reset_rx_state();
-        self.spk_active = false;
+        self.rx.end();
 
         let txid = random_txid::<P>();
         let mut seq: u8 = 0;
@@ -479,18 +444,15 @@ impl<P: Platform> App<P> {
     }
 
     fn on_speaker_request(&mut self) {
-        // Speaker wants next audio
-        let next = (self.last_played_seq.wrapping_add(1)) & 0x0F;
-        if let Some(pcm) = self.seq_buf[next as usize].take() {
-            self.last_played_seq = next;
-            send_to_speaker(&pcm);
-        } else if self.cur_txid.is_some() {
-            // Gap — skip this seq, send silence
-            // self.last_played_seq = next;
-            log::info!("SPK gap at seq={}, sending silence", next);
-            send_to_speaker(&self.silence);
+        match self.rx.for_speaker() {
+            Next::Audio(pcm) => send_to_speaker(&pcm),
+            Next::Gap(seq) => {
+                log::info!("SPK gap at seq={}, sending silence", seq);
+                send_to_speaker(&self.silence);
+            }
+            // Not receiving, nothing to send — DMA auto_clear handles silence
+            Next::Idle => {}
         }
-        // else: not receiving, nothing to send — DMA auto_clear handles silence
     }
 
     fn change_volume(&mut self, delta: i8) {
@@ -500,7 +462,7 @@ impl<P: Platform> App<P> {
         speaker::set_volume(level);
         log::info!("Volume {}", level);
         // Mid-reception the next packet redraws within 160ms; don't flash "Listening"
-        if self.cur_txid.is_none() {
+        if self.rx.txid().is_none() {
             self.draw_rx_screen();
         }
     }
@@ -508,8 +470,7 @@ impl<P: Platform> App<P> {
     /// Menu mode is only menuing: audio and RX stop until we leave, and PTT
     /// is ignored.
     async fn run_menu(&mut self) {
-        self.reset_rx_state();
-        self.spk_active = false;
+        self.rx.end();
         let mut menu = Menu::new();
         loop {
             self.draw_menu(&menu);
@@ -552,12 +513,6 @@ impl<P: Platform> App<P> {
             Setting::Lock => self.locked as u8,
             Setting::Mode => mode::get() as u8,
         }
-    }
-
-    fn reset_rx_state(&mut self) {
-        self.cur_txid = None;
-        self.last_played_seq = 0;
-        self.seq_buf.iter_mut().for_each(|s| *s = None);
     }
 
     fn draw_rx_screen(&mut self) {

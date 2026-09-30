@@ -11,3 +11,4 @@ pub mod menu;
 pub mod mode;
 pub mod packet;
 pub mod platform;
+pub mod rx_buffer;
