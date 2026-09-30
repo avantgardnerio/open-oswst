@@ -19,7 +19,7 @@ type Payload = [u8; PAYLOAD_BYTES];
 const PACKET_MS: u64 = FRAMES_PER_PACKET as u64 * 40;
 /// Recording limit: 30s of audio (~5KB)
 const MAX_PACKETS: usize = (30_000 / PACKET_MS) as usize;
-/// Talker gone quiet without an EOT (it was lost): replay anyway
+/// Talker gone quiet this long without an EOT (it was lost): replay anyway
 const TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 /// Pause before replaying, so the talker has let go of PTT
 const REPLAY_DELAY_MS: u64 = 1000;
@@ -82,10 +82,9 @@ impl Recorder {
         }
     }
 
-    /// While recording, how long until we give up waiting for the EOT.
-    pub fn time_left(&self) -> Option<std::time::Duration> {
-        self.txid?;
-        Some(TIMEOUT.saturating_sub(self.last_rx.elapsed()))
+    /// Recording, but the talker has gone quiet without an EOT (it was lost).
+    pub fn timed_out(&self) -> bool {
+        self.txid.is_some() && self.last_rx.elapsed() > TIMEOUT
     }
 
     /// End the recording and hand it over for replay.

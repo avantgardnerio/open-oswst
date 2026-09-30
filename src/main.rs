@@ -10,7 +10,8 @@ use esp_idf_svc::nvs::{EspCustomNvsPartition, EspNvs};
 use mode::Mode;
 use open_oswst::board;
 use open_oswst::codec;
-use open_oswst::devices::{encoder, fem, mic, radio, screen, speaker};
+use open_oswst::devices::{encoder, fem, mic, radio, screen, speaker, storage};
+use open_oswst::logger;
 
 /// Read the base MAC address from eFuse
 fn get_mac() -> [u8; 6] {
@@ -26,8 +27,15 @@ fn get_mac() -> [u8; 6] {
 
 fn main() {
     esp_idf_svc::sys::link_patches();
-    esp_idf_svc::log::EspLogger::initialize_default();
+    logger::init();
     log::info!("open-oswst starting...");
+
+    // Logs also go to a file per boot. Without storage we still log to serial
+    match storage::init().map(|()| logger::open_file()) {
+        Ok(Ok(path)) => log::info!("Logging to {}", path),
+        Ok(Err(e)) => log::warn!("No log file ({}), serial only", e),
+        Err(e) => log::warn!("Storage unavailable ({}), serial only", e),
+    }
 
     let board = board::take();
     let _fem = fem::init(board.fem);

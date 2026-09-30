@@ -1,6 +1,6 @@
 use embassy_futures::join::join;
-use embassy_futures::select::{select4, Either4};
-use embassy_time::with_timeout;
+use embassy_futures::select::{select5, Either5};
+use embassy_time::Ticker;
 use embedded_graphics::mono_font::ascii::FONT_6X10;
 use embedded_graphics::mono_font::{MonoTextStyle, MonoTextStyleBuilder};
 use embedded_graphics::pixelcolor::BinaryColor;
@@ -9,11 +9,12 @@ use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
 use embedded_graphics::text::{Baseline, Text};
 use esp_idf_svc::hal::gpio::AnyIOPin;
 use esp_idf_svc::hal::gpio::{Input, PinDriver, Pull};
-use open_oswst::devices::encoder::{Encoder, Event};
+use open_oswst::devices::encoder::{Encoder, Event as Knob};
 use open_oswst::devices::mic::Mic;
 use open_oswst::devices::radio::{RxPacket, TxRequest, RX_CHAN, TX_CHAN};
 use open_oswst::devices::screen::{Frame, Screen};
 use open_oswst::devices::speaker::{self, MAX_VOLUME, SPK_FRAMES, SPK_REQ};
+use open_oswst::logger;
 use std::future::Future;
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
@@ -35,6 +36,25 @@ const PACKET_MS: u128 = FRAMES_PER_PACKET as u128 * 40;
 
 /// Stereo samples per Codec2 frame (320 mono × 2 channels)
 const STEREO_FRAME_SAMPLES: usize = CODEC2_FRAME_SAMPLES * 2;
+
+/// How often `housekeeping()` runs
+const HOUSEKEEPING_PERIOD: embassy_time::Duration = embassy_time::Duration::from_millis(250);
+/// No packet from the current talker for this long: they're gone
+const RX_TIMEOUT: Duration = Duration::from_millis(500);
+/// Air quiet this long before log lines are written to flash
+const LOG_FLUSH_IDLE: Duration = Duration::from_secs(3);
+
+/// What woke the app up
+// Rx is ~260B bigger than the rest, but an event lives only until it's matched,
+// so boxing it would cost a heap alloc per packet for nothing.
+#[allow(clippy::large_enum_variant)]
+enum AppEvent {
+    Rx(RxPacket),
+    Ptt,
+    Speaker, // the speaker wants its next frame
+    Knob(Knob),
+    Tick, // time for housekeeping()
+}
 
 pub struct Peripherals {
     pub ptt: AnyIOPin<'static>,
@@ -87,6 +107,7 @@ pub async fn init(
         spk_active: false,
         locked: false,
         echo: Recorder::new(silence),
+        last_activity: Instant::now(),
     };
 
     async move {
@@ -118,6 +139,8 @@ struct App {
     locked: bool, // PTT ignored; the menu still opens, so it can be unlocked
 
     echo: Recorder, // only used in echo mode
+
+    last_activity: Instant, // last packet heard or sent: gates log flushes
 }
 
 impl App {
@@ -125,49 +148,76 @@ impl App {
         // Show initial RX state
         self.draw_rx_screen();
 
+        let mut ticker = Ticker::every(HOUSEKEEPING_PERIOD);
         loop {
-            // Auto-reset if no packet from current txid in 500ms
-            if self.cur_txid.is_some() && self.last_rx_time.elapsed() > Duration::from_millis(500) {
-                log::info!("RX timeout, resetting txid lock");
-                send_to_speaker(&self.squelch);
-                self.reset_rx_state();
-                self.spk_active = false;
-            }
-
-            // Echo mode: while recording, stop waiting once the talker has
-            // gone quiet, in case their EOT was lost
-            let echo_wait = self.echo.time_left();
-            let rx = async {
-                match echo_wait {
-                    Some(left) => {
-                        let left = embassy_time::Duration::from_micros(left.as_micros() as u64);
-                        with_timeout(left, RX_CHAN.receive()).await.ok()
-                    }
-                    None => Some(RX_CHAN.receive().await),
-                }
-            };
-
-            let locked = self.locked;
-            let button = &mut self.button;
-            let ptt = async {
-                if locked {
-                    core::future::pending::<()>().await;
-                }
-                let _ = button.wait_for_low().await;
-            };
-            match select4(rx, ptt, SPK_REQ.receive(), self.encoder.next()).await {
-                Either4::First(Some(rx_pkt)) => self.on_rx_packet(rx_pkt).await,
-                Either4::First(None) => self.replay_echo().await,
-                Either4::Second(_) => self.on_ptt().await,
-                Either4::Third(_) => self.on_speaker_request(),
-                Either4::Fourth(Event::Click) => self.run_menu().await,
-                Either4::Fourth(Event::Cw) => self.change_volume(1),
-                Either4::Fourth(Event::Ccw) => self.change_volume(-1),
+            match self.next_event(&mut ticker).await {
+                AppEvent::Rx(rx_pkt) => self.on_rx_packet(rx_pkt).await,
+                AppEvent::Ptt => self.on_ptt().await,
+                AppEvent::Speaker => self.on_speaker_request(),
+                AppEvent::Knob(Knob::Click) => self.run_menu().await,
+                AppEvent::Knob(Knob::Cw) => self.change_volume(1),
+                AppEvent::Knob(Knob::Ccw) => self.change_volume(-1),
+                AppEvent::Tick => self.housekeeping().await,
             }
         }
     }
 
+    /// Wait for whatever happens first. Only things that need a fast response
+    /// are events; anything that just needs checking now and then goes in
+    /// `housekeeping()`, run on the tick.
+    async fn next_event(&mut self, ticker: &mut Ticker) -> AppEvent {
+        let locked = self.locked;
+        let button = &mut self.button;
+        let ptt = async {
+            if locked {
+                core::future::pending::<()>().await;
+            }
+            let _ = button.wait_for_low().await;
+        };
+        match select5(
+            RX_CHAN.receive(),
+            ptt,
+            SPK_REQ.receive(),
+            self.encoder.next(),
+            ticker.next(),
+        )
+        .await
+        {
+            Either5::First(rx_pkt) => AppEvent::Rx(rx_pkt),
+            Either5::Second(()) => AppEvent::Ptt,
+            Either5::Third(()) => AppEvent::Speaker,
+            Either5::Fourth(knob) => AppEvent::Knob(knob),
+            Either5::Fifth(()) => AppEvent::Tick,
+        }
+    }
+
+    /// Timed jobs, checked every tick. TX and echo replay run to completion
+    /// inside their handlers, so none of this ever runs while transmitting.
+    async fn housekeeping(&mut self) {
+        // RX went quiet without an EOT (lost, or the talker went out of range)
+        if self.cur_txid.is_some() && self.last_rx_time.elapsed() > RX_TIMEOUT {
+            log::info!("RX timeout, resetting txid lock");
+            send_to_speaker(&self.squelch);
+            self.reset_rx_state();
+            self.spk_active = false;
+        }
+
+        // Echo mode: the talker went quiet without an EOT. Replay anyway
+        if self.echo.timed_out() {
+            self.replay_echo().await;
+        }
+
+        // Flash writes stall the chip, so logs only go to the file once the
+        // air has been quiet a while, and one chunk per tick. Between chunks,
+        // any packet or PTT press gets handled first.
+        let receiving = self.cur_txid.is_some() || self.echo.txid().is_some();
+        if !receiving && self.last_activity.elapsed() > LOG_FLUSH_IDLE && logger::pending() {
+            logger::flush_chunk();
+        }
+    }
+
     async fn on_rx_packet(&mut self, rx_pkt: RxPacket) {
+        self.last_activity = Instant::now();
         if rx_pkt.data.len() < HEADER_BYTES {
             log::warn!(
                 "RX [{}B] too short, rssi={} snr={}",
@@ -304,7 +354,7 @@ impl App {
     }
 
     /// Echo mode: record voice packets, and replay once the talker's EOT
-    /// arrives. (If the EOT is lost, the run loop's timeout replays instead.)
+    /// arrives. (If the EOT is lost, housekeeping() replays on a timeout.)
     async fn on_echo_packet(&mut self, rx_pkt: &RxPacket, txid: u8, seq: u8) {
         if rx_pkt.data.len() == HEADER_BYTES {
             if self.echo.txid() == Some(txid) {
@@ -331,6 +381,7 @@ impl App {
         log::info!("ECHO replaying {} packets", packets.len());
         self.draw_tx_screen();
         echo::replay(packets, random_txid()).await;
+        self.last_activity = Instant::now();
         // Drop anything heard while we were transmitting it
         while RX_CHAN.try_receive().is_ok() {}
         self.draw_rx_screen();
@@ -377,6 +428,7 @@ impl App {
         TX_CHAN.send(TxRequest { data: eot_data }).await;
 
         log::info!("PTT released — {} packets sent + EOT", packets);
+        self.last_activity = Instant::now();
 
         // Redraw RX screen
         self.draw_rx_screen();
@@ -418,9 +470,9 @@ impl App {
         loop {
             self.draw_menu(&menu);
             match self.encoder.next().await {
-                Event::Cw => menu.rotate(1),
-                Event::Ccw => menu.rotate(-1),
-                Event::Click => match menu.click() {
+                Knob::Cw => menu.rotate(1),
+                Knob::Ccw => menu.rotate(-1),
+                Knob::Click => match menu.click() {
                     Outcome::Stay => {}
                     Outcome::Exit => break,
                     Outcome::Set(setting, value) => self.apply(setting, value),

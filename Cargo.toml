@@ -31,5 +31,10 @@ embedded-graphics = "0.8"
 heapless = "0.8"
 codec2 = "0.3.0"
 
+# LittleFS for the `storage` partition (see partitions.csv). esp-idf-sys already
+# generates its bindings once the component is present.
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "joltwallet/littlefs", version = "1" }
+
 [build-dependencies]
 embuild = "0.33"

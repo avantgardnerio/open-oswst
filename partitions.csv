@@ -2,5 +2,9 @@
 # Name,     Type, SubType, Offset,   Size,     Flags
 nvs,         data, nvs,     0x9000,   0x6000,
 phy_init,    data, phy,     0xf000,   0x1000,
-factory,     app,  factory, 0x10000,  0xf9d000,
+# 4MB is ~5x the app today. Was 0xf9d000 before the storage partition existed
+factory,     app,  factory, 0x10000,  0x400000,
+# LittleFS, mounted at /data (logs, and later recordings, tracks...)
+storage,     data, spiffs,  0x410000, 0xb9d000,
+# Settings. Must stay at this offset: boards in the field already have it here
 open-oswst,  data, nvs,     0xfad000, 0x3000,

@@ -5,3 +5,6 @@ target/
 out/
 *.lck
 *.dsn
+
+# Log files pulled off boards by scripts/pull-logs.py
+logs/
