@@ -321,8 +321,16 @@ impl<P: Platform> App<P> {
                 log::info!("RX seq={} old (diff={}), dropping", seq, diff);
                 return;
             }
-            Verdict::Unexpected(diff) => {
-                log::warn!("RX seq={} unexpected (diff={}), resetting", seq, diff);
+            Verdict::Corrupt(diff) => {
+                log::warn!(
+                    "RX seq={} impossible (diff={}), dropping as corrupt",
+                    seq,
+                    diff
+                );
+                return;
+            }
+            Verdict::Resync(diff) => {
+                log::warn!("RX seq={} impossible again (diff={}), resyncing", seq, diff);
                 return;
             }
             Verdict::OtherTxid { .. } | Verdict::Take => {}
