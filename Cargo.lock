@@ -1238,7 +1238,21 @@ dependencies = [
  "heapless 0.8.0",
  "log",
  "lora-phy",
+ "open-oswst-core",
  "ssd1306",
+]
+
+[[package]]
+name = "open-oswst-core"
+version = "0.1.0"
+dependencies = [
+ "codec2",
+ "embassy-futures",
+ "embassy-sync",
+ "embassy-time",
+ "embedded-graphics",
+ "heapless 0.8.0",
+ "log",
 ]
 
 [[package]]

@@ -12,22 +12,8 @@ use lora_phy::LoRa;
 use std::future::Future;
 use std::time::Instant;
 
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Channel;
-
-pub struct RxPacket {
-    pub data: heapless::Vec<u8, 255>,
-    pub rssi: i16,
-    pub snr: i16,
-}
-
-pub struct TxRequest {
-    pub data: heapless::Vec<u8, 255>,
-}
-
-// Static, ISR-safe
-pub static RX_CHAN: Channel<CriticalSectionRawMutex, RxPacket, 2> = Channel::new();
-pub static TX_CHAN: Channel<CriticalSectionRawMutex, TxRequest, 4> = Channel::new();
+// The queues the app talks to; this driver connects them to the SX1262
+pub use open_oswst_core::devices::radio::{RxPacket, TxRequest, RX_CHAN, TX_CHAN};
 
 type Iv<'a> = GenericSx126xInterfaceVariant<PinDriver<'a, Output>, PinDriver<'a, Input>>;
 type Radio<'a> =

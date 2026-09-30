@@ -3,6 +3,8 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use crate::devices::settings::Settings;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// Play what we hear
@@ -31,4 +33,19 @@ pub fn get() -> Mode {
 
 pub fn set(mode: Mode) {
     MODE.store(mode as u8, Ordering::Relaxed);
+}
+
+/// Read the saved mode (Normal if there's none, or no settings at all), and
+/// make it current.
+pub fn load(settings: Option<&impl Settings>) -> Mode {
+    let read = |key| settings.and_then(|settings| settings.get_u8(key));
+    // "mode" replaced an older "repeater" on/off flag; boards saved before
+    // then only have that one
+    let mode = match (read("mode"), read("repeater")) {
+        (Some(mode), _) => Mode::from_u8(mode),
+        (None, Some(1)) => Mode::Repeater,
+        _ => Mode::Normal,
+    };
+    set(mode);
+    mode
 }

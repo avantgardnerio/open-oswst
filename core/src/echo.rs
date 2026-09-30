@@ -6,9 +6,9 @@
 //! encoded silence, so dropouts are heard where they happened, and the
 //! listener gets an unbroken sequence.
 
+use crate::codec::{FRAMES_PER_PACKET, PAYLOAD_BYTES};
+use crate::devices::radio::{TxRequest, TX_CHAN};
 use embassy_time::{Duration, Ticker, Timer};
-use open_oswst::codec::{FRAMES_PER_PACKET, PAYLOAD_BYTES};
-use open_oswst::devices::radio::{TxRequest, TX_CHAN};
 use std::time::Instant;
 
 use crate::packet::{self, TYPE_ECHO};

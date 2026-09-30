@@ -1,17 +1,28 @@
-mod app;
-mod echo;
-mod menu;
-mod mode;
-mod packet;
+//! Firmware entry point: brings up the board's hardware and runs the app from
+//! the core crate on it. Everything radio-behaviour lives in core.
 
 use embassy_futures::join::join3;
 use esp_idf_svc::hal::task::block_on;
-use esp_idf_svc::nvs::{EspCustomNvsPartition, EspNvs};
-use mode::Mode;
 use open_oswst::board;
-use open_oswst::codec;
-use open_oswst::devices::{encoder, fem, gps, mic, radio, screen, speaker, storage};
-use open_oswst::logger;
+use open_oswst::devices::{encoder, fem, gps, mic, ptt, radio, screen, settings, speaker, storage};
+use open_oswst_core::platform::Platform;
+use open_oswst_core::{app, codec, logger, mode};
+use std::path::Path;
+
+/// The board, as the app sees it
+struct Esp;
+
+impl Platform for Esp {
+    type Mic = mic::Mic;
+    type Ptt = ptt::Ptt;
+    type Knob = encoder::Encoder;
+    type Gps = gps::Gps;
+    type Settings = settings::Settings;
+
+    fn random() -> u32 {
+        unsafe { esp_idf_svc::sys::esp_random() }
+    }
+}
 
 /// Read the base MAC address from eFuse
 fn get_mac() -> [u8; 6] {
@@ -27,12 +38,14 @@ fn get_mac() -> [u8; 6] {
 
 fn main() {
     esp_idf_svc::sys::link_patches();
-    logger::init();
+    // Same clock as ESP-IDF's own log lines
+    logger::init(|| unsafe { esp_idf_svc::sys::esp_log_timestamp() });
     log::info!("open-oswst starting...");
 
     // Logs also go to a file per boot. Without storage we still log to serial
-    match storage::init().map(|()| logger::open_file()) {
-        Ok(Ok(path)) => log::info!("Logging to {}", path),
+    let log_dir = Path::new(storage::ROOT).join("log");
+    match storage::init().map(|()| logger::open_file(&log_dir, storage::usage)) {
+        Ok(Ok(path)) => log::info!("Logging to {}", path.display()),
         Ok(Err(e)) => log::warn!("No log file ({}), serial only", e),
         Err(e) => log::warn!("Storage unavailable ({}), serial only", e),
     }
@@ -41,21 +54,8 @@ fn main() {
     let _fem = fem::init(board.fem);
     let gps = gps::init(board.gps);
 
-    // Config lives in the dedicated NVS partition. Opened read-write so the
-    // menu can save settings; that also creates the namespace on fresh boards.
-    let nvs_partition = EspCustomNvsPartition::take("open-oswst").unwrap();
-    let nvs = EspNvs::new(nvs_partition, "config", true)
-        .map_err(|e| log::warn!("NVS config unavailable ({}), settings won't persist", e))
-        .ok();
-    let read_u8 = |key| nvs.as_ref().and_then(|nvs| nvs.get_u8(key).ok().flatten());
-    // "mode" replaced an older "repeater" on/off flag; boards saved before
-    // then only have that one
-    let mode = match (read_u8("mode"), read_u8("repeater")) {
-        (Some(mode), _) => Mode::from_u8(mode),
-        (None, Some(1)) => Mode::Repeater,
-        _ => Mode::Normal,
-    };
-    mode::set(mode);
+    let settings = settings::init();
+    let mode = mode::load(settings.as_ref());
     log::info!("Config: mode={:?}", mode);
 
     // Get MAC for display
@@ -80,20 +80,17 @@ fn main() {
     block_on(async {
         let radio_fut = radio::init(board.radio).await;
         let speaker_fut = speaker::init(board.speaker).await;
-        let screen = screen::init(board.screen);
-        let mic = mic::init(board.mic);
-        let encoder = encoder::init(board.vol);
 
-        let app_fut = app::init(
-            app::Peripherals { ptt: board.ptt },
+        let app_fut = app::init::<Esp>(
             app::Devices {
-                mic,
-                encoder,
-                screen,
+                mic: mic::init(board.mic),
+                ptt: ptt::init(board.ptt),
+                knob: encoder::init(board.vol),
+                screen: screen::init(board.screen),
                 gps,
+                settings,
             },
             mac_str,
-            nvs,
             codec_tx,
         )
         .await;

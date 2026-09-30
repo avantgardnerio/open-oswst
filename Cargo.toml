@@ -19,6 +19,8 @@ opt-level = "s"
 lto = "thin"
 
 [dependencies]
+# The app itself: hardware-free, shared with the desktop simulator
+open-oswst-core = { path = "core" }
 log = "0.4"
 esp-idf-svc = { version = "0.52.1", features = ["critical-section", "embassy-time-driver", "embassy-sync"] }
 # Remove `generic-queue-8` if you plan to use `embassy-time` WITH `embassy-executor`

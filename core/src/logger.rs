@@ -1,5 +1,5 @@
-//! Logger behind the `log` macros: every line goes to serial straight away,
-//! and is also kept in a RAM buffer for a log file on /data.
+//! Logger behind the `log` macros: every line goes to the console straight
+//! away, and is also kept in a RAM buffer for a log file.
 //!
 //! Writing to flash stalls the chip for up to ~18ms, so this never writes on
 //! its own. Whoever owns the timing (the app) calls `flush_chunk()` when it's
@@ -12,9 +12,8 @@ use log::{Level, LevelFilter, Log, Metadata, Record};
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::sync::Mutex;
-
-use crate::devices::storage;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 /// RAM held for lines not yet written: ~40s of busy radio traffic
 const BUFFER_BYTES: usize = 48 * 1024;
@@ -23,7 +22,8 @@ const CHUNK_BYTES: usize = 512;
 /// Delete old log files until the partition is below this full
 const MAX_USED_PERCENT: usize = 80;
 
-const LOG_DIR: &str = "/data/log";
+/// Milliseconds since boot, for the line timestamps. Set by `init`
+static UPTIME_MS: OnceLock<fn() -> u32> = OnceLock::new();
 
 struct Logger {
     serial_level: LevelFilter,
@@ -47,9 +47,10 @@ static LOGGER: Logger = Logger {
     file: Mutex::new(None),
 };
 
-/// Install as the `log` backend. Serial works from here on; the file only
-/// once `open_file()` succeeds.
-pub fn init() {
+/// Install as the `log` backend. The console works from here on; the file
+/// only once `open_file()` succeeds. `uptime_ms` stamps each line.
+pub fn init(uptime_ms: fn() -> u32) {
+    let _ = UPTIME_MS.set(uptime_ms);
     LOGGER
         .buffer
         .lock()
@@ -60,22 +61,22 @@ pub fn init() {
     log::set_max_level(LOGGER.serial_level.max(LOGGER.file_level));
 }
 
-/// Start this boot's log file, `/data/log/NNNN.txt`, numbered one past the
-/// newest. Clears out the oldest files first if the partition is filling up.
-/// Needs storage mounted.
-pub fn open_file() -> std::io::Result<String> {
-    fs::create_dir_all(LOG_DIR)?;
-    let mut numbers = log_file_numbers();
+/// Start this boot's log file, `dir/NNNN.txt`, numbered one past the newest.
+/// Clears out the oldest files first while `usage()` (used, total bytes) says
+/// the storage is filling up.
+pub fn open_file(dir: &Path, usage: impl Fn() -> (usize, usize)) -> std::io::Result<PathBuf> {
+    fs::create_dir_all(dir)?;
+    let mut numbers = log_file_numbers(dir);
     numbers.sort_unstable();
     for oldest in numbers.clone() {
-        let (used, total) = storage::usage();
+        let (used, total) = usage();
         if total == 0 || used * 100 / total < MAX_USED_PERCENT {
             break;
         }
-        let _ = fs::remove_file(log_path(oldest));
+        let _ = fs::remove_file(log_path(dir, oldest));
         numbers.retain(|&n| n != oldest);
     }
-    let path = log_path(numbers.last().map_or(1, |newest| newest + 1));
+    let path = log_path(dir, numbers.last().map_or(1, |newest| newest + 1));
 
     let file = OpenOptions::new().create(true).append(true).open(&path)?;
     *LOGGER.file.lock().unwrap() = Some(file);
@@ -130,7 +131,7 @@ impl Log for Logger {
         let line = format!(
             "{} ({}) {}: {}\n",
             letter(record.level()),
-            unsafe { esp_idf_svc::sys::esp_log_timestamp() },
+            UPTIME_MS.get().map_or(0, |uptime_ms| uptime_ms()),
             record.target(),
             record.args()
         );
@@ -163,13 +164,13 @@ fn letter(level: Level) -> char {
     }
 }
 
-fn log_path(number: u32) -> String {
-    format!("{}/{:04}.txt", LOG_DIR, number)
+fn log_path(dir: &Path, number: u32) -> PathBuf {
+    dir.join(format!("{:04}.txt", number))
 }
 
 /// Numbers of the existing NNNN.txt files
-fn log_file_numbers() -> Vec<u32> {
-    let Ok(entries) = fs::read_dir(LOG_DIR) else {
+fn log_file_numbers(dir: &Path) -> Vec<u32> {
+    let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
     entries

@@ -1,0 +1,12 @@
+[package]
+name = "desktop"
+version = "0.1.0"
+edition = "2021"
+description = "Run open-oswst radios on a PC, on virtual devices"
+
+[dependencies]
+open-oswst-core = { path = "../core" }
+
+# Its own workspace, separate from the firmware's: different target, and its
+# own RustRover project. Shares core/ by path.
+[workspace]

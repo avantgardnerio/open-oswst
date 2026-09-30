@@ -21,12 +21,7 @@ pub struct Peripherals {
     pub sw: AnyIOPin<'static>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Event {
-    Cw,
-    Ccw,
-    Click,
-}
+pub use open_oswst_core::devices::knob::Event;
 
 pub struct Encoder {
     a: PinDriver<'static, Input>,
@@ -121,5 +116,11 @@ fn gray_phase(a: bool, b: bool) -> u8 {
         (true, false) => 1,
         (true, true) => 2,
         (false, true) => 3,
+    }
+}
+
+impl open_oswst_core::devices::knob::Knob for Encoder {
+    async fn next(&mut self) -> Event {
+        Encoder::next(self).await
     }
 }

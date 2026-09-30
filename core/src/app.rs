@@ -1,3 +1,13 @@
+use crate::devices::gps::{Fix, Gps};
+use crate::devices::knob::{Event as Knob, Knob as _};
+use crate::devices::mic::Mic;
+use crate::devices::ptt::Ptt;
+use crate::devices::radio::{RxPacket, TxRequest, RX_CHAN, TX_CHAN};
+use crate::devices::screen::{Frame, Screen};
+use crate::devices::settings::Settings;
+use crate::devices::speaker::{self, MAX_VOLUME, SPK_FRAMES, SPK_REQ};
+use crate::logger;
+use crate::platform::Platform;
 use core::fmt::Write as _;
 use embassy_futures::join::join;
 use embassy_futures::select::{select5, Either5};
@@ -8,30 +18,19 @@ use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
 use embedded_graphics::text::{Baseline, Text};
-use esp_idf_svc::hal::gpio::AnyIOPin;
-use esp_idf_svc::hal::gpio::{Input, PinDriver, Pull};
-use open_oswst::devices::encoder::{Encoder, Event as Knob};
-use open_oswst::devices::gps::{Fix, Gps};
-use open_oswst::devices::mic::Mic;
-use open_oswst::devices::radio::{RxPacket, TxRequest, RX_CHAN, TX_CHAN};
-use open_oswst::devices::screen::{Frame, Screen};
-use open_oswst::devices::speaker::{self, MAX_VOLUME, SPK_FRAMES, SPK_REQ};
-use open_oswst::logger;
 use std::future::Future;
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use esp_idf_svc::nvs::{EspNvs, NvsCustom};
-
+use crate::codec::{
+    CodecRequest, CodecResponse, CODEC2_FRAME_SAMPLES, CODEC_REPLY, FRAMES_PER_PACKET,
+    HEADER_BYTES, PACKET_BYTES, PAYLOAD_BYTES, STEREO_PACKET_SAMPLES,
+};
 use crate::echo::{self, Recorder};
 use crate::menu::{Menu, Outcome, Setting};
 use crate::mode::{self, Mode};
 use crate::packet::{self, Header, TYPE_ECHO, TYPE_VOICE};
-use open_oswst::codec::{
-    CodecRequest, CodecResponse, CODEC2_FRAME_SAMPLES, CODEC_REPLY, FRAMES_PER_PACKET,
-    HEADER_BYTES, PACKET_BYTES, PAYLOAD_BYTES, STEREO_PACKET_SAMPLES,
-};
 
 /// Audio per packet: FRAMES_PER_PACKET × 40ms
 const PACKET_MS: u128 = FRAMES_PER_PACKET as u128 * 40;
@@ -60,28 +59,21 @@ enum AppEvent {
     Tick, // time for housekeeping()
 }
 
-pub struct Peripherals {
-    pub ptt: AnyIOPin<'static>,
-}
-
-/// The already-started device drivers the app runs on
-pub struct Devices {
-    pub mic: Mic,
-    pub encoder: Encoder,
+/// The already-started devices the app runs on
+pub struct Devices<P: Platform> {
+    pub mic: P::Mic,
+    pub ptt: P::Ptt,
+    pub knob: P::Knob,
     pub screen: Screen,
-    pub gps: Gps,
+    pub gps: P::Gps,
+    pub settings: Option<P::Settings>, // None if they couldn't be opened
 }
 
-pub async fn init(
-    p: Peripherals,
-    devices: Devices,
+pub async fn init<P: Platform>(
+    devices: Devices<P>,
     mac_str: heapless::String<18>,
-    nvs: Option<EspNvs<NvsCustom>>,
     codec_tx: SyncSender<CodecRequest>,
 ) -> impl Future<Output = ()> {
-    // PRG button on GPIO0 — active LOW with internal pull-up
-    let button = PinDriver::input(p.ptt, Pull::Up).unwrap();
-
     log::info!("MAC: {}", mac_str);
 
     // One packet of encoded silence, for echo mode to fill gaps with
@@ -96,25 +88,27 @@ pub async fn init(
 
     let Devices {
         mic,
-        encoder,
+        ptt,
+        knob,
         screen,
         gps,
+        settings,
     } = devices;
-    let app = App {
-        button,
+    let app = App::<P> {
+        ptt,
         mic,
-        encoder,
+        knob,
         screen,
         gps,
         shown_fix: None,
         last_gps_log: None,
         // Last 3 bytes are enough to tell our boards apart, and leave room for the time
         short_mac: heapless::String::try_from(&mac_str[mac_str.len() - 8..]).unwrap(),
-        nvs,
+        settings,
         codec_tx,
         // Pre-generate audio buffers
         silence: vec![0i16; STEREO_PACKET_SAMPLES].into(),
-        squelch: generate_squelch(),
+        squelch: generate_squelch(P::random),
         style: MonoTextStyleBuilder::new()
             .font(&FONT_6X10)
             .text_color(BinaryColor::On)
@@ -136,16 +130,16 @@ pub async fn init(
     }
 }
 
-struct App {
-    button: PinDriver<'static, Input>,
-    mic: Mic,
-    encoder: Encoder,
+struct App<P: Platform> {
+    ptt: P::Ptt,
+    mic: P::Mic,
+    knob: P::Knob,
     screen: Screen,
-    gps: Gps,
+    gps: P::Gps,
     shown_fix: Option<Fix>, // what the screen shows, to redraw when it changes
     last_gps_log: Option<(Instant, bool)>, // when, and whether it had a position
     short_mac: heapless::String<8>, // e.g. A2:C6:2C
-    nvs: Option<EspNvs<NvsCustom>>, // saved settings; None if the partition couldn't open
+    settings: Option<P::Settings>, // None if they couldn't be opened
     codec_tx: SyncSender<CodecRequest>,
     silence: Arc<[i16]>,
     squelch: Arc<[i16]>,
@@ -166,7 +160,7 @@ struct App {
     last_activity: Instant, // last packet heard or sent: gates log flushes
 }
 
-impl App {
+impl<P: Platform> App<P> {
     async fn run(&mut self) {
         // Show initial RX state
         self.draw_rx_screen();
@@ -190,18 +184,18 @@ impl App {
     /// `housekeeping()`, run on the tick.
     async fn next_event(&mut self, ticker: &mut Ticker) -> AppEvent {
         let locked = self.locked;
-        let button = &mut self.button;
+        let ptt = &mut self.ptt;
         let ptt = async {
             if locked {
                 core::future::pending::<()>().await;
             }
-            let _ = button.wait_for_low().await;
+            ptt.pressed().await;
         };
         match select5(
             RX_CHAN.receive(),
             ptt,
             SPK_REQ.receive(),
-            self.encoder.next(),
+            self.knob.next(),
             ticker.next(),
         )
         .await
@@ -430,7 +424,7 @@ impl App {
         let packets = self.echo.take();
         log::info!("ECHO replaying {} packets", packets.len());
         self.draw_tx_screen();
-        echo::replay(packets, random_txid()).await;
+        echo::replay(packets, random_txid::<P>()).await;
         self.last_activity = Instant::now();
         // Drop anything heard while we were transmitting it
         while RX_CHAN.try_receive().is_ok() {}
@@ -442,7 +436,7 @@ impl App {
         self.reset_rx_state();
         self.spk_active = false;
 
-        let txid = random_txid();
+        let txid = random_txid::<P>();
         let mut seq: u8 = 0;
         log::info!("PTT pressed — streaming (txid={})", txid);
 
@@ -456,7 +450,7 @@ impl App {
         let codec_tx = &self.codec_tx;
         let mut pending: Option<([u8; 2], Box<[i16]>)> = None;
         let mut packets = 0usize;
-        while self.button.is_low() {
+        while self.ptt.is_pressed() {
             let header = packet::pack(TYPE_VOICE, txid, seq);
             let (pcm, ()) = join(capture_packet(mic), async {
                 if let Some((header, pcm)) = pending.take() {
@@ -519,7 +513,7 @@ impl App {
         let mut menu = Menu::new();
         loop {
             self.draw_menu(&menu);
-            match self.encoder.next().await {
+            match self.knob.next().await {
                 Knob::Cw => menu.rotate(1),
                 Knob::Ccw => menu.rotate(-1),
                 Knob::Click => match menu.click() {
@@ -548,11 +542,8 @@ impl App {
 
     /// Persist a setting so it survives a reboot.
     fn save_u8(&mut self, key: &str, value: u8) {
-        let Some(nvs) = self.nvs.as_mut() else {
-            return;
-        };
-        if let Err(e) = nvs.set_u8(key, value) {
-            log::warn!("NVS save {}={} failed: {}", key, value, e);
+        if let Some(settings) = self.settings.as_mut() {
+            settings.set_u8(key, value);
         }
     }
 
@@ -693,14 +684,13 @@ impl App {
 }
 
 /// Generate 160ms squelch tail (white noise with fade-out), packet-sized.
-fn generate_squelch() -> Arc<[i16]> {
+fn generate_squelch(random: fn() -> u32) -> Arc<[i16]> {
     const MONO_SAMPLES: usize = FRAMES_PER_PACKET * CODEC2_FRAME_SAMPLES; // 1280
     const AMPLITUDE: i32 = 8000;
     let mut buf = vec![0i16; STEREO_PACKET_SAMPLES].into_boxed_slice();
     for i in 0..MONO_SAMPLES {
         let fade = (MONO_SAMPLES - i) as i32 * AMPLITUDE / MONO_SAMPLES as i32;
-        let noise = ((unsafe { esp_idf_svc::sys::esp_random() } % (2 * fade as u32 + 1)) as i32
-            - fade) as i16;
+        let noise = ((random() % (2 * fade as u32 + 1)) as i32 - fade) as i16;
         buf[i * 2] = noise;
         buf[i * 2 + 1] = noise;
     }
@@ -719,12 +709,12 @@ fn send_to_speaker(packet: &[i16]) {
 }
 
 /// Random 7-bit id for one transmission — the dedup key.
-fn random_txid() -> u8 {
-    (unsafe { esp_idf_svc::sys::esp_random() } & 0x7F) as u8
+fn random_txid<P: Platform>() -> u8 {
+    (P::random() & 0x7F) as u8
 }
 
 /// Capture one packet's worth of PCM (FRAMES_PER_PACKET frames, 160ms).
-async fn capture_packet(mic: &mut Mic) -> Box<[i16]> {
+async fn capture_packet(mic: &mut impl Mic) -> Box<[i16]> {
     let mut pcm = vec![0i16; FRAMES_PER_PACKET * CODEC2_FRAME_SAMPLES].into_boxed_slice();
     for frame in pcm.chunks_mut(CODEC2_FRAME_SAMPLES) {
         mic.read(frame).await;

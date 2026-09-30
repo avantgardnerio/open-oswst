@@ -58,3 +58,13 @@ impl Mic {
         pcm[count..].fill(0);
     }
 }
+
+impl open_oswst_core::devices::mic::Mic for Mic {
+    fn drain(&mut self) {
+        Mic::drain(self)
+    }
+
+    async fn read(&mut self, pcm: &mut [i16]) {
+        Mic::read(self, pcm).await
+    }
+}

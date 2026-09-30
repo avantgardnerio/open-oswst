@@ -1,8 +1,4 @@
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Channel;
 use std::future::Future;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
 
 use esp_idf_svc::hal::gpio::AnyIOPin;
 use esp_idf_svc::hal::i2s::config::{
@@ -11,31 +7,10 @@ use esp_idf_svc::hal::i2s::config::{
 };
 use esp_idf_svc::hal::i2s::{I2sDriver, I2sTx, I2S0};
 
-/// Speaker requests next audio packet from app
-pub static SPK_REQ: Channel<CriticalSectionRawMutex, (), 1> = Channel::new();
-
-/// Audio frames for speaker — each is one 40ms stereo frame (640 i16).
-/// Capacity 8 = 2 packets worth of frames.
-pub static SPK_FRAMES: Channel<CriticalSectionRawMutex, Arc<[i16]>, 8> = Channel::new();
-
-/// Volume levels 0 (mute) ..= MAX_VOLUME (full scale), 3dB apart.
-pub const MAX_VOLUME: u8 = 10;
-
-/// Q15 gain per level: 10^(-3dB * (MAX_VOLUME - level) / 20)
-const GAIN_Q15: [i32; MAX_VOLUME as usize + 1] = [
-    0, 1464, 2067, 2920, 4125, 5827, 8231, 11627, 16423, 23198, 32767,
-];
-
-static VOLUME: AtomicU8 = AtomicU8::new(7);
-
-/// Set the output level, clamped to 0..=MAX_VOLUME. Applies from the next frame.
-pub fn set_volume(level: u8) {
-    VOLUME.store(level.min(MAX_VOLUME), Ordering::Relaxed);
-}
-
-pub fn volume() -> u8 {
-    VOLUME.load(Ordering::Relaxed)
-}
+// The queues and volume the app talks to; this driver plays them over I2S
+pub use open_oswst_core::devices::speaker::{
+    scale, set_volume, volume, MAX_VOLUME, SPK_FRAMES, SPK_REQ,
+};
 
 pub struct Peripherals {
     pub i2s: I2S0<'static>,
@@ -94,10 +69,7 @@ async fn speaker_loop(mut i2s_tx: I2sDriver<'_, I2sTx>) {
         }
         last_frame = std::time::Instant::now();
 
-        // Frames are shared (Arc), so scale into a scratch buffer
-        let gain = GAIN_Q15[volume() as usize];
-        scaled.clear();
-        scaled.extend(frame.iter().map(|&s| ((s as i32 * gain) >> 15) as i16));
+        scale(&frame, &mut scaled);
         i2s_tx.write_async(pcm_as_bytes(&scaled)).await.unwrap();
 
         if SPK_FRAMES.len() <= 1 {

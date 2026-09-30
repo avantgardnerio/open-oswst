@@ -53,6 +53,12 @@ pub struct Menu {
     stack: Vec<Level>,
 }
 
+impl Default for Menu {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Menu {
     pub fn new() -> Self {
         Menu {
