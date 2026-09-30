@@ -113,8 +113,11 @@ impl<T> RxBuffer<T> {
             self.last_played = next;
             Next::Audio(audio)
         } else if self.txid.is_some() {
-            // Gap: play silence for this seq
-            // self.last_played = next;
+            // Gap: play silence in this seq's place and move on. Waiting for
+            // it instead lets later packets pile up until they look
+            // "unexpected" and reset everything. If it turns up late, it's
+            // just old and gets dropped.
+            self.last_played = next;
             Next::Gap(next)
         } else {
             Next::Idle
