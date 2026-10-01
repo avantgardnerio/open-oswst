@@ -3,3 +3,4 @@ cq-editor==0.7.0
 littlefs-python==0.19.0
 pyserial
 esptool
+folium

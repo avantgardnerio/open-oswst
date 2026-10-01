@@ -127,6 +127,13 @@ only written to flash after 3 s with no radio traffic, because a flash write sta
 .venv/bin/python scripts/pull-logs.py <PORT>     # ~80 s; writes logs/<MAC>-<time>/
 ```
 
+After an echo test, join the handheld's and the echo station's logs into a per-transmission table and a map (OpenStreetMap/satellite,
+one circle per transmission coloured by how well each direction got through, plus GeoJSON for QGIS):
+
+```bash
+.venv/bin/python scripts/range-report.py <handheld log> <echo station log>
+```
+
 ## Current Behavior
 
 - **Voice**: simplex push-to-talk. Hold PTT to talk: audio is Codec2-encoded at 1200 bps and streamed as 4-frame LoRa packets (160 ms of
