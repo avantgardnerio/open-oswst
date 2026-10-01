@@ -243,7 +243,7 @@ screen_hole = Pos(screen_center_x, screen_center_y, -HEIGHT / 2) * Box(
 )
 bottom = bottom - screen_hole
 
-# Speaker hole through floor (negative Z face), 28x28mm
+# Speaker hole through floor (negative Z face), 30x33mm
 SPEAKER_W = 30    # X axis (side with ears)
 SPEAKER_L = 33    # Y axis
 PA_BOARD_W = 26
@@ -255,8 +255,30 @@ speaker_hole = Pos(speaker_center_x, speaker_center_y, -HEIGHT / 2) * Box(
 )
 bottom = bottom - speaker_hole
 
-# Speaker screw posts, 36mm apart, centered on speaker
-SPEAKER_POST_HEIGHT = PERF_POST_HEIGHT - WALL - 4  # shortened for speaker fit
+# Crosshatch grille across the speaker hole, the full floor thickness. In the field, users pressed
+# the bare cone thinking it was the PTT. Bars run at ±45° so every bridge is short and anchored on
+# both sides of the hole; 1.2mm is three 0.4mm extrusion widths. The 2.8mm diamonds pass sound but
+# not a fingertip.
+GRILLE_BAR_W = 1.2
+GRILLE_PITCH = 4.0
+grille_span = SPEAKER_W + SPEAKER_L  # long enough to cross the hole on the diagonal
+grille_bars = None
+n_bars = int(grille_span / GRILLE_PITCH)
+for angle in [45, -45]:
+    for i in range(-n_bars, n_bars + 1):
+        bar = Rot(0, 0, angle) * Pos(0, i * GRILLE_PITCH, 0) * Box(grille_span, GRILLE_BAR_W, WALL)
+        grille_bars = bar if grille_bars is None else (grille_bars + bar)
+grille_window = Box(SPEAKER_W, SPEAKER_L, WALL)
+grille = Pos(speaker_center_x, speaker_center_y, -HEIGHT / 2 + WALL / 2) * (grille_window & grille_bars)
+bottom = bottom + grille
+
+# Speaker screw posts, 36mm apart, centered on speaker.
+# + WALL: the cone used to sit down in the open hole; the grille now fills it, so the speaker
+# rides one floor thickness higher.
+# + 1: at WALL alone the cone sat flush on the grille and touched it at high volume, so it needs
+# room to travel.
+SPEAKER_CONE_TRAVEL = 1
+SPEAKER_POST_HEIGHT = PERF_POST_HEIGHT - WALL - 4 + WALL + SPEAKER_CONE_TRAVEL  # shortened for speaker fit
 for sx in [-18.5, 18.5]:
     px = speaker_center_x + sx
     py = speaker_center_y
