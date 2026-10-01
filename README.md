@@ -1,33 +1,42 @@
 # open-oswst
 
-Stealth LoRa radio mesh where the primary design principle is "only speak when spoken to".
+Stealth LoRa radio mesh where the primary design principle is "only speak when spoken to": a simplex push-to-talk voice radio over
+LoRa, with flood repeaters, that transmits nothing until someone presses PTT.
 
 ![open-oswst radio in 3d printed case](docs/in-case.jpg)
 
 ## Hardware
 
-- **Board**: [Heltec WiFi LoRa 32 V4](https://heltec.org/project/wifi-lora-32-v4/) (ESP32-S3 + SX1262, 863-928 MHz)
-- **MCU**: ESP32-S3 rev 0.2, 16MB flash, 338 KiB RAM
-- **Radio**: Semtech SX1262 LoRa transceiver, 915 MHz ISM band
+- **Board**: [Heltec WiFi LoRa 32 V4.3](https://heltec.org/project/wifi-lora-32-v4/) (ESP32-S3 + SX1262, 863-928 MHz)
+- **MCU**: ESP32-S3 rev 0.2, 16MB flash, ~380 KiB RAM, no PSRAM
+- **Radio**: Semtech SX1262 LoRa transceiver, 915 MHz ISM band, behind the board's KCT8103L front-end module (PA + LNA), then an
+  external "Air Buddy" amplifier. The SX1262 runs at 6 dBm, which should give roughly 1 W out of the Air Buddy (estimated from datasheets,
+  not measured)
+- **GPS**: L76K on the Heltec's GNSS connector (UTC time and position, logged and shown on screen)
 - **Display**: SSD1306 128x64 OLED (I2C)
+- **Audio**: MAX9814 electret mic (ADC), MAX98357A I2S class-D speaker amp
+
+The board is a V4.3. All the boards we've tested are; a V4.2 (GC1109 front end) would need different FEM pins and TX power.
 
 ### Pin Map
 
-| Function | GPIO |
-|---|---|
-| PRG button (PTT) | 0 (active LOW, internal pull-up) |
-| White LED | 35 |
-| Vext power enable | 36 (LOW = on) |
-| OLED SDA | 17 |
-| OLED SCL | 18 |
-| OLED RST | 21 |
-| LoRa SCK | 9 |
-| LoRa MOSI | 10 |
-| LoRa MISO | 11 |
-| LoRa NSS | 8 |
-| LoRa RST | 12 |
-| LoRa DIO1 | 14 |
-| LoRa BUSY | 13 |
+`src/board.rs` is the one place pins are assigned; this table mirrors it.
+
+| Function | GPIO | Notes |
+|---|---|---|
+| PTT (PRG button) | 0 | Active LOW, internal pull-up |
+| VOL encoder A / B / SW | 3 / 6 / 45 | GPIO45 is a strapping pin, safe as a switch to GND |
+| Mic (ADC1) | 4 | MAX9814 out |
+| Speaker I2S BCLK / DIN / WS | 47 / 33 / 48 | MAX98357A |
+| OLED SDA / SCL / RST | 17 / 18 / 21 | |
+| Vext power enable | 36 | LOW = on (OLED) |
+| LoRa SCK / MOSI / MISO / NSS | 9 / 10 / 11 / 8 | SPI2 |
+| LoRa RST / DIO1 / BUSY | 12 / 14 / 13 | |
+| FEM power / enable (CSD) | 7 / 2 | Held HIGH while running |
+| FEM CTX | 5 | HIGH only during TX (LOW = RX through the LNA) |
+| GPS UART RX / TX | 39 / 38 | ESP side. Meshtastic's variant file comments have these the other way round |
+| GPS power / reset / wake | 34 / 42 / 40 | Power is active LOW |
+| Battery sense | 1 (+ 37 enables the divider) | Free for this on the newest PCB rev; not used by the firmware yet |
 
 ## Dev Environment Setup
 
@@ -55,100 +64,117 @@ The exact paths may vary — check `~/.rustup/toolchains/esp/` after `espup inst
 cargo install espflash cargo-espflash ldproxy
 ```
 
-4. **Optional**: install `picocom` for serial monitoring:
+4. **Python tools** (log pulling, PCB and case generation) live in a venv built with Python 3.13:
 
 ```bash
-sudo apt install picocom
+python3.13 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ```
 
 ### Build
 
 ```bash
 . ~/export-esp.sh
-cargo build
+cargo build                      # firmware (repo root, ESP32-S3)
+(cd core && cargo test)          # app logic unit tests, on this PC
+(cd desktop && cargo run)        # desktop build (a skeleton so far)
 ```
 
 ESP-IDF v5.5.x is downloaded automatically by `esp-idf-sys` on first build (takes a while).
 
 ### Flash
 
-The firmware uses a custom partition table with a dedicated `open-oswst` NVS partition for device config. Since `espflash flash` overwrites the partition table with its own, you must re-write ours after flashing:
+Always pass the partition table. Without it espflash writes its default one, which drops our `storage` and `open-oswst` partitions:
 
 ```bash
 . ~/export-esp.sh
-
-# 1. Flash firmware
-espflash flash -p /dev/ttyACM0 target/xtensa-esp32s3-espidf/debug/open-oswst
-
-# 2. Overwrite partition table with ours (espflash clobbers it in step 1)
-espflash write-bin -p /dev/ttyACM0 0x8000 target/xtensa-esp32s3-espidf/debug/partition-table.bin
-
-# 3. Write device config (only needed on first flash or to change config)
-espflash write-bin -p /dev/ttyACM0 0xfad000 ~/phy/open-oswst_nvs.bin
+espflash flash -p <PORT> \
+    --partition-table target/xtensa-esp32s3-espidf/debug/partition-table.bin \
+    target/xtensa-esp32s3-espidf/debug/open-oswst
 ```
 
-Monitor separately:
-
-```bash
-picocom /dev/ttyACM0 -b 115200
-```
+Serial ports aren't stable between plug-ins: identify boards by MAC (the ESP32-S3's USB serial number), not by `ttyACM` number. To capture a
+boot log from the first line, `python3 scripts/boot-log.py <PORT>`. Never flash while another program holds the port.
 
 ### Device Config (NVS)
 
-Device configuration lives in a dedicated `open-oswst` NVS partition at `0xfad000` (12KB), separate from the system NVS (PHY cal, WiFi, etc).
-
-Generate a config image from `nvs_open-oswst.csv`:
+Settings live in a dedicated `open-oswst` NVS partition at `0xfad000` (12KB), namespace `config`, separate from the system NVS (PHY
+calibration etc). On the newest PCB rev the on-device menu (click the VOL knob) sets them. On earlier boards the knob can't be used (its
+pins clash with the FEM), so write them over USB:
 
 ```bash
-# Generate NVS image (edit nvs_open-oswst.csv to change values)
+# Generate an NVS image from a CSV (edit nvs_open-oswst.csv, or write your own)
 python3 .embuild/espressif/python_env/idf5.5_py3.13_env/lib/python3.13/site-packages/esp_idf_nvs_partition_gen/nvs_partition_gen.py \
-    generate nvs_open-oswst.csv ~/phy/open-oswst_nvs.bin 0x3000
+    generate nvs_open-oswst.csv open-oswst_nvs.bin 0x3000
 
-# Flash to board
-espflash write-bin -p /dev/ttyACM0 0xfad000 ~/phy/open-oswst_nvs.bin
+# Write it to the board
+espflash write-bin -p <PORT> 0xfad000 open-oswst_nvs.bin
 ```
-
-Current config keys (namespace `config`):
 
 | Key | Type | Values | Default |
 |-----|------|--------|---------|
-| `repeater` | u8 | 0=endpoint, 1=repeater | 0 |
+| `mode` | u8 | 0 = normal, 1 = repeater, 2 = echo | 0 |
+| `repeater` | u8 | Older key, read only if `mode` is missing: 1 = repeater | — |
 
-There is also `nvs_config.py` for read-modify-write of the *system* NVS partition (preserving PHY cal data etc), but the dedicated partition approach above is preferred.
+The boot log shows the result, e.g. `Config: mode=Echo`.
+
+### Logs
+
+Every boot writes a text log to `/data/log/NNNN.txt` on the board's LittleFS `storage` partition (~11.6 MB). Lines are buffered in RAM and
+only written to flash after 3 s with no radio traffic, because a flash write stalls the chip for up to ~18 ms. To copy them off a board:
+
+```bash
+.venv/bin/python scripts/pull-logs.py <PORT>     # ~80 s; writes logs/<MAC>-<time>/
+```
 
 ## Current Behavior
 
-- Simplex push-to-talk voice radio over LoRa
-- Hold **PRG button** (GPIO 0) to talk — audio is captured, Codec2-encoded at 1200 bps, and streamed as 4-frame LoRa packets (160ms audio each)
-- Release to listen — received audio is decoded and played through I2S speaker (MAX98357A)
-- OLED shows mode (RX Listening / TX Streaming / RX Audio) with RSSI and SNR on receive
-- CSMA with preamble-aware jitter for collision avoidance
-- Per-device config via dedicated NVS partition (repeater mode flag)
-- **Next up**: repeater mesh relay
+- **Voice**: simplex push-to-talk. Hold PTT to talk: audio is Codec2-encoded at 1200 bps and streamed as 4-frame LoRa packets (160 ms of
+  audio each, SF7/125 kHz). Release to listen: received packets are reordered, decoded and played through the speaker. A lost packet
+  costs one 160 ms gap, and a corrupt one is dropped rather than resetting playback
+- **Modes**: normal; **repeater** (relays every new packet it hears, flood style); **echo** (records a transmission, then plays it back
+  over the air, for range testing alone). Saved in NVS
+- **Screen**: short MAC and UTC time, GPS position, RX/TX state, RSSI and SNR of received audio, and volume
+- **Controls**: VOL knob turns volume; clicking it opens the menu (Lock, Mode). Needs the newest PCB rev's wiring (see Pin Map)
+- **Logs**: persistent per-boot text logs including a GPS fix every 10 s, so field tests can be mapped afterwards
+- **Collision avoidance**: CSMA with preamble-aware jitter
+- **Next up**: making several repeaters work on one channel (faster TX turnaround, CAD before transmitting, SF6, and experiments with
+  synchronised relaying), then frequency hopping and encryption
 
 ## Key Implementation Notes
 
 - **Framework**: esp-idf-svc 0.52.1 (std Rust, not bare-metal)
-- **Async**: `block_on` + `embassy_futures::select` for zero-polling PTT/RX racing
-- **LoRa driver**: `lora-phy` (upstream git, 3.0.2-alpha) with `GenericSx126xInterfaceVariant`
-- **GPIO type erasure**: `degrade_input()`/`degrade_output()` required for lora-phy's generic interface
+- **Async**: `block_on` + `embassy_futures::select`; the app sleeps until an event (packet, PTT, speaker, knob) or a 250 ms housekeeping tick
+- **LoRa driver**: `lora-phy` (lora-rs git main) with `GenericSx126xInterfaceVariant`; DIO2 drives the FEM's TX/RX path, GPIO5 its RX LNA
+- **Hardware-free app**: everything above the drivers is in `core/` behind small device traits, so it runs and is tested on a PC
+- **Storage**: LittleFS (`joltwallet/littlefs` component) mounted at `/data`, chosen over FAT for power-cut safety
 - **SPI async**: `CONFIG_SPI_MASTER_ISR_IN_IRAM` disabled in `sdkconfig.defaults`
 - **defmt workaround**: `defmt-discard.x` linker script discards defmt sections that break ESP-IDF flash layout
 - **Stack**: 65536 bytes for main task (Codec2 init needs large stack temporaries)
 
 ## Project Structure
 
+Three Cargo workspaces. Each opens as its own IDE project: the firmware builds for the ESP32-S3, the other two for this PC.
+
 ```
-src/main.rs          # Entry point, channels, NVS config read
-src/radio.rs         # SPI + LoRa init, IRQ-driven RX/TX loop, CSMA
-src/app.rs           # PTT, ADC, OLED, Codec2, I2S speaker
-partitions.csv       # Custom partition table (adds open-oswst NVS)
-nvs_open-oswst.csv     # Default device config values
-nvs_config.py        # Tool for read-modify-write of system NVS
+src/                 # Firmware (repo root workspace, xtensa)
+  main.rs            #   Brings up the board and runs the core app on it
+  board.rs           #   The one place pins are assigned
+  devices/           #   ESP drivers: radio, fem, gps, mic, speaker, screen, encoder, ptt, settings, storage
+  bin/               #   Bringup tests (fem_probe, gps_test, storage_test, batt_probe, loopbacks, ...)
+core/                # Hardware-free app: its own workspace, so `cargo test` runs on this PC
+  src/app.rs         #   Event loop, screens, housekeeping
+  src/rx_buffer.rs   #   Reorders received packets for playback (unit tested)
+  src/codec.rs       #   Codec2 thread
+  src/echo.rs, mode.rs, menu.rs, packet.rs, logger.rs
+  src/devices/       #   Device interfaces: radio/speaker/screen channels, gps/mic/ptt/knob/settings traits
+desktop/             # Desktop build on virtual devices (skeleton so far)
+scripts/             # boot-log.py, pull-logs.py, flash-all.sh, ...
+pcb/                 # PCB definition (Python DSL) and generated KiCad board
+models/              # Parametric case (build123d) and fit check
+partitions.csv       # Partition table: app, LittleFS storage, open-oswst NVS
+nvs_open-oswst.csv   # Default device config values
 sdkconfig.defaults   # ESP-IDF config overrides
-defmt-discard.x      # Linker script to discard defmt sections
-rust-toolchain.toml  # Pins to "esp" toolchain channel
-build.rs             # Links defmt-discard.x
 ```
 
 ## Bill of Materials
