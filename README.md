@@ -171,6 +171,21 @@ build.rs             # Links defmt-discard.x
 | [Mic/PTT jack](https://www.amazon.com/dp/B00ZYWJ1DG?ref=ppx_yo2ov_dt_b_fed_asin_title)          | 3.5mm TRS chassis mount w/ switch (CESS)                   | 1   | $2        |
 | [F2F SMA](https://www.amazon.com/dp/B0FB3R5WRL?ref=ppx_yo2ov_dt_b_fed_asin_title&th=1)          | Female to Female SMA                                       | 1 | $1        |
 
+## Related Projects
+
+Voice over LoRa is rare. This is what we found as of October 2026, with our own status stated the same way as everyone else's.
+
+| Project | What it does | Repeating | Licence | Status |
+|---|---|---|---|---|
+| **open-oswst** (this) | Live push-to-talk, Codec2 1200 bps, handheld with case and PCB | Flood repeater mode exists, but more than one repeater degrades audio; making multi-repeater flooding work is the current focus | None (US 902–928 MHz ISM) | Live voice works handheld to handheld; field-tested to ~600 m through suburbs (GPS-logged). No encryption or frequency hopping yet |
+| [QMesh](https://github.com/faydr/QMesh) ([project](https://hackaday.io/project/161491-qmesh-a-lora-based-voice-mesh-network), [paper](https://cdn.hackaday.io/files/1614916909230944/TAPR%20DCC%202020%20Paper.pdf)) | Live voice, Codec2, 160 ms frames | **Synchronised flooding:** every node retransmits at once in TDMA slots, with extra FEC and deliberate timing/frequency offsets so the copies don't destructively collide, plus per-packet hopping. Reported 99% packet reception with 2–3 simultaneous retransmitters | Amateur (US Technician) | **Ahead of us on radio techniques.** STM32 dev boards + custom shield. No commits since December 2022 |
+| [Mesh-Talkie](https://github.com/WIH4/Mesh-Talkie) | Planned PTT handheld, ESP32-S3 + SX1262 (our hardware), AES-256 | Planned flood mesh with TTL | None (EU SRD) | Design documents only: no hardware or firmware yet |
+| [esp32_loradv](https://github.com/sh123/esp32_loradv) | Codec2/Opus digital-voice walkie-talkie | None (point to point) | Amateur (70 cm) | Hobby project |
+| Meshtastic, [MeshCore](https://github.com/RipeStore/meshcorebuilder), [MeshTRX](https://github.com/StanislavButkovsky/meshtrx) | Text mesh messengers | Yes, for text | None | Mature for text; voice is recorded clips forwarded later, not live PTT |
+| [dudmuck/lora_codec2](https://github.com/dudmuck/lora_codec2), [Lora-Voice-Image-Text](https://github.com/chicodog530/Lora-Voice-Image-Text), [ESP32_Codec2](https://github.com/deulis/ESP32_Codec2) | Codec2-over-LoRa demos | None | — | Demos |
+
+As far as we can tell, nobody else has live push-to-talk voice over LoRa working on handhelds **without a licence**. The hard part, several repeaters sharing one channel, is unsolved here; QMesh has gone furthest on it, and under an amateur licence.
+
 ## License
 
 TBD
