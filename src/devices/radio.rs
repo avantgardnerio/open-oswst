@@ -96,8 +96,11 @@ pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
     };
 
     // Keep the TCXO running between TX and RX: otherwise each TX waits ~10ms
-    // for it to start, and so does listening again after it
-    let radio = Sx126x::new(spi, iv, config).with_oscillator_kept_on();
+    // for it to start, and so does listening again after it. And don't
+    // rewrite settings the chip already has: each costs ~0.5ms of SPI
+    let radio = Sx126x::new(spi, iv, config)
+        .with_oscillator_kept_on()
+        .with_unchanged_settings_skipped();
     let mut lora = LoRa::new(radio, false, embassy_time::Delay).await.unwrap();
     log::info!("LoRa radio initialized");
 
