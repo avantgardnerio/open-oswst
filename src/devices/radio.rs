@@ -145,6 +145,11 @@ async fn log_rx_state(lora: &mut Radio<'_>, ctx_gpio: Option<i32>) {
     );
 }
 
+/// Microseconds since boot. The log's own timestamp moves in 10ms ticks.
+fn uptime_us() -> i64 {
+    unsafe { esp_idf_svc::sys::esp_timer_get_time() }
+}
+
 async fn enter_rx(lora: &mut Radio<'_>, mdltn: &ModulationParams, rx_params: &PacketParams) {
     lora.prepare_for_rx(RxMode::Continuous, mdltn, rx_params)
         .await
@@ -188,6 +193,9 @@ async fn radio_loop(
                 }
             }
             Either3::First(irq_result) => {
+                // As close to the radio's IRQ as software gets: the relay metric
+                // in scripts/relay-test.py times from here
+                let irq_us = uptime_us();
                 if let Err(e) = irq_result {
                     log::error!("IRQ error: {:?}", e);
                     continue;
@@ -203,11 +211,12 @@ async fn radio_loop(
                         match lora.get_rx_result(rx_params, &mut rx_buf).await {
                             Ok((len, status)) => {
                                 log::info!(
-                                    "RX end [{}B] {}ms rssi={} snr={}",
+                                    "RX end [{}B] {}ms rssi={} snr={} at={}us",
                                     len,
                                     rx_ms,
                                     status.rssi,
-                                    status.snr
+                                    status.snr,
+                                    irq_us
                                 );
 
                                 let mut data = heapless::Vec::new();
@@ -301,13 +310,14 @@ async fn radio_loop(
                 enter_rx(lora, mdltn, rx_params).await;
                 let rx_us = tx_start.elapsed().as_micros();
                 log::info!(
-                    "TX end [{}B] {}ms: standby={}us prep={}us tx={}us back_to_rx={}us",
+                    "TX end [{}B] {}ms: standby={}us prep={}us tx={}us back_to_rx={}us at={}us",
                     tx_req.data.len(),
                     rx_us / 1000,
                     standby_us,
                     prepared_us - standby_us,
                     sent_us - prepared_us,
-                    rx_us - sent_us
+                    rx_us - sent_us,
+                    uptime_us()
                 );
             }
         }
