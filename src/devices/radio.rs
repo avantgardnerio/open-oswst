@@ -1,6 +1,6 @@
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select, select3, Either, Either3};
 use esp_idf_svc::hal::gpio::{AnyIOPin, AnyInputPin, AnyOutputPin};
-use esp_idf_svc::hal::gpio::{Input, Output, PinDriver, Pull};
+use esp_idf_svc::hal::gpio::{Input, Output, Pin, PinDriver, Pull};
 use esp_idf_svc::hal::spi::config::Config as SpiConfig;
 use esp_idf_svc::hal::spi::{SpiDeviceDriver, SpiDriver, SpiDriverConfig, SPI2};
 use esp_idf_svc::hal::units::Hertz;
@@ -23,6 +23,10 @@ type Radio<'a> =
 /// Air Buddy amp (max input 20 dBm). At its max 11 dB gain that's ~30 dBm out,
 /// ~35 dBm EIRP on a 5 dBi antenna: under the FCC's 36 dBm.
 const TX_POWER_DBM: i32 = 6;
+
+/// How often to log the receiver's state. Matches the GPS log, so each check
+/// lines up with a position.
+const RX_STATE_EVERY_SECS: u64 = 10;
 
 pub struct Peripherals {
     pub spi: SPI2<'static>,
@@ -54,7 +58,13 @@ pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
     let dio1 = PinDriver::input(p.dio1, Pull::Floating).unwrap();
     let busy = PinDriver::input(p.busy, Pull::Floating).unwrap();
 
+    // Remember the CTX pin's number so the RX state check can read its pad.
+    // An output pad reads as 0 unless its input buffer is on, so turn that on.
+    let ctx_gpio = p.rf_switch_tx.as_ref().map(|pin| pin.pin() as i32);
     let rf_switch_tx = p.rf_switch_tx.map(|pin| PinDriver::output(pin).unwrap());
+    if let Some(gpio) = ctx_gpio {
+        unsafe { esp_idf_svc::sys::gpio_input_enable(gpio) };
+    }
 
     let iv = GenericSx126xInterfaceVariant::new(reset, dio1, busy, None, rf_switch_tx).unwrap();
 
@@ -88,8 +98,45 @@ pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
         .unwrap();
 
     async move {
-        radio_loop(&mut lora, &mdltn, &mut tx_params, &rx_params).await;
+        radio_loop(&mut lora, &mdltn, &mut tx_params, &rx_params, ctx_gpio).await;
     }
+}
+
+/// Logs what the receiver hears with nobody transmitting (the noise floor),
+/// and the level on the FEM's CTX pad (must be 0 to receive through the LNA).
+///
+/// This is for a fault where a handheld heard ~8 dB worse until power-cycled,
+/// with the other direction unchanged. A dead LNA drops the noise floor by
+/// about its gain. Interference raises it. CTX stuck high sends RX through the
+/// PA side.
+async fn log_rx_state(lora: &mut Radio<'_>, ctx_gpio: Option<i32>) {
+    // One reading jumps around by a few dB: take several, 1ms apart
+    const SAMPLES: i32 = 8;
+    let mut sum = 0;
+    let mut max = i16::MIN;
+    for _ in 0..SAMPLES {
+        match lora.get_rssi().await {
+            Ok(rssi) => {
+                sum += rssi as i32;
+                max = max.max(rssi);
+            }
+            Err(e) => {
+                log::error!("RX state: RSSI read failed: {:?}", e);
+                return;
+            }
+        }
+        embassy_time::Timer::after_millis(1).await;
+    }
+    let ctx = match ctx_gpio {
+        Some(gpio) => unsafe { esp_idf_svc::sys::gpio_get_level(gpio) },
+        None => -1,
+    };
+    log::info!(
+        "RX state: noise avg={} max={} dBm ctx={}",
+        sum / SAMPLES,
+        max,
+        ctx
+    );
 }
 
 async fn enter_rx(lora: &mut Radio<'_>, mdltn: &ModulationParams, rx_params: &PacketParams) {
@@ -104,15 +151,37 @@ async fn radio_loop(
     mdltn: &ModulationParams,
     tx_params: &mut PacketParams,
     rx_params: &PacketParams,
+    ctx_gpio: Option<i32>,
 ) {
     let mut rx_buf = [0u8; 255];
     let mut busy_since: Option<Instant> = None;
 
     enter_rx(lora, mdltn, rx_params).await;
+    log_rx_state(lora, ctx_gpio).await;
+    // A fixed deadline, not a fresh 10s timer each pass: busy RX would keep
+    // resetting that one and the check would never run
+    let mut next_rx_state =
+        embassy_time::Instant::now() + embassy_time::Duration::from_secs(RX_STATE_EVERY_SECS);
 
     loop {
-        match select(lora.wait_for_irq(), TX_CHAN.receive()).await {
-            Either::First(irq_result) => {
+        match select3(
+            lora.wait_for_irq(),
+            TX_CHAN.receive(),
+            embassy_time::Timer::at(next_rx_state),
+        )
+        .await
+        {
+            Either3::Third(()) => {
+                next_rx_state += embassy_time::Duration::from_secs(RX_STATE_EVERY_SECS);
+                // Mid-packet the reading is the packet, not the noise floor.
+                // Only a recent preamble counts, as in the CSMA check below:
+                // one with no end IRQ would otherwise stop these logs for good
+                let mid_packet = busy_since.is_some_and(|t| t.elapsed().as_millis() < 200);
+                if !mid_packet {
+                    log_rx_state(lora, ctx_gpio).await;
+                }
+            }
+            Either3::First(irq_result) => {
                 if let Err(e) = irq_result {
                     log::error!("IRQ error: {:?}", e);
                     continue;
@@ -163,7 +232,7 @@ async fn radio_loop(
                 lora.clear_irq_status().await.unwrap();
                 // RX continuous keeps running — no re-setup needed
             }
-            Either::Second(tx_req) => {
+            Either3::Second(tx_req) => {
                 // CSMA: wait for channel clear, then random jitter while listening
                 loop {
                     // If channel busy, wait for in-progress RX to finish
