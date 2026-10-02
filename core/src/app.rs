@@ -19,6 +19,7 @@ use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
 use embedded_graphics::text::{Baseline, Text};
 use std::future::Future;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -212,6 +213,7 @@ impl<P: Platform> App<P> {
         // Only a received EOT plays the tail.
         if self.rx.txid().is_some() && self.last_rx_time.elapsed() > RX_TIMEOUT {
             log::info!("RX timeout, resetting txid lock");
+            log_worst_alloc();
             self.rx.end();
         }
 
@@ -310,6 +312,7 @@ impl<P: Platform> App<P> {
                 send_to_speaker(&self.squelch);
             }
             log::info!("RX EOT from txid={}", txid);
+            log_worst_alloc();
             self.rx.end();
             return;
         }
@@ -364,7 +367,7 @@ impl<P: Platform> App<P> {
             .unwrap();
         if let CodecResponse::Decoded { seq, txid, pcm } = CODEC_REPLY.receive().await {
             // The speaker starts once two in a row are here
-            if let Some(first) = self.rx.insert(txid, seq, pcm.into()) {
+            if let Some(first) = self.rx.insert(txid, seq, timed_alloc(|| pcm.into())) {
                 send_to_speaker(&first);
             }
         }
@@ -671,11 +674,31 @@ fn generate_squelch(random: fn() -> u32) -> Arc<[i16]> {
     buf.into()
 }
 
+/// Slowest heap allocation on the audio path this transmission, in µs.
+/// Logged and reset when the transmission ends.
+// TODO: borrow frames from a pool allocated at boot instead of allocating
+// per frame, so the audio path never touches the heap.
+static WORST_ALLOC_US: AtomicU32 = AtomicU32::new(0);
+
+/// Allocate `make()`, recording how long the heap took.
+fn timed_alloc<T>(make: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    let made = make();
+    WORST_ALLOC_US.fetch_max(started.elapsed().as_micros() as u32, Ordering::Relaxed);
+    made
+}
+
+fn log_worst_alloc() {
+    let us = WORST_ALLOC_US.swap(0, Ordering::Relaxed);
+    log::info!("Audio heap alloc: worst {}us this transmission", us);
+}
+
 /// Split a packet (4 × 40ms stereo frames) into individual frames and send to speaker.
 fn send_to_speaker(packet: &[i16]) {
     for i in 0..FRAMES_PER_PACKET {
         let offset = i * STEREO_FRAME_SAMPLES;
-        let frame: Arc<[i16]> = packet[offset..offset + STEREO_FRAME_SAMPLES].into();
+        let frame: Arc<[i16]> =
+            timed_alloc(|| packet[offset..offset + STEREO_FRAME_SAMPLES].into());
         if SPK_FRAMES.try_send(frame).is_err() {
             log::warn!("SPK queue full, dropped frame {} of packet", i);
         }
