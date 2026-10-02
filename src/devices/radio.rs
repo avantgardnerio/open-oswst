@@ -22,7 +22,13 @@ type Radio<'a> =
 /// SX1262 output power. The FEM adds ~13 dB, so this gives ~19 dBm into the
 /// Air Buddy amp (max input 20 dBm). At its max 11 dB gain that's ~30 dBm out,
 /// ~35 dBm EIRP on a 5 dBi antenna: under the FCC's 36 dBm.
-const TX_POWER_DBM: i32 = 6;
+pub const TX_POWER_DBM: i32 = 6;
+
+/// Random wait (0..this ms) before each TX, so repeaters that heard the same
+/// packet don't all relay at once. OFF (0) for now: with only 3 radios built
+/// it just complicates testing. It comes back if N repeaters need to take
+/// turns; not if they all relay at the same instant (QMesh-style).
+const TX_JITTER_MAX_MS: u32 = 0;
 
 /// How often to log the receiver's state. Matches the GPS log, so each check
 /// lines up with a position.
@@ -253,7 +259,11 @@ async fn radio_loop(
                     }
 
                     // Random jitter — listen during wait to detect new transmissions
-                    let jitter_ms = (unsafe { esp_idf_svc::sys::esp_random() } % 20) as u64;
+                    if TX_JITTER_MAX_MS == 0 {
+                        break;
+                    }
+                    let jitter_ms =
+                        (unsafe { esp_idf_svc::sys::esp_random() } % TX_JITTER_MAX_MS) as u64;
                     match select(
                         lora.wait_for_irq(),
                         embassy_time::Timer::after_millis(jitter_ms),
