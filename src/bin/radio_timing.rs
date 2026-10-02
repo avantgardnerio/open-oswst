@@ -7,9 +7,16 @@
 //! The packet type is one nobody uses, so the other radios ignore it.
 //! The radio runs in its own thread, placed by RADIO_CORE and RADIO_PRIORITY
 //! (core 0 / prio 1 is where the app's radio runs today: the main task).
-//! It alternates PACKETS packets with the codec idle, then PACKETS with it
-//! busy (encode + decode every 160ms), forever. The codec thread is spawned
-//! like the app's: no core affinity, prio 5.
+//! It cycles through three loads, PACKETS packets each, forever:
+//!   - idle: nothing else running
+//!   - codec: the real Codec2, encode + decode every 160ms. Lots of code and
+//!     tables, all executed and read from flash through the shared cache
+//!   - spin: a tiny loop, CPU-busy for as long as the codec took, every
+//!     160ms. It fits in the cache, so it competes for the CPU like the
+//!     codec but puts no pressure on the cache
+//! If SPI slows under codec but not under spin, it's the flash cache, not
+//! scheduling. Both loads are spawned like the app's codec: no core
+//! affinity, prio 5.
 //!
 //! Each run logs each TX step (median / max), and inside them how long SPI
 //! transfers and BUSY waits took. "armed" counts BUSY waits where the pin was
@@ -41,12 +48,12 @@ use open_oswst::devices::{fem, radio};
 use open_oswst_core::codec::{self, CodecRequest, CODEC2_FRAME_SAMPLES, CODEC_REPLY};
 use open_oswst_core::codec::{FRAMES_PER_PACKET, PAYLOAD_BYTES};
 use open_oswst_core::packet;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::time::Instant;
 
 /// Where the radio thread runs
-const RADIO_CORE: Core = Core::Core0;
-const RADIO_PRIORITY: u8 = 1;
+const RADIO_CORE: Core = Core::Core1;
+const RADIO_PRIORITY: u8 = 10;
 /// Packets per run: ~6.4s each
 const PACKETS: usize = 40;
 /// A packet type nobody handles, so the app on the other radios drops it
@@ -59,8 +66,18 @@ type Radio = LoRa<
     embassy_time::Delay,
 >;
 
-/// Whether the codec feeder keeps the codec thread busy
-static CODEC_BUSY: AtomicBool = AtomicBool::new(false);
+/// What else is running: one of the LOAD_ values
+static LOAD: AtomicU8 = AtomicU8::new(LOAD_IDLE);
+const LOAD_IDLE: u8 = 0;
+const LOAD_CODEC: u8 = 1;
+const LOAD_SPIN: u8 = 2;
+const LOADS: [(u8, &str); 3] = [
+    (LOAD_IDLE, "idle"),
+    (LOAD_CODEC, "codec"),
+    (LOAD_SPIN, "spin"),
+];
+/// How long one encode + decode took, last time: the spin load copies it
+static CODEC_US: AtomicU32 = AtomicU32::new(0);
 
 fn main() {
     esp_idf_svc::sys::link_patches();
@@ -81,6 +98,11 @@ fn main() {
         .name("feeder".into())
         .stack_size(8192)
         .spawn(move || feed_codec(codec_tx))
+        .unwrap();
+    std::thread::Builder::new()
+        .name("spin".into())
+        .stack_size(4096)
+        .spawn(spin)
         .unwrap();
 
     ThreadSpawnConfiguration {
@@ -105,7 +127,7 @@ fn main() {
     }
 }
 
-/// The radio thread: alternate runs with the codec idle and busy, forever.
+/// The radio thread: a run under each load in turn, forever.
 async fn run(radio_pins: radio::Peripherals) {
     let mut lora = new_radio(radio_pins).await;
     log::info!(
@@ -114,11 +136,10 @@ async fn run(radio_pins: radio::Peripherals) {
         RADIO_PRIORITY
     );
     loop {
-        for codec_busy in [false, true] {
-            CODEC_BUSY.store(codec_busy, Ordering::Relaxed);
+        for (load, name) in LOADS {
+            LOAD.store(load, Ordering::Relaxed);
             let rows = bench(&mut lora).await;
-            let codec = if codec_busy { "busy" } else { "idle" };
-            report(codec, &rows);
+            report(name, &rows);
         }
     }
 }
@@ -164,13 +185,14 @@ async fn new_radio(p: radio::Peripherals) -> Radio {
 }
 
 /// Keep the codec as busy as a talker plus a listener: one packet encoded and
-/// one decoded every 160ms, while CODEC_BUSY is set.
+/// one decoded every 160ms, while the load is the codec.
 fn feed_codec(codec_tx: std::sync::mpsc::SyncSender<CodecRequest>) {
     let pcm: Vec<i16> = (0..FRAMES_PER_PACKET * CODEC2_FRAME_SAMPLES)
         .map(|i| ((i * 7919) % 8000) as i16 - 4000) // any speech-band mush will do
         .collect();
     loop {
-        if CODEC_BUSY.load(Ordering::Relaxed) {
+        if LOAD.load(Ordering::Relaxed) == LOAD_CODEC {
+            let start = Instant::now();
             codec_tx
                 .send(CodecRequest::encode([0; 2], pcm.clone().into()))
                 .unwrap();
@@ -179,6 +201,23 @@ fn feed_codec(codec_tx: std::sync::mpsc::SyncSender<CodecRequest>) {
                 .send(CodecRequest::decode(0, 0, [0x55; PAYLOAD_BYTES]))
                 .unwrap();
             block_on(CODEC_REPLY.receive());
+            CODEC_US.store(start.elapsed().as_micros() as u32, Ordering::Relaxed);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(160));
+    }
+}
+
+/// Keep a CPU as busy as the codec does, every 160ms, while the load is spin,
+/// without touching more code or data than fits in the cache.
+fn spin() {
+    loop {
+        if LOAD.load(Ordering::Relaxed) == LOAD_SPIN {
+            let busy_us = CODEC_US.load(Ordering::Relaxed) as u128;
+            let start = Instant::now();
+            let mut x = 0u32;
+            while start.elapsed().as_micros() < busy_us {
+                x = std::hint::black_box(x.wrapping_mul(1_664_525).wrapping_add(1));
+            }
         }
         std::thread::sleep(std::time::Duration::from_millis(160));
     }
@@ -256,12 +295,13 @@ async fn bench(lora: &mut Radio) -> Vec<Row> {
     rows
 }
 
-fn report(codec: &str, rows: &[Row]) {
+fn report(load: &str, rows: &[Row]) {
     log::info!(
-        "=== core {:?} prio {}, codec {}, {} packets ===",
+        "=== core {:?} prio {}, load {} (codec takes {}us), {} packets ===",
         cpu::core(),
         RADIO_PRIORITY,
-        codec,
+        load,
+        CODEC_US.load(Ordering::Relaxed),
         rows.len()
     );
     let step = |label: &str, us: &dyn Fn(&Row) -> u32| {
