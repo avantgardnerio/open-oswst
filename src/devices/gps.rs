@@ -8,7 +8,6 @@ use esp_idf_svc::hal::uart::{config::Config, UartDriver, UART1};
 use esp_idf_svc::hal::units::Hertz;
 use open_oswst_core::devices::gps::{apply_nmea, Fix};
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::{Duration, Instant};
 
 /// No sentence for this long: treat the GPS as gone
@@ -46,11 +45,8 @@ impl open_oswst_core::devices::gps::Gps for Gps {
 pub fn init(p: Peripherals) -> Gps {
     let state = Arc::new(Mutex::new(State::default()));
     let shared = state.clone();
-    thread::Builder::new()
-        .name("gps".into())
-        .stack_size(6144)
-        .spawn(move || run(p, shared))
-        .unwrap();
+    // ~2.5KB used at worst (Stack free log, 2026-10-02)
+    crate::thread::spawn(c"gps", 4096, None, None, move || run(p, shared));
     Gps { state }
 }
 

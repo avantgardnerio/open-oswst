@@ -29,11 +29,8 @@ pub struct Peripherals {
 pub fn init(p: Peripherals) -> Screen {
     let screen = Screen::new();
 
-    thread::Builder::new()
-        .name("screen".into())
-        .stack_size(8192)
-        .spawn(move || screen_thread(p))
-        .unwrap();
+    // ~1.4KB used at worst (Stack free log, 2026-10-02)
+    crate::thread::spawn(c"screen", 4096, None, None, move || screen_thread(p));
 
     screen
 }

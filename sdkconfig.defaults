@@ -1,6 +1,8 @@
 # Rust often needs a bit of an extra main task stack size compared to C (the default is 3K)
 # You might have to increase this further if you allocate large stack variables in the main task
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=65536
+# The main task runs the app and speaker (the radio has its own thread): ~11.7KB
+# used at worst (Stack free log, 2026-10-02). Was 64KB, needed for WiFi's heap
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=24576
 
 # Increase a bit these stack sizes as they are also a bit too small by default
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
@@ -29,3 +31,7 @@ CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 # bootloader built from this config sets the chip's QE bit, so flash with
 # `--bootloader <built bootloader.bin> --flash-mode qio`, not espflash's own.
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+
+# Lets the firmware list every task with its stack high-water mark
+# (the `Stack free` log line), to size stacks and make room for WiFi
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y

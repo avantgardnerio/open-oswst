@@ -1,12 +1,12 @@
 //! Firmware entry point: brings up the board's hardware and runs the app from
 //! the core crate on it. Everything radio-behaviour lives in core.
 
-use embassy_futures::join::join;
+use core::fmt::Write as _;
+use embassy_futures::join::join3;
 use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::hal::task::block_on;
-use esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration;
-use open_oswst::board;
 use open_oswst::devices::{encoder, fem, gps, mic, ptt, radio, screen, settings, speaker, storage};
+use open_oswst::{board, thread};
 use open_oswst_core::platform::Platform;
 use open_oswst_core::{app, codec, logger, mode};
 use std::path::Path;
@@ -77,11 +77,8 @@ fn main() {
 
     // Spawn codec thread with sync channel (capacity 2 to allow pipelining)
     let (codec_tx, codec_rx) = std::sync::mpsc::sync_channel::<codec::CodecRequest>(2);
-    std::thread::Builder::new()
-        .name("codec".into())
-        .stack_size(32768)
-        .spawn(move || codec::run(codec_rx))
-        .unwrap();
+    // ~25.6KB used at worst (Stack free log, 2026-10-02): Codec2 is deep
+    thread::spawn(c"codec", 32768, None, None, move || codec::run(codec_rx));
 
     spawn_radio(board.radio);
 
@@ -103,28 +100,51 @@ fn main() {
         .await;
 
         log::info!("All systems ready");
-        join(app_fut, speaker_fut).await;
+        join3(app_fut, speaker_fut, log_memory()).await;
     });
+}
+
+/// Log memory every 30s, to size the WiFi and HTTP stack before adding it:
+/// the heap (free now, the largest block one allocation can get, the least
+/// ever free), and each task's stack at its fullest (the least ever free).
+async fn log_memory() {
+    use esp_idf_svc::sys::*;
+    const MAX_TASKS: usize = 24;
+    loop {
+        unsafe {
+            log::info!(
+                "Heap: free {} B, largest block {} B, min ever free {} B",
+                esp_get_free_heap_size(),
+                heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                esp_get_minimum_free_heap_size()
+            );
+            let mut tasks: [TaskStatus_t; MAX_TASKS] = core::mem::zeroed();
+            let n =
+                uxTaskGetSystemState(tasks.as_mut_ptr(), MAX_TASKS as u32, core::ptr::null_mut())
+                    as usize;
+            let mut line = heapless::String::<512>::new();
+            for task in &tasks[..n] {
+                let name = core::ffi::CStr::from_ptr(task.pcTaskName).to_string_lossy();
+                let _ = write!(line, " {}={}", name, task.usStackHighWaterMark);
+            }
+            log::info!("Stack free (least ever, B):{}", line);
+        }
+        embassy_time::Timer::after_secs(30).await;
+    }
 }
 
 /// The radio gets its own thread on core 1, so nothing else running can
 /// delay it (on core 0 with the codec, a TX step took up to 200ms instead of
 /// 75). It talks to the app only through RX_CHAN and TX_CHAN.
 fn spawn_radio(pins: radio::Peripherals) {
-    ThreadSpawnConfiguration {
-        name: Some(c"radio"),
-        priority: RADIO_PRIORITY,
-        pin_to_core: Some(Core::Core1),
-        ..Default::default()
-    }
-    .set()
-    .unwrap();
     // The radio is created on this thread, not moved to it: created on core 0
-    // and moved, it hung (src/bin/radio_timing.rs). std's stack size wins over
-    // the spawn config's; lora-phy's futures are big.
-    std::thread::Builder::new()
-        .stack_size(32768)
-        .spawn(move || block_on(async { radio::init(pins).await.await }))
-        .unwrap();
-    ThreadSpawnConfiguration::default().set().unwrap();
+    // and moved, it hung (src/bin/radio_timing.rs). lora-phy's futures are big.
+    thread::spawn(
+        c"radio",
+        // ~9.6KB used at worst (Stack free log, 2026-10-02)
+        16384,
+        Some(RADIO_PRIORITY),
+        Some(Core::Core1),
+        move || block_on(async { radio::init(pins).await.await }),
+    );
 }
