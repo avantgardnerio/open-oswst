@@ -1,13 +1,19 @@
 //! Firmware entry point: brings up the board's hardware and runs the app from
 //! the core crate on it. Everything radio-behaviour lives in core.
 
-use embassy_futures::join::join3;
+use embassy_futures::join::join;
+use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::hal::task::block_on;
+use esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration;
 use open_oswst::board;
 use open_oswst::devices::{encoder, fem, gps, mic, ptt, radio, screen, settings, speaker, storage};
 use open_oswst_core::platform::Platform;
 use open_oswst_core::{app, codec, logger, mode};
 use std::path::Path;
+
+/// The radio thread's priority: above the codec's (5), so the codec can't
+/// delay a TX or an IRQ, and below the hal's IsrReactor (11), which wakes it.
+const RADIO_PRIORITY: u8 = 10;
 
 /// The board, as the app sees it
 struct Esp;
@@ -77,8 +83,9 @@ fn main() {
         .spawn(move || codec::run(codec_rx))
         .unwrap();
 
+    spawn_radio(board.radio);
+
     block_on(async {
-        let radio_fut = radio::init(board.radio).await;
         let speaker_fut = speaker::init(board.speaker).await;
 
         let app_fut = app::init::<Esp>(
@@ -96,6 +103,28 @@ fn main() {
         .await;
 
         log::info!("All systems ready");
-        join3(radio_fut, app_fut, speaker_fut).await;
+        join(app_fut, speaker_fut).await;
     });
+}
+
+/// The radio gets its own thread on core 1, so nothing else running can
+/// delay it (on core 0 with the codec, a TX step took up to 200ms instead of
+/// 75). It talks to the app only through RX_CHAN and TX_CHAN.
+fn spawn_radio(pins: radio::Peripherals) {
+    ThreadSpawnConfiguration {
+        name: Some(c"radio"),
+        priority: RADIO_PRIORITY,
+        pin_to_core: Some(Core::Core1),
+        ..Default::default()
+    }
+    .set()
+    .unwrap();
+    // The radio is created on this thread, not moved to it: created on core 0
+    // and moved, it hung (src/bin/radio_timing.rs). std's stack size wins over
+    // the spawn config's; lora-phy's futures are big.
+    std::thread::Builder::new()
+        .stack_size(32768)
+        .spawn(move || block_on(async { radio::init(pins).await.await }))
+        .unwrap();
+    ThreadSpawnConfiguration::default().set().unwrap();
 }

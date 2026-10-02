@@ -23,10 +23,10 @@
 //! transfers and BUSY waits took. "armed" counts BUSY waits where the pin was
 //! still high, so the hal had to arm the interrupt and sleep.
 //!
-//! The radio has to be created on the thread that uses it: ESP-IDF routes a
-//! GPIO interrupt to the core that enables it, and the hal installs the GPIO
-//! ISR service on the core that first asks. Moved to another core, the radio
-//! never sees BUSY or DIO1 interrupts and hangs.
+//! The radio is created on the thread that uses it: created on core 0 and
+//! moved to a thread on core 1, it hung on its first IRQ wait. Why is not
+//! known. Not GPIO routing: ESP-IDF sends every GPIO interrupt to the core
+//! that enabled the first one, whichever core enables later ones.
 //!
 //! Build & flash: cargo build --bin radio_timing && espflash flash -p <PORT> --partition-table target/xtensa-esp32s3-espidf/debug/partition-table.bin target/xtensa-esp32s3-espidf/debug/radio_timing
 
