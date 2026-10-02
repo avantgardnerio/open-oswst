@@ -152,17 +152,19 @@ async fn run(
 /// The radio's SPI bus and the SX1262 on it, through ESP-IDF directly, with
 /// our completion callback.
 unsafe fn raw_device() -> spi_device_handle_t {
-    let mut bus: spi_bus_config_t = Default::default();
-    bus.__bindgen_anon_1.mosi_io_num = MOSI;
-    bus.__bindgen_anon_2.miso_io_num = MISO;
-    bus.sclk_io_num = SCK;
-    bus.__bindgen_anon_3.quadwp_io_num = -1;
-    bus.__bindgen_anon_4.quadhd_io_num = -1;
-    bus.data4_io_num = -1;
-    bus.data5_io_num = -1;
-    bus.data6_io_num = -1;
-    bus.data7_io_num = -1;
-    bus.max_transfer_sz = 64;
+    let bus = spi_bus_config_t {
+        __bindgen_anon_1: spi_bus_config_t__bindgen_ty_1 { mosi_io_num: MOSI },
+        __bindgen_anon_2: spi_bus_config_t__bindgen_ty_2 { miso_io_num: MISO },
+        sclk_io_num: SCK,
+        __bindgen_anon_3: spi_bus_config_t__bindgen_ty_3 { quadwp_io_num: -1 },
+        __bindgen_anon_4: spi_bus_config_t__bindgen_ty_4 { quadhd_io_num: -1 },
+        data4_io_num: -1,
+        data5_io_num: -1,
+        data6_io_num: -1,
+        data7_io_num: -1,
+        max_transfer_sz: 64,
+        ..Default::default()
+    };
     esp!(spi_bus_initialize(
         spi_host_device_t_SPI2_HOST,
         &bus,
@@ -170,12 +172,14 @@ unsafe fn raw_device() -> spi_device_handle_t {
     ))
     .unwrap();
 
-    let mut config: spi_device_interface_config_t = Default::default();
-    config.clock_speed_hz = SPI_HZ as i32;
-    config.mode = 0;
-    config.spics_io_num = NSS;
-    config.queue_size = 1;
-    config.post_cb = Some(on_done);
+    let config = spi_device_interface_config_t {
+        clock_speed_hz: SPI_HZ as i32,
+        mode: 0,
+        spics_io_num: NSS,
+        queue_size: 1,
+        post_cb: Some(on_done),
+        ..Default::default()
+    };
     let mut dev: spi_device_handle_t = core::ptr::null_mut();
     esp!(spi_bus_add_device(
         spi_host_device_t_SPI2_HOST,
@@ -187,11 +191,14 @@ unsafe fn raw_device() -> spi_device_handle_t {
 }
 
 fn get_status() -> spi_transaction_t {
-    let mut t: spi_transaction_t = Default::default();
-    t.flags = SPI_TRANS_USE_TXDATA | SPI_TRANS_USE_RXDATA;
-    t.length = GET_STATUS.len() * 8; // bits
-    t.__bindgen_anon_1.tx_data = [GET_STATUS[0], GET_STATUS[1], 0, 0];
-    t
+    spi_transaction_t {
+        flags: SPI_TRANS_USE_TXDATA | SPI_TRANS_USE_RXDATA,
+        length: GET_STATUS.len() * 8, // bits
+        __bindgen_anon_1: spi_transaction_t__bindgen_ty_1 {
+            tx_data: [GET_STATUS[0], GET_STATUS[1], 0, 0],
+        },
+        ..Default::default()
+    }
 }
 
 static DONE: AtomicWaker = AtomicWaker::new();
