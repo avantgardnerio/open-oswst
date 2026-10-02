@@ -9,8 +9,11 @@ source "$SCRIPT_DIR/lib-esp.sh"
 
 BIN="target/xtensa-esp32s3-espidf/debug/open-oswst"
 PTABLE="target/xtensa-esp32s3-espidf/debug/partition-table.bin"
+# Our own bootloader, not espflash's: it's built from sdkconfig.defaults and
+# switches the flash to QIO
+BOOTLOADER=$(ls -t target/xtensa-esp32s3-espidf/debug/build/esp-idf-sys-*/out/build/bootloader/bootloader.bin 2>/dev/null | head -1)
 
-if [[ ! -f "$BIN" || ! -f "$PTABLE" ]]; then
+if [[ ! -f "$BIN" || ! -f "$PTABLE" || ! -f "$BOOTLOADER" ]]; then
     echo "Build artifacts not found. Run 'cargo build' first." >&2
     exit 1
 fi
@@ -24,7 +27,7 @@ echo "Flashing ${#DEVS[@]} device(s): ${DEVS[*]}"
 
 PIDS=()
 for DEV in "${DEVS[@]}"; do
-    espflash flash -p "$DEV" --partition-table "$PTABLE" "$BIN" &
+    espflash flash -p "$DEV" --bootloader "$BOOTLOADER" --partition-table "$PTABLE" "$BIN" &
     PIDS+=($!)
 done
 
