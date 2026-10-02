@@ -206,10 +206,12 @@ impl<P: Platform> App<P> {
     /// Timed jobs, checked every tick. TX and echo replay run to completion
     /// inside their handlers, so none of this ever runs while transmitting.
     async fn housekeeping(&mut self) {
-        // RX went quiet without an EOT (lost, or the talker went out of range)
+        // RX went quiet without an EOT (lost, or the talker went out of range).
+        // No squelch tail here: at the edge this fires mid-transmission, and a
+        // tail in the middle of broken-up audio sounds like the talker let go.
+        // Only a received EOT plays the tail.
         if self.rx.txid().is_some() && self.last_rx_time.elapsed() > RX_TIMEOUT {
             log::info!("RX timeout, resetting txid lock");
-            send_to_speaker(&self.squelch);
             self.rx.end();
         }
 
