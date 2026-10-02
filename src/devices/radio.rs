@@ -95,9 +95,10 @@ pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
         rx_boost: false,
     };
 
-    let mut lora = LoRa::new(Sx126x::new(spi, iv, config), false, embassy_time::Delay)
-        .await
-        .unwrap();
+    // Keep the TCXO running between TX and RX: otherwise each TX waits ~10ms
+    // for it to start, and so does listening again after it
+    let radio = Sx126x::new(spi, iv, config).with_oscillator_kept_on();
+    let mut lora = LoRa::new(radio, false, embassy_time::Delay).await.unwrap();
     log::info!("LoRa radio initialized");
 
     let mdltn = lora
@@ -341,7 +342,7 @@ impl Driver {
             .await
             .unwrap();
         let prepared_us = start.elapsed().as_micros();
-        // SetTx → TxDone: includes the TCXO wake-up and PA ramp, not just air
+        // SetTx → TxDone: air time plus the PA ramp (and the TCXO wake-up, if off)
         self.lora.tx().await.unwrap();
         let sent_us = start.elapsed().as_micros();
         self.enter_rx().await;

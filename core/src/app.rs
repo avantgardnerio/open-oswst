@@ -10,7 +10,7 @@ use crate::logger;
 use crate::platform::Platform;
 use core::fmt::Write as _;
 use embassy_futures::join::join;
-use embassy_futures::select::{select5, Either5};
+use embassy_futures::select::{select, select5, Either, Either5};
 use embassy_time::Ticker;
 use embedded_graphics::mono_font::ascii::FONT_6X10;
 use embedded_graphics::mono_font::{MonoTextStyle, MonoTextStyleBuilder};
@@ -415,10 +415,12 @@ impl<P: Platform> App<P> {
         let packets = self.echo.take();
         log::info!("ECHO replaying {} packets", packets.len());
         self.draw_tx_screen();
-        echo::replay(packets, random_txid::<P>()).await;
+        // Drop anything heard while we transmit it, as it comes: like on_ptt
+        let replay = echo::replay(packets, random_txid::<P>());
+        if let Either::Second(()) = select(replay, discard_rx()).await {
+            unreachable!("discard_rx never returns");
+        }
         self.last_activity = Instant::now();
-        // Drop anything heard while we were transmitting it
-        while RX_CHAN.try_receive().is_ok() {}
         self.draw_rx_screen();
     }
 
@@ -427,15 +429,32 @@ impl<P: Platform> App<P> {
         self.rx.end();
 
         let txid = random_txid::<P>();
-        let mut seq: u8 = 0;
         log::info!("PTT pressed — streaming (txid={})", txid);
 
         self.draw_tx_screen();
 
         self.mic.drain(); // discard stale
 
+        // Half-duplex: anything heard while we talk can't be played, so throw
+        // it away as it comes. Left in the queue it fills up, and the radio
+        // stalls handing over the next packet, unable to send ours.
+        let packets = match select(self.stream(txid), discard_rx()).await {
+            Either::First(packets) => packets,
+            Either::Second(()) => unreachable!("discard_rx never returns"),
+        };
+
+        log::info!("PTT released — {} packets sent + EOT", packets);
+        self.last_activity = Instant::now();
+
+        // Redraw RX screen
+        self.draw_rx_screen();
+    }
+
+    /// Send voice while PTT is held, then an EOT. Returns the packets sent.
+    async fn stream(&mut self, txid: u8) -> usize {
         // Pipelined: each pass captures packet N+1 while packet N is encoded and
         // sent, so the mic is drained continuously
+        let mut seq: u8 = 0;
         let mic = &mut self.mic;
         let codec_tx = &self.codec_tx;
         let mut pending: Option<([u8; 2], Box<[i16]>)> = None;
@@ -460,12 +479,7 @@ impl<P: Platform> App<P> {
         let mut eot_data = heapless::Vec::new();
         let _ = eot_data.extend_from_slice(&packet::pack(TYPE_VOICE, txid, seq));
         TX_CHAN.send(TxRequest { data: eot_data }).await;
-
-        log::info!("PTT released — {} packets sent + EOT", packets);
-        self.last_activity = Instant::now();
-
-        // Redraw RX screen
-        self.draw_rx_screen();
+        packets
     }
 
     fn on_speaker_request(&mut self) {
@@ -711,6 +725,13 @@ fn send_to_speaker(packet: &[i16]) {
 /// Random 7-bit id for one transmission — the dedup key.
 fn random_txid<P: Platform>() -> u8 {
     (P::random() & 0x7F) as u8
+}
+
+/// Receive and drop packets, forever: for while we're talking.
+async fn discard_rx() {
+    loop {
+        let _ = RX_CHAN.receive().await;
+    }
 }
 
 /// Capture one packet's worth of PCM (FRAMES_PER_PACKET frames, 160ms).
