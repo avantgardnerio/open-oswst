@@ -215,6 +215,10 @@ impl<P: Platform> App<P> {
             log::info!("RX timeout, resetting txid lock");
             log_worst_alloc();
             self.rx.end();
+            // A repeater's "Repeating" screen ends with the transmission
+            if mode::get() == Mode::Repeater {
+                self.draw_rx_screen();
+            }
         }
 
         // Echo mode: the talker went quiet without an EOT. Replay anyway
@@ -314,6 +318,9 @@ impl<P: Platform> App<P> {
             log::info!("RX EOT from txid={}", txid);
             log_worst_alloc();
             self.rx.end();
+            if mode::get() == Mode::Repeater {
+                self.draw_rx_screen();
+            }
             return;
         }
 
@@ -360,6 +367,8 @@ impl<P: Platform> App<P> {
             TX_CHAN.send(TxRequest { data: relay }).await;
             log::info!("RELAY [{}B] txid={} seq={}", rx_pkt.data.len(), txid, seq);
             self.rx.relayed(seq);
+            // Drawn after the relay is queued, so it doesn't delay it
+            self.draw_relay_screen(rx_pkt.rssi, rx_pkt.snr);
             return; // skip decode — fast turnaround
         }
         // Send to codec thread for decode, await reply
@@ -594,9 +603,21 @@ impl<P: Platform> App<P> {
     }
 
     fn draw_rx_audio_screen(&mut self, rssi: i16, snr: i16) {
+        self.draw_signal_screen("RX Audio", rssi, snr);
+    }
+
+    /// A repeater relaying: shows it's working, and how well it hears.
+    fn draw_relay_screen(&mut self, rssi: i16, snr: i16) {
+        self.draw_signal_screen("Repeating", rssi, snr);
+    }
+
+    /// A title, centred, with the last packet's RSSI and SNR under it.
+    fn draw_signal_screen(&mut self, title: &str, rssi: i16, snr: i16) {
         let mut frame = self.screen.frame();
         self.draw_header(&mut frame);
-        Text::new("RX Audio", Point::new(40, 36), self.style)
+        // FONT_6X10: 6px per character on the 128px wide screen
+        let x = (128 - 6 * title.len() as i32) / 2;
+        Text::new(title, Point::new(x, 36), self.style)
             .draw(&mut frame)
             .unwrap();
 
