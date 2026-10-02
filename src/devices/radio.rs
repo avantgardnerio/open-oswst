@@ -1,3 +1,4 @@
+use core::fmt::Write as _;
 use embassy_futures::select::{select, select3, Either, Either3};
 use esp_idf_svc::hal::gpio::{AnyIOPin, AnyInputPin, AnyOutputPin};
 use esp_idf_svc::hal::gpio::{Input, Output, Pin, PinDriver, Pull};
@@ -30,6 +31,10 @@ pub const TX_POWER_DBM: i32 = 6;
 /// turns; not if they all relay at the same instant (QMesh-style).
 const TX_JITTER_MAX_MS: u32 = 0;
 
+/// Longest a TX waits, from a preamble, for that packet to end. A 26B packet
+/// is ~62ms of air, so past this its end IRQ was lost.
+const BUSY_MAX_WAIT_MS: u64 = 100;
+
 /// How often to log the receiver's state. Matches the GPS log, so each check
 /// lines up with a position.
 const RX_STATE_EVERY_SECS: u64 = 10;
@@ -61,6 +66,8 @@ pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
     .unwrap();
 
     let reset = PinDriver::output(p.reset).unwrap();
+    // DIO1's number too: a stall log reads its pad to see if an IRQ is pending
+    let dio1_gpio = p.dio1.pin() as i32;
     let dio1 = PinDriver::input(p.dio1, Pull::Floating).unwrap();
     let busy = PinDriver::input(p.busy, Pull::Floating).unwrap();
 
@@ -104,7 +111,15 @@ pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
         .unwrap();
 
     async move {
-        radio_loop(&mut lora, &mdltn, &mut tx_params, &rx_params, ctx_gpio).await;
+        radio_loop(
+            &mut lora,
+            &mdltn,
+            &mut tx_params,
+            &rx_params,
+            ctx_gpio,
+            dio1_gpio,
+        )
+        .await;
     }
 }
 
@@ -145,6 +160,37 @@ async fn log_rx_state(lora: &mut Radio<'_>, ctx_gpio: Option<i32>) {
     );
 }
 
+/// The CSMA wait got no end-of-packet IRQ within BUSY_MAX_WAIT_MS of the
+/// preamble. Logs the radio's state right then, to tell apart:
+/// - dio1=1: an IRQ is pending that the wait never saw (our bug)
+/// - dio1=0, nothing on air: the chip never finished the packet (it doesn't
+///   promise an end IRQ after a preamble), or a clear in `seen` wiped it:
+///   an RxDone lands ~45ms after the header at SF7/125k
+async fn log_irq_stall(lora: &mut Radio<'_>, preamble: Instant, dio1_gpio: i32, seen: &str) {
+    let dio1 = unsafe { esp_idf_svc::sys::gpio_get_level(dio1_gpio) };
+    // Read only: no clear, so this doesn't disturb what it looks at
+    let state = lora.get_irq_state().await;
+    let rssi = lora.get_rssi().await;
+    log::warn!(
+        "RADIO IRQ STALL: no end IRQ {}ms after the preamble. dio1={} irq_state={} rssi={:?} handled:{}",
+        preamble.elapsed().as_millis(),
+        dio1,
+        irq_name(&state),
+        rssi,
+        if seen.is_empty() { " none" } else { seen }
+    );
+}
+
+/// Short name for what lora-phy made of the IRQ register
+fn irq_name(state: &Result<Option<IrqState>, RadioError>) -> &'static str {
+    match state {
+        Ok(Some(IrqState::PreambleReceived)) => "preamble/header",
+        Ok(Some(IrqState::Done)) => "done",
+        Ok(None) => "none-or-header-error",
+        Err(_) => "error",
+    }
+}
+
 /// Microseconds since boot. The log's own timestamp moves in 10ms ticks.
 fn uptime_us() -> i64 {
     unsafe { esp_idf_svc::sys::esp_timer_get_time() }
@@ -163,6 +209,7 @@ async fn radio_loop(
     tx_params: &mut PacketParams,
     rx_params: &PacketParams,
     ctx_gpio: Option<i32>,
+    dio1_gpio: i32,
 ) {
     let mut rx_buf = [0u8; 255];
     let mut busy_since: Option<Instant> = None;
@@ -244,6 +291,9 @@ async fn radio_loop(
                         busy_since = None;
                     }
                 }
+                // TODO: this clears every IRQ flag, including one raised since
+                // get_irq_state() read them (e.g. the next packet's RxDone):
+                // that packet is lost. Clear only the flags we handled.
                 lora.clear_irq_status().await.unwrap();
                 // RX continuous keeps running — no re-setup needed
             }
@@ -252,15 +302,51 @@ async fn radio_loop(
                 loop {
                     // If channel busy, wait for in-progress RX to finish
                     if let Some(t) = busy_since {
-                        if t.elapsed().as_millis() < 200 {
+                        if t.elapsed().as_millis() < BUSY_MAX_WAIT_MS as u128 {
                             log::info!("TX waiting: channel busy");
+                            // Bounded: if the packet's end IRQ never comes, nothing
+                            // else would end this wait until another radio sent.
+                            // A stopgap: the stall log below says what to really fix
+                            let since_preamble = t.elapsed().as_millis() as u64;
+                            // IRQs this wait handled, at ms after the preamble
+                            let mut seen = heapless::String::<96>::new();
+                            let mut deadline = embassy_time::Instant::now()
+                                + embassy_time::Duration::from_millis(
+                                    BUSY_MAX_WAIT_MS - since_preamble,
+                                );
                             loop {
-                                lora.wait_for_irq().await.unwrap();
-                                let state = lora.get_irq_state().await;
-                                lora.clear_irq_status().await.unwrap();
-                                match state {
-                                    Ok(Some(IrqState::PreambleReceived)) => continue,
-                                    _ => break,
+                                match select(lora.wait_for_irq(), embassy_time::Timer::at(deadline))
+                                    .await
+                                {
+                                    Either::First(_) => {
+                                        let state = lora.get_irq_state().await;
+                                        lora.clear_irq_status().await.unwrap();
+                                        let _ = write!(
+                                            seen,
+                                            " {}@{}",
+                                            irq_name(&state),
+                                            t.elapsed().as_millis()
+                                        );
+                                        match state {
+                                            // This packet's header (lora-phy reports
+                                            // HeaderValid as PreambleReceived), or another
+                                            // packet starting: wait for its end
+                                            Ok(Some(IrqState::PreambleReceived)) => {
+                                                deadline = embassy_time::Instant::now()
+                                                    + embassy_time::Duration::from_millis(
+                                                        BUSY_MAX_WAIT_MS,
+                                                    );
+                                            }
+                                            // TODO: on Done, the packet we waited for is
+                                            // dropped: never read out or sent to the app. A
+                                            // repeater about to TX loses the talker's packet.
+                                            _ => break,
+                                        }
+                                    }
+                                    Either::Second(()) => {
+                                        log_irq_stall(lora, t, dio1_gpio, &seen).await;
+                                        break;
+                                    }
                                 }
                             }
                         }

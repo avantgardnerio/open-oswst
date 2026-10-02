@@ -324,6 +324,9 @@ impl<P: Platform> App<P> {
 
         let payload = &rx_pkt.data[HEADER_BYTES..];
 
+        // TODO: ignore our own txid. A repeater relays our last packets back
+        // after PTT release; we lock onto them and ignore the echo's replay
+        // (or anyone else) until RX_TIMEOUT.
         let verdict = self.rx.check(txid, seq);
         if let Verdict::OtherTxid { locked } = verdict {
             log::warn!("RX ignoring txid={} (locked to {})", txid, locked);

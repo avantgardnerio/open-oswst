@@ -25,6 +25,7 @@ The metrics, per PTT (txid):
   echo heard  Replay packets the handheld heard (direct or relayed)
   TX steps    standby / prep / tx / back_to_rx per role, from `TX end` lines
   audio       Handheld speaker gaps, underruns, slow encodes, worst heap alloc
+  IRQ stalls  Any board's `RADIO IRQ STALL` lines, printed first and in full
 
 Needs pyserial (system python3 has it).
 """
@@ -184,12 +185,31 @@ def report(boards):
         print(f"{role:9} {board.name if board else 'MISSING'}")
     if not (handheld and repeater and echo):
         sys.exit("Need one board in each mode (Normal, Repeater, Echo)")
+    report_stalls([("handheld", handheld), ("repeater", repeater), ("echo", echo)])
 
     for start, txid, sent, after in transmissions(handheld):
         print(f"\n=== PTT txid={txid}: {sent} packets sent ===")
         report_repeater(repeater, txid, sent)
         replayed = report_echo(echo, txid, sent)
         report_handheld(handheld, txid, start, after, replayed)
+
+
+def report_stalls(roles):
+    """Radio IRQ stalls on any board, in full: each says which bug it is
+    (see log_irq_stall in src/devices/radio.rs). Always printed, so a clean
+    run says so."""
+    stalls = [
+        (role, ms, msg)
+        for role, board in roles
+        for ms, msg in board.lines
+        if msg.startswith("RADIO IRQ STALL")
+    ]
+    if not stalls:
+        print("\nRADIO IRQ STALLS: none")
+        return
+    print(f"\n!!! RADIO IRQ STALLS: {len(stalls)} !!!")
+    for role, ms, msg in stalls:
+        print(f"  {role:9} @{ms}ms  {msg}")
 
 
 def transmissions(handheld):
@@ -242,15 +262,22 @@ def report_repeater(repeater, txid, sent):
 
 
 def report_echo(echo, txid, sent):
-    """Prints what the echo recorded; returns how many packets it replayed."""
-    seqs, replayed = [], None
+    """Prints what the echo recorded; returns how many packets it replayed.
+
+    A gap of 500ms+ in the talker's stream makes the echo replay early, then
+    record the rest as a second recording: that's flagged as SPLIT."""
+    seqs, replays = [], []
     for _, msg in echo.lines:
-        if m := re.match(rf"ECHO rec txid={txid} seq=(\d+)", msg):
-            seqs.append(int(m.group(1)))
+        if m := re.match(r"ECHO rec txid=(\d+) seq=(\d+)", msg):
+            if int(m.group(1)) == txid:
+                seqs.append(int(m.group(2)))
+            elif seqs:
+                break  # the next transmission
         elif seqs and (m := re.match(r"ECHO replaying (\d+) packets", msg)):
-            replayed = int(m.group(1))
-            break
-    print(f"  echo recorded     {unique_in_order(seqs)}/{sent}, replayed {replayed}")
+            replays.append(int(m.group(1)))
+    replayed = sum(replays)
+    split = f"  SPLIT into {len(replays)} replays: {'+'.join(map(str, replays))}" if len(replays) > 1 else ""
+    print(f"  echo recorded     {unique_in_order(seqs)}/{sent}, replayed {replayed}{split}")
     return replayed
 
 
@@ -264,12 +291,14 @@ def report_handheld(handheld, txid, start, after, replayed):
 
     # After release: the echo's replay, under a txid that isn't ours (ours
     # still arrives for a moment, relayed back by the repeater)
+    # (a split recording comes back as several replays, each its own txid)
     window = lines[release:nxt]
-    echo_seqs = [
-        int(m.group(2))
-        for _, msg in window
-        if (m := re.match(r"RX \[26B\] txid=(\d+) seq=(\d+)", msg)) and int(m.group(1)) != txid
-    ]
+    echo_seqs = {}
+    for _, msg in window:
+        m = re.match(r"RX \[26B\] txid=(\d+) seq=(\d+)", msg)
+        if m and int(m.group(1)) != txid:
+            echo_seqs.setdefault(int(m.group(1)), []).append(int(m.group(2)))
+    heard = sum(unique_in_order(seqs) for seqs in echo_seqs.values())
     gaps = sum(1 for _, msg in window if msg.startswith("SPK gap"))
     underruns = sum(1 for _, msg in window if msg.startswith("SPK underrun"))
     allocs = [
@@ -278,7 +307,7 @@ def report_handheld(handheld, txid, start, after, replayed):
         if (m := re.match(r"Audio heap alloc: worst (\d+)us", msg))
     ]
     print(
-        f"  echo heard        {unique_in_order(echo_seqs)}/{replayed}, "
+        f"  echo heard        {heard}/{replayed}, "
         f"{gaps} speaker gaps, {underruns} underruns"
     )
     print(f"  talker slow encodes {slow}, worst audio heap alloc {f"{max(allocs)}us" if allocs else "n/a"}")
