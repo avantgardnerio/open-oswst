@@ -14,6 +14,7 @@
 //!   - spin: a tiny loop, CPU-busy for as long as the codec took, every
 //!     160ms. It fits in the cache, so it competes for the CPU like the
 //!     codec but puts no pressure on the cache
+//!
 //! If SPI slows under codec but not under spin, it's the flash cache, not
 //! scheduling. Both loads are spawned like the app's codec: no core
 //! affinity, prio 5.
@@ -52,8 +53,8 @@ use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::time::Instant;
 
 /// Where the radio thread runs
-const RADIO_CORE: Core = Core::Core1;
-const RADIO_PRIORITY: u8 = 10;
+const RADIO_CORE: Core = Core::Core0;
+const RADIO_PRIORITY: u8 = 1;
 /// Packets per run: ~6.4s each
 const PACKETS: usize = 40;
 /// A packet type nobody handles, so the app on the other radios drops it
