@@ -34,6 +34,8 @@ lora-phy = { path = "../lora-rs/lora-phy" }
 ssd1306 = "0.9"
 embedded-graphics = "0.8"
 heapless = "0.8"
+# Settings file (/data/config.toml)
+toml = "0.8"
 # The traits lora-phy talks to hardware through; radio_timing wraps them to time each call
 embedded-hal = "1"
 embedded-hal-async = "1"

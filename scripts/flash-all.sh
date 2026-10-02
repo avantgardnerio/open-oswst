@@ -27,7 +27,10 @@ echo "Flashing ${#DEVS[@]} device(s): ${DEVS[*]}"
 
 PIDS=()
 for DEV in "${DEVS[@]}"; do
-    espflash flash -p "$DEV" --bootloader "$BOOTLOADER" --partition-table "$PTABLE" "$BIN" &
+    # otadata erased: after an OTA update, this makes the board boot the app
+    # flashed here (ota_0) instead of the other slot
+    espflash flash -p "$DEV" --bootloader "$BOOTLOADER" --partition-table "$PTABLE" \
+        --erase-parts otadata "$BIN" &
     PIDS+=($!)
 done
 

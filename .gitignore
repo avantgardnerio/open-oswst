@@ -8,3 +8,6 @@ out/
 
 # Log files pulled off boards by scripts/pull-logs.py
 logs/
+
+# Board settings incl. WiFi passwords (see boards.example.toml)
+boards.toml

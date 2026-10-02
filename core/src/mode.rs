@@ -1,5 +1,5 @@
-//! Operating mode: what the radio does with what it hears. Saved to NVS as
-//! `config/mode`, so it survives a reboot.
+//! Operating mode: what the radio does with what it hears. Saved by name
+//! (`mode = "repeater"` in the config file), so it survives a reboot.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -23,6 +23,24 @@ impl Mode {
             _ => Mode::Normal,
         }
     }
+
+    /// As saved in the config file
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Normal => "normal",
+            Mode::Repeater => "repeater",
+            Mode::Echo => "echo",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Mode> {
+        match name {
+            "normal" => Some(Mode::Normal),
+            "repeater" => Some(Mode::Repeater),
+            "echo" => Some(Mode::Echo),
+            _ => None,
+        }
+    }
 }
 
 static MODE: AtomicU8 = AtomicU8::new(Mode::Normal as u8);
@@ -38,13 +56,14 @@ pub fn set(mode: Mode) {
 /// Read the saved mode (Normal if there's none, or no settings at all), and
 /// make it current.
 pub fn load(settings: Option<&impl Settings>) -> Mode {
-    let read = |key| settings.and_then(|settings| settings.get_u8(key));
-    // "mode" replaced an older "repeater" on/off flag; boards saved before
-    // then only have that one
-    let mode = match (read("mode"), read("repeater")) {
-        (Some(mode), _) => Mode::from_u8(mode),
-        (None, Some(1)) => Mode::Repeater,
-        _ => Mode::Normal,
+    let saved = settings.and_then(|settings| settings.get("mode"));
+    let mode = match saved.as_deref().map(Mode::from_name) {
+        Some(Some(mode)) => mode,
+        Some(None) => {
+            log::warn!("Config: unknown mode {:?}, using normal", saved);
+            Mode::Normal
+        }
+        None => Mode::Normal,
     };
     set(mode);
     mode

@@ -543,16 +543,17 @@ impl<P: Platform> App<P> {
         match setting {
             Setting::Lock => self.locked = value != 0,
             Setting::Mode => {
-                mode::set(Mode::from_u8(value));
-                self.save_u8("mode", value);
+                let mode = Mode::from_u8(value);
+                mode::set(mode);
+                self.save("mode", mode.name());
             }
         }
     }
 
     /// Persist a setting so it survives a reboot.
-    fn save_u8(&mut self, key: &str, value: u8) {
+    fn save(&mut self, key: &str, value: &str) {
         if let Some(settings) = self.settings.as_mut() {
-            settings.set_u8(key, value);
+            settings.set(key, value);
         }
     }
 

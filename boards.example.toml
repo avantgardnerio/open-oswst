@@ -1,0 +1,17 @@
+# Copy to boards.toml (kept out of git: it holds WiFi passwords), then
+# .venv/bin/python scripts/provision.py
+#
+# Networks under [all] go on every board, first; a board's own after.
+[[all.wifi]]
+ssid = "Starlink"
+password = "change me"
+
+# Boards by MAC (the USB serial number). Missing ones get mode "normal".
+["A4:CB:8F:A2:0F:5C"]
+mode = "repeater"
+
+["F8:5B:1B:A7:38:90"]
+mode = "echo"
+
+["F8:5B:1B:A2:C6:2C"]
+mode = "normal"

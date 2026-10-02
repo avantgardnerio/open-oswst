@@ -96,27 +96,28 @@ espflash flash -p <PORT> \
 Serial ports aren't stable between plug-ins: identify boards by MAC (the ESP32-S3's USB serial number), not by `ttyACM` number. To capture a
 boot log from the first line, `python3 scripts/boot-log.py <PORT>`. Never flash while another program holds the port.
 
-### Device Config (NVS)
+### Device Config
 
-Settings live in a dedicated `open-oswst` NVS partition at `0xfad000` (12KB), namespace `config`, separate from the system NVS (PHY
-calibration etc). On the newest PCB rev the on-device menu (click the VOL knob) sets them. On earlier boards the knob can't be used (its
-pins clash with the FEM), so write them over USB:
+Each board's settings are a text file on its storage: `/data/config.toml`. On the newest PCB rev the on-device menu (click the VOL knob)
+sets the mode and rewrites the file.
 
-```bash
-# Generate an NVS image from a CSV (edit nvs_open-oswst.csv, or write your own)
-python3 .embuild/espressif/python_env/idf5.5_py3.13_env/lib/python3.13/site-packages/esp_idf_nvs_partition_gen/nvs_partition_gen.py \
-    generate nvs_open-oswst.csv open-oswst_nvs.bin 0x3000
+```toml
+mode = "repeater"        # normal | repeater | echo
 
-# Write it to the board
-espflash write-bin -p <PORT> 0xfad000 open-oswst_nvs.bin
+[[wifi]]                 # networks to join, tried in order
+ssid = "Starlink"
+password = "..."
 ```
 
-| Key | Type | Values | Default |
-|-----|------|--------|---------|
-| `mode` | u8 | 0 = normal, 1 = repeater, 2 = echo | 0 |
-| `repeater` | u8 | Older key, read only if `mode` is missing: 1 = repeater | — |
+`scripts/provision.py` writes it over USB, from `boards.toml` in the repo root (kept out of git: it holds WiFi passwords; copy
+`boards.example.toml` to start). It flashes the firmware too, and **erases the board's storage**, logs included: pull them first.
 
-The boot log shows the result, e.g. `Config: mode=Echo`.
+```bash
+.venv/bin/python scripts/provision.py                      # every connected board
+.venv/bin/python scripts/provision.py A4:CB:8F:A2:0F:5C    # just this one
+```
+
+The boot log shows the result, e.g. `Config: mode=Echo, 1 WiFi network(s)`.
 
 ### Logs
 
@@ -179,8 +180,8 @@ desktop/             # Desktop build on virtual devices (skeleton so far)
 scripts/             # boot-log.py, pull-logs.py, flash-all.sh, ...
 pcb/                 # PCB definition (Python DSL) and generated KiCad board
 models/              # Parametric case (build123d) and fit check
-partitions.csv       # Partition table: app, LittleFS storage, open-oswst NVS
-nvs_open-oswst.csv   # Default device config values
+partitions.csv       # Partition table: two OTA app slots, LittleFS storage (/data)
+boards.example.toml  # Per-board settings for scripts/provision.py (copy to boards.toml)
 sdkconfig.defaults   # ESP-IDF config overrides
 ```
 

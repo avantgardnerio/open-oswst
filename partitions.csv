@@ -1,10 +1,13 @@
 # ESP-IDF Partition Table
 # Name,     Type, SubType, Offset,   Size,     Flags
-nvs,         data, nvs,     0x9000,   0x6000,
+# ESP-IDF's own (WiFi and PHY calibration); our settings are in /data/config.toml
+nvs,         data, nvs,     0x9000,   0x4000,
+# Which OTA slot to boot. Erased on every USB flash, so the board boots ota_0
+otadata,     data, ota,     0xd000,   0x2000,
 phy_init,    data, phy,     0xf000,   0x1000,
-# 4MB is ~5x the app today. Was 0xf9d000 before the storage partition existed
-factory,     app,  factory, 0x10000,  0x400000,
-# LittleFS, mounted at /data (logs, and later recordings, tracks...)
-storage,     data, spiffs,  0x410000, 0xb9d000,
-# Settings. Must stay at this offset: boards in the field already have it here
-open-oswst,  data, nvs,     0xfad000, 0x3000,
+# Two app slots: an OTA update writes the one not running, then boots it.
+# 3MB each, ~2x the app with WiFi
+ota_0,       app,  ota_0,   0x10000,  0x300000,
+ota_1,       app,  ota_1,   0x310000, 0x300000,
+# LittleFS, mounted at /data: config.toml, logs (and later recordings, tracks...)
+storage,     data, spiffs,  0x610000, 0x9f0000,

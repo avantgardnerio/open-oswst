@@ -60,9 +60,15 @@ fn main() {
     let _fem = fem::init(board.fem);
     let gps = gps::init(board.gps);
 
+    // After storage: the settings are a file on it
     let settings = settings::init();
-    let mode = mode::load(settings.as_ref());
-    log::info!("Config: mode={:?}", mode);
+    let mode = mode::load(Some(&settings));
+    log::info!(
+        "Config: mode={:?}, {} WiFi network(s)",
+        mode,
+        settings.wifi_networks().len()
+    );
+    let settings = Some(settings);
 
     // Get MAC for display
     let mac = get_mac();
