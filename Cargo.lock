@@ -1233,6 +1233,8 @@ dependencies = [
  "embassy-sync",
  "embassy-time",
  "embedded-graphics",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
  "embuild",
  "esp-idf-svc",
  "heapless 0.8.0",
