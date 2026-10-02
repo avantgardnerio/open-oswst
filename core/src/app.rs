@@ -231,7 +231,14 @@ impl<P: Platform> App<P> {
         // Flash writes stall the chip, so logs only go to the file once the
         // air has been quiet a while, and one chunk per tick. Between chunks,
         // any packet or PTT press gets handled first.
-        if !receiving && self.last_activity.elapsed() > LOG_FLUSH_IDLE && logger::pending() {
+        // Never on a repeater: a packet can arrive at any moment, and one
+        // landing during the stall misses its relay slot.
+        let repeater = mode::get() == Mode::Repeater;
+        if !repeater
+            && !receiving
+            && self.last_activity.elapsed() > LOG_FLUSH_IDLE
+            && logger::pending()
+        {
             logger::flush_chunk();
         }
     }
