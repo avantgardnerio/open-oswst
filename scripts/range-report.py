@@ -9,11 +9,13 @@ pull-logs.py). For each time the handheld keyed up, it finds:
     the app actually played.
 The two boards' clocks are lined up using the UTC in their GPS lines.
 
-Prints the table, and writes next to the handheld log:
-  map.html      grey basemap (OpenStreetMap and satellite in the layer switcher)
+Prints the table, and writes next to the handheld log (NNNN = its number):
+  map-NNNN.html      grey basemap (OpenStreetMap and satellite in the layer switcher)
                 with a circle per transmission, labelled with its distance:
-                fill = outbound, outline = return; click for the numbers
-  walk.geojson  the same points plus the track, for QGIS and friends
+                fill = outbound, outline = return; click for the numbers.
+                Under them, a "Noise floor" layer: the handheld's own RX noise
+                reading (every 10s), pale = quiet, dark purple = loud
+  walk-NNNN.geojson  the same points plus the track, for QGIS and friends
 
 Usage:
     .venv/bin/python scripts/range-report.py HANDHELD_LOG ECHO_LOG
@@ -44,6 +46,11 @@ GPS = re.compile(
 GOOD, FAIR = 0.9, 0.6
 COLOURS = {"good": "#1a9641", "fair": "#f4a11d", "bad": "#d7191c", "none": "#888888"}
 
+# Noise floor shading, by the reading's average (dBm): purple, so it can't be
+# mistaken for the transmissions' green / amber / red. Quiet at home is ~-68.
+NOISE_BANDS = [(-66, "#efedf5"), (-60, "#bcbddc"), (-52, "#807dba"), (None, "#3f007d")]
+NOISE = re.compile(r"RX state: noise avg=(-?\d+) max=(-?\d+)")
+
 
 def main():
     if len(sys.argv) != 3:
@@ -60,9 +67,13 @@ def main():
 
     out = hand_path.parent
     track = [p["pos"] for p in hand_gps if p["pos"]]
-    write_map(out / "map.html", station, track, rows)
-    write_geojson(out / "walk.geojson", station, track, rows)
-    print(f"\nmap: {out / 'map.html'}\ngeojson: {out / 'walk.geojson'}")
+    noise = noise_points(hand, hand_gps)
+    # Named after the handheld log: one pull holds several walks' logs
+    map_path = out / f"map-{hand_path.stem}.html"
+    geojson_path = out / f"walk-{hand_path.stem}.geojson"
+    write_map(map_path, station, track, rows, noise)
+    write_geojson(geojson_path, station, track, rows, noise)
+    print(f"\nmap: {map_path}\ngeojson: {geojson_path}")
 
 
 # --- reading the logs ------------------------------------------------------
@@ -88,6 +99,17 @@ def gps_points(lines):
             )
             pos = (float(m.group(2)), float(m.group(3))) if m.group(2) else None
             points.append({"t": t, "utc": utc, "pos": pos})
+    return points
+
+
+def noise_points(hand, hand_gps):
+    """The handheld's noise floor readings, placed at its nearest GPS fix."""
+    points = []
+    for t, _, msg in hand:
+        m = NOISE.search(msg)
+        pos = position_at(hand_gps, t) if m else None
+        if pos:
+            points.append({"pos": pos, "avg": int(m.group(1)), "max": int(m.group(2))})
     return points
 
 
@@ -217,7 +239,12 @@ LEGEND = f"""
   <span style="color:{COLOURS['good']}">●</span> ≥{GOOD:.0%} of packets &nbsp;
   <span style="color:{COLOURS['fair']}">●</span> ≥{FAIR:.0%} &nbsp;
   <span style="color:{COLOURS['bad']}">●</span> less &nbsp;
-  <span style="color:{COLOURS['none']}">●</span> no echo
+  <span style="color:{COLOURS['none']}">●</span> no echo<br>
+  <b>Small dots: the handheld's noise floor</b> (avg dBm)<br>
+  <span style="color:{NOISE_BANDS[0][1]}; text-shadow: 0 0 1px #000">●</span> &lt;{NOISE_BANDS[0][0]} &nbsp;
+  <span style="color:{NOISE_BANDS[1][1]}">●</span> &lt;{NOISE_BANDS[1][0]} &nbsp;
+  <span style="color:{NOISE_BANDS[2][1]}">●</span> &lt;{NOISE_BANDS[2][0]} &nbsp;
+  <span style="color:{NOISE_BANDS[3][1]}">●</span> louder
 </div>
 """
 
@@ -227,7 +254,11 @@ LABEL_STYLE = ("font: bold 13px sans-serif; color: #111; white-space: nowrap; "
                "text-shadow: -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff, 1px 1px 0 #fff, 0 0 3px #fff")
 
 
-def write_map(path, station, track, rows):
+def noise_colour(avg):
+    return next(colour for limit, colour in NOISE_BANDS if limit is None or avg < limit)
+
+
+def write_map(path, station, track, rows, noise):
     # Grey first, so the coloured circles stand out: OpenStreetMap run through a
     # CSS filter (CARTO's ready-made grey tiles now need an API key). Colour
     # streets and satellite are one click away in the layer switcher.
@@ -246,6 +277,20 @@ def write_map(path, station, track, rows):
         folium.PolyLine(track, color="#3366cc", weight=2, opacity=0.6, tooltip="walk").add_to(m)
     folium.Marker(station, tooltip="echo station",
                   icon=folium.Icon(color="blue", icon="home", prefix="fa")).add_to(m)
+
+    # Under the transmissions, and its own entry in the layer switcher
+    noise_layer = folium.FeatureGroup(name="Noise floor", show=True).add_to(m)
+    for n in noise:
+        folium.CircleMarker(
+            n["pos"],
+            radius=6,
+            color="#555",
+            weight=0.5,
+            fill=True,
+            fill_color=noise_colour(n["avg"]),
+            fill_opacity=0.9,
+            tooltip=f"noise avg {n['avg']} max {n['max']} dBm",
+        ).add_to(noise_layer)
 
     for r in rows:
         if not r["pos"]:
@@ -279,7 +324,7 @@ def write_map(path, station, track, rows):
     m.save(str(path))
 
 
-def write_geojson(path, station, track, rows):
+def write_geojson(path, station, track, rows, noise):
     features = [{
         "type": "Feature",
         "geometry": {"type": "Point", "coordinates": [station[1], station[0]]},
@@ -301,6 +346,12 @@ def write_geojson(path, station, track, rows):
             "type": "Feature",
             "geometry": {"type": "Point", "coordinates": [r["pos"][1], r["pos"][0]]},
             "properties": props,
+        })
+    for n in noise:
+        features.append({
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [n["pos"][1], n["pos"][0]]},
+            "properties": {"kind": "noise", "avg_dbm": n["avg"], "max_dbm": n["max"]},
         })
     path.write_text(json.dumps({"type": "FeatureCollection", "features": features}, indent=1))
 
