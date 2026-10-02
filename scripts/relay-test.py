@@ -204,10 +204,16 @@ def report_stalls(roles):
         for ms, msg in board.lines
         if msg.startswith("RADIO IRQ STALL")
     ]
+    # Expected, not a bug: a preamble detected mid-packet, never a real one
+    false_preambles = {
+        role: sum(1 for _, msg in board.lines if msg.startswith("RX preamble without a header"))
+        for role, board in roles
+    }
+    print("\npreambles without a header (not packets): " + ", ".join(f"{r} {n}" for r, n in false_preambles.items()))
     if not stalls:
-        print("\nRADIO IRQ STALLS: none")
+        print("RADIO IRQ STALLS: none")
         return
-    print(f"\n!!! RADIO IRQ STALLS: {len(stalls)} !!!")
+    print(f"!!! RADIO IRQ STALLS: {len(stalls)} !!!")
     for role, ms, msg in stalls:
         print(f"  {role:9} @{ms}ms  {msg}")
 

@@ -11,7 +11,7 @@ use lora_phy::mod_traits::IrqState;
 use lora_phy::sx126x::{self, Sx1262, Sx126x, TcxoCtrlVoltage};
 use lora_phy::LoRa;
 use std::future::Future;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 // The queues the app talks to; this driver connects them to the SX1262
 pub use open_oswst_core::devices::radio::{RxPacket, TxRequest, RX_CHAN, TX_CHAN};
@@ -31,9 +31,16 @@ pub const TX_POWER_DBM: i32 = 6;
 /// turns; not if they all relay at the same instant (QMesh-style).
 const TX_JITTER_MAX_MS: u32 = 0;
 
-/// Longest a TX waits, from a preamble, for that packet to end. A 26B packet
-/// is ~62ms of air, so past this its end IRQ was lost.
-const BUSY_MAX_WAIT_MS: u64 = 100;
+/// A detected preamble is only a maybe: if no valid header follows within
+/// this, it wasn't a packet (e.g. we started listening mid-packet and the
+/// detector locked onto the payload; then no further IRQ ever comes). The
+/// header lands ~20ms after the detection at SF7/125k.
+const HEADER_WAIT: Duration = Duration::from_millis(30);
+
+/// After a valid header, the longest until the packet's end IRQ. Our 26B
+/// packets end ~41ms after their header at SF7/125k. A longer packet from
+/// someone else would still be on the air when this runs out.
+const PACKET_END_WAIT: Duration = Duration::from_millis(60);
 
 /// How often to log the receiver's state. Matches the GPS log, so each check
 /// lines up with a position.
@@ -160,20 +167,51 @@ async fn log_rx_state(lora: &mut Radio<'_>, ctx_gpio: Option<i32>) {
     );
 }
 
-/// The CSMA wait got no end-of-packet IRQ within BUSY_MAX_WAIT_MS of the
-/// preamble. Logs the radio's state right then, to tell apart:
+/// What's on the air, as far as this radio can tell
+#[derive(Clone, Copy)]
+enum Air {
+    Clear,
+    /// A preamble detected at this time: maybe a packet, see HEADER_WAIT
+    Preamble(Instant),
+    /// A valid header at this time: a packet really is arriving
+    Header(Instant),
+}
+
+impl Air {
+    /// What an IRQ from the radio tells us about the air
+    fn after(state: &Result<Option<IrqState>, RadioError>) -> Air {
+        match state {
+            Ok(Some(IrqState::PreambleReceived)) => Air::Preamble(Instant::now()),
+            Ok(Some(IrqState::HeaderValid)) => Air::Header(Instant::now()),
+            // The packet ended: received, or a CRC/header error
+            _ => Air::Clear,
+        }
+    }
+
+    /// When a TX could go ahead, if the air is busy now
+    fn busy_until(self) -> Option<Instant> {
+        let until = match self {
+            Air::Clear => return None,
+            Air::Preamble(at) => at + HEADER_WAIT,
+            Air::Header(at) => at + PACKET_END_WAIT,
+        };
+        (until > Instant::now()).then_some(until)
+    }
+}
+
+/// A packet's header arrived, but no end IRQ (done or error) within
+/// PACKET_END_WAIT. Logs the radio's state right then, to tell apart:
 /// - dio1=1: an IRQ is pending that the wait never saw (our bug)
-/// - dio1=0, nothing on air: the chip never finished the packet (it doesn't
-///   promise an end IRQ after a preamble), or a clear in `seen` wiped it:
-///   an RxDone lands ~45ms after the header at SF7/125k
-async fn log_irq_stall(lora: &mut Radio<'_>, preamble: Instant, dio1_gpio: i32, seen: &str) {
+/// - dio1=0, still on air: a longer packet than ours
+/// - dio1=0, nothing on air: the chip never finished the packet
+async fn log_irq_stall(lora: &mut Radio<'_>, header: Instant, dio1_gpio: i32, seen: &str) {
     let dio1 = unsafe { esp_idf_svc::sys::gpio_get_level(dio1_gpio) };
     // Read only: no clear, so this doesn't disturb what it looks at
     let state = lora.get_irq_state().await;
     let rssi = lora.get_rssi().await;
     log::warn!(
-        "RADIO IRQ STALL: no end IRQ {}ms after the preamble. dio1={} irq_state={} rssi={:?} handled:{}",
-        preamble.elapsed().as_millis(),
+        "RADIO IRQ STALL: no end IRQ {}ms after the header. dio1={} irq_state={} rssi={:?} handled:{}",
+        header.elapsed().as_millis(),
         dio1,
         irq_name(&state),
         rssi,
@@ -184,7 +222,8 @@ async fn log_irq_stall(lora: &mut Radio<'_>, preamble: Instant, dio1_gpio: i32, 
 /// Short name for what lora-phy made of the IRQ register
 fn irq_name(state: &Result<Option<IrqState>, RadioError>) -> &'static str {
     match state {
-        Ok(Some(IrqState::PreambleReceived)) => "preamble/header",
+        Ok(Some(IrqState::PreambleReceived)) => "preamble",
+        Ok(Some(IrqState::HeaderValid)) => "header",
         Ok(Some(IrqState::Done)) => "done",
         Ok(None) => "none-or-header-error",
         Err(_) => "error",
@@ -194,6 +233,12 @@ fn irq_name(state: &Result<Option<IrqState>, RadioError>) -> &'static str {
 /// Microseconds since boot. The log's own timestamp moves in 10ms ticks.
 fn uptime_us() -> i64 {
     unsafe { esp_idf_svc::sys::esp_timer_get_time() }
+}
+
+/// An embassy timer deadline for a std Instant
+fn deadline(at: Instant) -> embassy_time::Instant {
+    let left = at.saturating_duration_since(Instant::now());
+    embassy_time::Instant::now() + embassy_time::Duration::from_micros(left.as_micros() as u64)
 }
 
 async fn enter_rx(lora: &mut Radio<'_>, mdltn: &ModulationParams, rx_params: &PacketParams) {
@@ -212,7 +257,7 @@ async fn radio_loop(
     dio1_gpio: i32,
 ) {
     let mut rx_buf = [0u8; 255];
-    let mut busy_since: Option<Instant> = None;
+    let mut air = Air::Clear;
 
     enter_rx(lora, mdltn, rx_params).await;
     log_rx_state(lora, ctx_gpio).await;
@@ -231,11 +276,8 @@ async fn radio_loop(
         {
             Either3::Third(()) => {
                 next_rx_state += embassy_time::Duration::from_secs(RX_STATE_EVERY_SECS);
-                // Mid-packet the reading is the packet, not the noise floor.
-                // Only a recent preamble counts, as in the CSMA check below:
-                // one with no end IRQ would otherwise stop these logs for good
-                let mid_packet = busy_since.is_some_and(|t| t.elapsed().as_millis() < 200);
-                if !mid_packet {
+                // Mid-packet the reading is the packet, not the noise floor
+                if air.busy_until().is_none() {
                     log_rx_state(lora, ctx_gpio).await;
                 }
             }
@@ -247,18 +289,21 @@ async fn radio_loop(
                     log::error!("IRQ error: {:?}", e);
                     continue;
                 }
-                match lora.get_irq_state().await {
-                    Ok(Some(IrqState::PreambleReceived)) => {
-                        log::info!("RX preamble");
-                        busy_since = Some(Instant::now());
-                    }
+                let header_at = match air {
+                    Air::Header(at) => Some(at),
+                    _ => None,
+                };
+                let state = lora.get_irq_state().await;
+                air = Air::after(&state);
+                match state {
+                    Ok(Some(IrqState::PreambleReceived)) => log::info!("RX preamble"),
+                    Ok(Some(IrqState::HeaderValid)) => log::info!("RX header"),
                     Ok(Some(IrqState::Done)) => {
-                        let rx_ms = busy_since.map(|t| t.elapsed().as_millis()).unwrap_or(0);
-                        busy_since = None;
+                        let rx_ms = header_at.map_or(0, |at| at.elapsed().as_millis());
                         match lora.get_rx_result(rx_params, &mut rx_buf).await {
                             Ok((len, status)) => {
                                 log::info!(
-                                    "RX end [{}B] {}ms rssi={} snr={} at={}us",
+                                    "RX end [{}B] {}ms after header rssi={} snr={} at={}us",
                                     len,
                                     rx_ms,
                                     status.rssi,
@@ -277,80 +322,67 @@ async fn radio_loop(
                                     .await;
                             }
                             Err(e) => {
-                                log::error!("RX error [{}ms]: {:?}", rx_ms, e);
+                                log::error!("RX error [{}ms after header]: {:?}", rx_ms, e);
                             }
                         }
                     }
-                    Ok(None) => {
-                        let rx_ms = busy_since.map(|t| t.elapsed().as_millis()).unwrap_or(0);
-                        log::warn!("RX CRC/header error [{}ms]", rx_ms);
-                        busy_since = None;
-                    }
-                    Err(e) => {
-                        log::error!("IRQ state error: {:?}", e);
-                        busy_since = None;
-                    }
+                    Ok(None) => log::warn!("RX CRC/header error"),
+                    Err(e) => log::error!("IRQ state error: {:?}", e),
                 }
-                // TODO: this clears every IRQ flag, including one raised since
-                // get_irq_state() read them (e.g. the next packet's RxDone):
-                // that packet is lost. Clear only the flags we handled.
-                lora.clear_irq_status().await.unwrap();
+                // Only the flags just handled: one raised since (e.g. the
+                // header, right after the preamble) stays set and fires again
+                lora.clear_irq_flags_read().await.unwrap();
                 // RX continuous keeps running — no re-setup needed
             }
             Either3::Second(tx_req) => {
                 // CSMA: wait for channel clear, then random jitter while listening
                 loop {
-                    // If channel busy, wait for in-progress RX to finish
-                    if let Some(t) = busy_since {
-                        if t.elapsed().as_millis() < BUSY_MAX_WAIT_MS as u128 {
-                            log::info!("TX waiting: channel busy");
-                            // Bounded: if the packet's end IRQ never comes, nothing
-                            // else would end this wait until another radio sent.
-                            // A stopgap: the stall log below says what to really fix
-                            let since_preamble = t.elapsed().as_millis() as u64;
-                            // IRQs this wait handled, at ms after the preamble
-                            let mut seen = heapless::String::<96>::new();
-                            let mut deadline = embassy_time::Instant::now()
-                                + embassy_time::Duration::from_millis(
-                                    BUSY_MAX_WAIT_MS - since_preamble,
-                                );
-                            loop {
-                                match select(lora.wait_for_irq(), embassy_time::Timer::at(deadline))
-                                    .await
-                                {
-                                    Either::First(_) => {
-                                        let state = lora.get_irq_state().await;
-                                        lora.clear_irq_status().await.unwrap();
-                                        let _ = write!(
-                                            seen,
-                                            " {}@{}",
-                                            irq_name(&state),
-                                            t.elapsed().as_millis()
-                                        );
-                                        match state {
-                                            // This packet's header (lora-phy reports
-                                            // HeaderValid as PreambleReceived), or another
-                                            // packet starting: wait for its end
-                                            Ok(Some(IrqState::PreambleReceived)) => {
-                                                deadline = embassy_time::Instant::now()
-                                                    + embassy_time::Duration::from_millis(
-                                                        BUSY_MAX_WAIT_MS,
-                                                    );
-                                            }
-                                            // TODO: on Done, the packet we waited for is
-                                            // dropped: never read out or sent to the app. A
-                                            // repeater about to TX loses the talker's packet.
-                                            _ => break,
+                    // If a packet may be on the air, wait for it to end
+                    if let Some(until) = air.busy_until() {
+                        log::info!("TX waiting: channel busy");
+                        // IRQs this wait handled, at ms since it started
+                        let waiting = Instant::now();
+                        let mut seen = heapless::String::<96>::new();
+                        let mut until = until;
+                        loop {
+                            match select(
+                                lora.wait_for_irq(),
+                                embassy_time::Timer::at(deadline(until)),
+                            )
+                            .await
+                            {
+                                Either::First(_) => {
+                                    let state = lora.get_irq_state().await;
+                                    lora.clear_irq_flags_read().await.unwrap();
+                                    let _ = write!(
+                                        seen,
+                                        " {}@{}",
+                                        irq_name(&state),
+                                        waiting.elapsed().as_millis()
+                                    );
+                                    // TODO: on Done, the packet we waited for is
+                                    // dropped: never read out or sent to the app. A
+                                    // repeater about to TX loses the talker's packet.
+                                    air = Air::after(&state);
+                                    match air.busy_until() {
+                                        Some(later) => until = later,
+                                        None => break,
+                                    }
+                                }
+                                Either::Second(()) => {
+                                    match air {
+                                        Air::Header(at) => {
+                                            log_irq_stall(lora, at, dio1_gpio, &seen).await
+                                        }
+                                        _ => {
+                                            log::info!("RX preamble without a header: not a packet")
                                         }
                                     }
-                                    Either::Second(()) => {
-                                        log_irq_stall(lora, t, dio1_gpio, &seen).await;
-                                        break;
-                                    }
+                                    air = Air::Clear;
+                                    break;
                                 }
                             }
                         }
-                        busy_since = None;
                     }
 
                     // Random jitter — listen during wait to detect new transmissions
@@ -367,11 +399,9 @@ async fn radio_loop(
                     {
                         Either::First(_) => {
                             // Someone started TX during our jitter — handle and retry
-                            if let Ok(Some(IrqState::PreambleReceived)) = lora.get_irq_state().await
-                            {
-                                busy_since = Some(Instant::now());
-                            }
-                            lora.clear_irq_status().await.unwrap();
+                            let state = lora.get_irq_state().await;
+                            lora.clear_irq_flags_read().await.unwrap();
+                            air = Air::after(&state);
                             continue;
                         }
                         Either::Second(_) => break, // Channel stayed clear, TX now
