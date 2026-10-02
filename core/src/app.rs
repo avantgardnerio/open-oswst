@@ -291,16 +291,18 @@ impl<P: Platform> App<P> {
             return;
         }
 
-        // Header-only = end of transmission — relay if repeater, then squelch
+        // Header-only = end of transmission — relay if repeater, else squelch.
+        // A repeater never plays the voice, so a tail on its own would be noise.
         if rx_pkt.data.len() == HEADER_BYTES {
             if mode::get() == Mode::Repeater {
                 let mut relay = heapless::Vec::new();
                 let _ = relay.extend_from_slice(&rx_pkt.data);
                 TX_CHAN.send(TxRequest { data: relay }).await;
                 log::info!("RELAY EOT txid={}", txid);
+            } else {
+                send_to_speaker(&self.squelch);
             }
             log::info!("RX EOT from txid={}", txid);
-            send_to_speaker(&self.squelch);
             self.rx.end();
             return;
         }
