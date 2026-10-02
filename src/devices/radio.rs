@@ -273,22 +273,32 @@ async fn radio_loop(
                     }
                 }
 
-                // actually transmit
+                // actually transmit, timing each step: a relay has to fit in
+                // the talker's gap, so every ms of turnaround counts
                 log::info!("TX start [{}B]", tx_req.data.len());
                 let tx_start = Instant::now();
                 lora.enter_standby().await.unwrap();
+                let standby_us = tx_start.elapsed().as_micros();
                 lora.prepare_for_tx(mdltn, tx_params, TX_POWER_DBM, &tx_req.data)
                     .await
                     .unwrap();
+                let prepared_us = tx_start.elapsed().as_micros();
+                // SetTx → TxDone: includes the TCXO wake-up and PA ramp, not just air
                 lora.tx().await.unwrap();
-                log::info!(
-                    "TX end [{}B] {}ms",
-                    tx_req.data.len(),
-                    tx_start.elapsed().as_millis()
-                );
+                let sent_us = tx_start.elapsed().as_micros();
 
                 // Back to RX continuous
                 enter_rx(lora, mdltn, rx_params).await;
+                let rx_us = tx_start.elapsed().as_micros();
+                log::info!(
+                    "TX end [{}B] {}ms: standby={}us prep={}us tx={}us back_to_rx={}us",
+                    tx_req.data.len(),
+                    rx_us / 1000,
+                    standby_us,
+                    prepared_us - standby_us,
+                    sent_us - prepared_us,
+                    rx_us - sent_us
+                );
             }
         }
     }
