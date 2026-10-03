@@ -84,14 +84,17 @@ ESP-IDF v5.5.x is downloaded automatically by `esp-idf-sys` on first build (take
 
 ### Flash
 
-Always pass the partition table. Without it espflash writes its default one, which drops our `storage` and `open-oswst` partitions:
+Over USB, use the script. It flashes every connected board at once, and passes the three things a bare `espflash flash` gets wrong:
 
 ```bash
-. ~/export-esp.sh
-espflash flash -p <PORT> \
-    --partition-table target/xtensa-esp32s3-espidf/debug/partition-table.bin \
-    target/xtensa-esp32s3-espidf/debug/open-oswst
+. ~/export-esp.sh && cargo build && scripts/flash-all.sh
 ```
+
+- **our bootloader** (`--bootloader`): it switches the flash to QIO. espflash's bundled one is DIO
+- **our partition table** (`--partition-table`): espflash's default drops the `storage` partition and the OTA slots
+- **`--erase-parts otadata`**: otherwise a board last updated over WiFi keeps booting the other slot
+
+Over WiFi, see [In the Field](#in-the-field).
 
 Serial ports aren't stable between plug-ins: identify boards by MAC (the ESP32-S3's USB serial number), not by `ttyACM` number. To capture a
 boot log from the first line, `python3 scripts/boot-log.py <PORT>`. Never flash while another program holds the port.
@@ -134,6 +137,80 @@ one circle per transmission coloured by how well each direction got through, plu
 ```bash
 .venv/bin/python scripts/range-report.py <handheld log> <echo station log>
 ```
+
+## In the Field
+
+Every radio has the field hotspot (Starlink) in its `config.toml` and stays on WiFi, so in the field the laptop does everything over
+WiFi: find the radios, read their status and logs, change their config, update their firmware. USB is the fallback.
+
+### Laptop setup (once, at home)
+
+```bash
+sudo apt install avahi-utils curl    # avahi-browse finds the radios; Ubuntu resolves *.local out of the box
+```
+
+Plus the build tools above (`espup`, `espflash`, `~/export-esp.sh`), so firmware can be built and saved as an image in the field.
+
+### Find the radios
+
+Join the laptop to the same network as the radios, then:
+
+```bash
+avahi-browse -rtp _oswst._tcp | grep "^="    # one line per radio: name, host, IP, port
+```
+
+Each radio is `oswst-XXXX.local`, from the last 4 hex digits of its MAC (A4:CB:8F:A2:0F:5C is `oswst-0f5c`). A radio joins WiFi ~7 s
+after boot. If a radio doesn't show up:
+
+- `getent hosts oswst-0f5c.local`: asks for one radio by name
+- check that avahi-browse ran at all. Don't pipe its errors into grep: if it isn't installed, `2>&1 | grep` prints nothing,
+  which looks exactly like "no radios"
+- last resort, scan the subnet for the API:
+  `for i in $(seq 1 254); do curl -s -m 1 http://192.168.0.$i/status | grep -q mac && echo 192.168.0.$i & done; wait`
+
+### Talk to a radio
+
+The HTTP API (`src/http.rs`), port 80, no password (the WiFi password is the security):
+
+```bash
+R=oswst-0f5c.local
+curl http://$R/status                         # name, MAC, firmware (git hash), OTA slot, mode, uptime, heap
+curl http://$R/logs                           # list the log files
+curl -O http://$R/logs/0007.txt               # fetch one: a 25 KB log in under 0.1 s (vs ~80 s over USB)
+curl http://$R/config                         # read config.toml
+curl -X PUT --data-binary @config.toml http://$R/config    # replace it (checked first); applies on reboot
+curl -X POST http://$R/reboot
+```
+
+### Update firmware over WiFi (OTA)
+
+Build, save an app image, and post it. The radio writes it to its spare slot and reboots into it (~2 MB in 10–13 s, back up ~4 s
+later). `/status` then shows the new git hash and the other slot.
+
+```bash
+. ~/export-esp.sh && cargo build
+espflash save-image --chip esp32s3 target/xtensa-esp32s3-espidf/debug/open-oswst app.bin
+curl --data-binary @app.bin http://oswst-0f5c.local/ota
+```
+
+Every radio found:
+
+```bash
+for host in $(avahi-browse -rtp _oswst._tcp | grep "^=" | cut -d';' -f7 | sort -u); do
+    curl --data-binary @app.bin http://$host/ota
+done
+```
+
+### USB fallback
+
+When a radio isn't on WiFi:
+
+- **Flash:** `scripts/flash-all.sh`. It passes our bootloader, our partition table and `--erase-parts otadata`, which a bare
+  `espflash flash` gets wrong.
+- **Pull logs:** `scripts/pull-logs.py` (~80 s).
+- **Watch a boot:** `scripts/boot-log.py`.
+
+Identify boards by MAC, not by `ttyACM` number, and never flash while another program holds the port.
 
 ## Current Behavior
 
