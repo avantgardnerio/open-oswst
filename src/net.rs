@@ -29,7 +29,7 @@ use std::sync::Mutex;
 use open_oswst_core::devices::network::Network;
 
 use crate::devices::settings::WifiNetwork;
-use crate::{http, thread};
+use crate::{clock, http, thread};
 
 /// Where the WiFi is at, for the screen (Platform::network). Off until
 /// `start` finds networks configured.
@@ -80,6 +80,8 @@ fn run(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
     let (off_tx, off_rx) = mpsc::channel();
     let mdns = announce(&name, &mac);
     let http = http::start(&name, &mac, off_tx.clone());
+    // Sets the clock once a network with internet is joined (it retries)
+    let ntp = clock::start_ntp();
 
     loop {
         if !wifi.is_connected().unwrap_or(false) {
@@ -93,6 +95,7 @@ fn run(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
 
     // Give /wifi/off's reply time to get out, then stop everything
     sleep(Duration::from_millis(500));
+    drop(ntp);
     drop(http);
     drop(mdns);
     if let Err(e) = wifi.stop() {

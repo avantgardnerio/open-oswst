@@ -1,4 +1,5 @@
 pub mod board;
+pub mod clock;
 pub mod devices;
 pub mod firmware;
 pub mod http;

@@ -82,6 +82,12 @@ fn run(p: Peripherals, state: Arc<Mutex<State>>) {
                         let mut state = state.lock().unwrap();
                         if apply_nmea(&mut state.fix, sentence.trim_end()) {
                             state.updated = Some(Instant::now());
+                            // The first UTC date and time sets the clock
+                            if let (Some(date), Some(time)) = (state.fix.date, state.fix.time) {
+                                if !crate::clock::is_set() {
+                                    crate::clock::set_from_gps(date, time);
+                                }
+                            }
                         }
                     }
                     line.clear();

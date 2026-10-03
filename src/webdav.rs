@@ -17,9 +17,9 @@
 //! check, or it's refused and the old file stays.
 //!
 //! No LOCK: Linux clients don't need it, but Finder and Windows Explorer may
-//! refuse to write. No dates in listings: the radio's clock isn't set to
-//! real time, and they're optional. Listings are written as they're read,
-//! never held whole in memory.
+//! refuse to write. Modification dates are listed only when they're real:
+//! a file written before the clock was set (clock.rs) is dated 1970, and
+//! gets none. Listings are written as they're read, never held whole.
 
 use std::fs;
 use std::io::{Read as _, Write as _};
@@ -29,6 +29,8 @@ use esp_idf_svc::http::server::{EspHttpConnection, EspHttpServer, Request};
 use esp_idf_svc::http::Method;
 use esp_idf_svc::io::Write;
 use esp_idf_svc::sys::EspError;
+
+use open_oswst_core::utc;
 
 use crate::devices::{settings, storage};
 
@@ -246,9 +248,10 @@ fn entry(path: &Path, meta: &fs::Metadata) -> String {
     } else {
         format!(
             "<D:resourcetype/><D:getcontentlength>{}</D:getcontentlength>\
-             <D:getcontenttype>{}</D:getcontenttype>",
+             <D:getcontenttype>{}</D:getcontenttype>{}",
             meta.len(),
-            content_type(path)
+            content_type(path),
+            last_modified(meta)
         )
     };
     format!(
@@ -256,6 +259,24 @@ fn entry(path: &Path, meta: &fs::Metadata) -> String {
          <D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>\n",
         href(path, meta.is_dir()),
         props
+    )
+}
+
+/// A file's modification date, if it's a real one (written after the clock
+/// was set): before 2024 means 1970-something
+fn last_modified(meta: &fs::Metadata) -> String {
+    const REAL_AFTER: i64 = 1_704_067_200; // 2024-01-01
+    let seconds = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |since| since.as_secs() as i64);
+    if seconds < REAL_AFTER {
+        return String::new();
+    }
+    format!(
+        "<D:getlastmodified>{}</D:getlastmodified>",
+        utc::http_date(seconds)
     )
 }
 
