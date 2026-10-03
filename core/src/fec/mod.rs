@@ -1,39 +1,53 @@
-//! # RETIRED (2026-10-03): FEC does not help this radio. Not used, on purpose.
+//! # SHELVED (2026-10-03): maybe later. Not used for now.
 //!
-//! We built it, simulated it and then measured the thing it's meant to fix,
-//! in the field, twice. FEC repairs packets that arrive damaged. Ours almost
-//! never arrive damaged: they don't arrive at all.
+//! We built it, simulated it, then measured what it's meant to fix on two
+//! field walks. FEC repairs packets that arrive damaged; most of ours never
+//! arrive at all. So frequency hopping comes first (robust to noise on one
+//! channel, needed for legal power, and the way to pack in repeaters, the
+//! point of the project). This waits until a measurement says otherwise.
 //!
 //! - **Simulation** (`examples/fec_sim`, SF7, white noise): both candidates
-//!   gain ~3 dB over today's packet, which is exactly what moving to 250 kHz
-//!   (the bandwidth they need for the same airtime) costs. Net ~0 dB. They
-//!   only win in short noise bursts inside a packet.
+//!   gain ~3 dB over today's packet, which is what moving to 250 kHz (the
+//!   bandwidth they need for the same airtime) costs. Net ~0 dB. They only
+//!   win in short noise bursts inside a packet.
 //! - **West walk** (away from town, 17 PTTs to ~1.35 km): 2 packets on the
 //!   whole walk failed their CRC. Every other loss left no trace.
 //! - **East walk** (toward town, the noisiest direction we know, repeater
-//!   off, 44 PTTs to ~1.3 km): of 454 packets lost on the return path, 12
-//!   failed their CRC or header check (<3%). The other ~97% were never
-//!   detected. That was with real interference: noise bursts filled 44% of
-//!   the time in one 10 s window out of ten, peaking at 100%.
+//!   off, 44 PTTs to ~1.3 km; noise bursts filled 44% of the time in one
+//!   10 s window out of ten). Return path, each PTT matched to its replay:
 //!
-//! So even in the noisiest place we've tested, at most ~3% of the losses are
-//! the kind any in-packet FEC could repair. The losses are missed detections:
-//! the receiver never locks onto the packet. What helps that is a channel the
-//! noise isn't on (frequency hopping), more margin (antenna height, power),
-//! and detection itself (preamble length), not coding.
+//!   | transmissions                | lost | arrived damaged (FEC could try) |
+//!   |------------------------------|------|---------------------------------|
+//!   | partial: some packets got in |  236 | 31 (13%)                        |
+//!   | dead: none got in            |  206 |  6 (3%)                         |
+//!   | all                          |  442 | 37 (8%)                         |
 //!
-//! QMesh, the voice-over-LoRa project this design followed, estimates 5-7 dB
-//! of gain from this coding over LoRa's own Hamming code. Their own word for
-//! that number is "a very rough estimate", and we found no field measurement
-//! behind it. Ours points the other way. We'd encourage anyone (QMesh
-//! included) to log CRC failures against total losses on a real walk before
-//! building on that figure.
+//!   "Arrived damaged" counts both kinds: the 12 the radio flagged (header
+//!   or CRC error), and 25 that slipped past its 5-bit header checksum as
+//!   garbage. That's every packet any FEC could have worked on.
 //!
-//! The code below stays as written and tested, for the record and in case a
-//! different radio, channel or environment ever turns the numbers around.
-//! Field logs: `logs/` (not in git) F85B1BA2C62C-20261003-100318/0011.txt
-//! (west), F85B1BA2C62C-20261003-160209/log/0310.txt (east), and the echo
-//! station's logs from the same runs.
+//! Where did the rest go? At the usable edge (the partial rows) the receiver
+//! detected 487 preambles but got only 236 valid headers: ~250 packets
+//! started, about one per lost packet. The radio seems to notice the packet
+//! and lose it at the sync word, before demodulating anything. (Some of
+//! those preambles may be interference, so this is a strong hint, not
+//! proof.) Out of range (the dead rows) it mostly detected nothing.
+//!
+//! QMesh, the voice-over-LoRa project this design followed, runs LoRa with
+//! an implicit header and no radio CRC, so every packet the radio
+//! demodulates reaches their FEC, garbled or not. That's the right way to
+//! give FEC the most to work with, and our 8% / 13% already counts every
+//! such packet. It doesn't reach the sync-word losses: in any header mode,
+//! the radio must lock on before it demodulates. They estimate 5-7 dB of
+//! gain over LoRa's own Hamming code, in their words "a very rough
+//! estimate"; we found no field measurement behind it. We'd encourage
+//! anyone (QMesh included) to log, on a real walk, how many lost packets
+//! arrived damaged against how many never arrived.
+//!
+//! The code below stays as written and tested. Field logs: `logs/` (not in
+//! git) F85B1BA2C62C-20261003-100318/0011.txt (west),
+//! F85B1BA2C62C-20261003-160209/log/0310.txt (east), and the echo station's
+//! logs from the same runs.
 //!
 //! ---
 //!
