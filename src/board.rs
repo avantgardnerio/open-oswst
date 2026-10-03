@@ -2,6 +2,7 @@
 //! The one place pins are assigned — every app gets its peripherals from here.
 
 use esp_idf_svc::hal::gpio::{AnyIOPin, Output, PinDriver};
+use esp_idf_svc::hal::modem::Modem;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use std::thread;
 use std::time::Duration;
@@ -17,6 +18,8 @@ pub struct Board {
     pub mic: mic::Peripherals,
     pub vol: encoder::Peripherals,
     pub ptt: AnyIOPin<'static>,
+    /// WiFi (net.rs)
+    pub modem: Modem<'static>,
     // Vext powers the OLED — must stay alive or power turns off
     _vext: PinDriver<'static, Output>,
 }
@@ -78,6 +81,7 @@ pub fn take() -> Board {
             sw: p.pins.gpio45.into(), // GPIO1 is battery sense
         },
         ptt: p.pins.gpio0.into(),
+        modem: p.modem,
         _vext: vext,
     }
 }

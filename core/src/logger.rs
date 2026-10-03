@@ -15,8 +15,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-/// RAM held for lines not yet written: ~40s of busy radio traffic
-const BUFFER_BYTES: usize = 48 * 1024;
+/// RAM held for lines not yet written: ~13s of busy radio traffic. Was 48KB;
+/// cut to make room for WiFi (logs can be fetched over HTTP now)
+const BUFFER_BYTES: usize = 16 * 1024;
 /// Most written per `flush_chunk()`, cut at a line end
 const CHUNK_BYTES: usize = 512;
 /// Delete old log files until the partition is below this full

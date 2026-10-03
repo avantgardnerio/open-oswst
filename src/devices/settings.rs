@@ -33,7 +33,7 @@ pub struct WifiNetwork {
 /// Read the config file. Missing means defaults; broken is logged and also
 /// means defaults (the file is left as it is until a setting is saved).
 pub fn init() -> Settings {
-    let path = format!("{}/{}", storage::ROOT, FILE);
+    let path = path();
     let table = match fs::read_to_string(&path) {
         Ok(text) => text.parse::<toml::Table>().unwrap_or_else(|e| {
             log::error!("Config: {} is broken, using defaults: {}", path, e);
@@ -49,6 +49,20 @@ pub fn init() -> Settings {
         }
     };
     Settings { table }
+}
+
+/// Where the config file is
+pub fn path() -> String {
+    format!("{}/{}", storage::ROOT, FILE)
+}
+
+/// Replace the whole config file: written to a new file first, then renamed
+/// over the old one, so a reset mid-write never leaves half a config.
+pub fn replace(text: &str) -> std::io::Result<()> {
+    let path = path();
+    let new = format!("{}.new", path);
+    fs::write(&new, text)?;
+    fs::rename(&new, &path)
 }
 
 impl Settings {
@@ -73,14 +87,10 @@ impl Settings {
             .collect()
     }
 
-    /// Write the whole file again: to a new file first, then renamed over the
-    /// old one, so a reset mid-write never leaves half a config.
     fn save(&self) {
-        let path = format!("{}/{}", storage::ROOT, FILE);
-        let new = format!("{}.new", path);
         let text = toml::to_string(&self.table).unwrap_or_default();
-        if let Err(e) = fs::write(&new, text).and_then(|()| fs::rename(&new, &path)) {
-            log::warn!("Config: saving {} failed: {}", path, e);
+        if let Err(e) = replace(&text) {
+            log::warn!("Config: saving {} failed: {}", path(), e);
         }
     }
 }

@@ -6,7 +6,7 @@ use embassy_futures::join::join3;
 use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::hal::task::block_on;
 use open_oswst::devices::{encoder, fem, gps, mic, ptt, radio, screen, settings, speaker, storage};
-use open_oswst::{board, thread};
+use open_oswst::{board, net, thread};
 use open_oswst_core::platform::Platform;
 use open_oswst_core::{app, codec, logger, mode};
 use std::path::Path;
@@ -68,6 +68,7 @@ fn main() {
         mode,
         settings.wifi_networks().len()
     );
+    let wifi_networks = settings.wifi_networks();
     let settings = Some(settings);
 
     // Get MAC for display
@@ -87,6 +88,9 @@ fn main() {
     thread::spawn(c"codec", 32768, None, None, move || codec::run(codec_rx));
 
     spawn_radio(board.radio);
+    // WiFi and the HTTP API, on core 0 at a low priority (only if networks
+    // are configured)
+    net::start(board.modem, wifi_networks, mac_str.to_string());
 
     block_on(async {
         let speaker_fut = speaker::init(board.speaker).await;

@@ -36,6 +36,8 @@ embedded-graphics = "0.8"
 heapless = "0.8"
 # Settings file (/data/config.toml)
 toml = "0.8"
+# Errors in the HTTP handlers (http.rs)
+anyhow = "1"
 # The traits lora-phy talks to hardware through; radio_timing wraps them to time each call
 embedded-hal = "1"
 embedded-hal-async = "1"
@@ -45,6 +47,10 @@ codec2 = "0.3.0"
 # generates its bindings once the component is present.
 [[package.metadata.esp-idf-sys.extra_components]]
 remote_component = { name = "joltwallet/littlefs", version = "1" }
+
+# mDNS, so each radio answers as oswst-XXXX.local (net.rs)
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/mdns", version = "1" }
 
 [build-dependencies]
 embuild = "0.33"
