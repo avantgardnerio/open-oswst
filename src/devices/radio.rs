@@ -37,16 +37,18 @@ const TX_JITTER_MAX_MS: u32 = 0;
 /// 8. The 2026-10-03 walk lost its return packets to missed detections, not
 /// corruption, with interference setting off the detector between real
 /// packets. A longer preamble gives the detector more to lock onto, and a
-/// second chance after a false alarm. Costs 8 symbols = 8.2ms of air per
-/// packet at SF7/125k (61.7 -> 69.9ms).
-const PREAMBLE_SYMBOLS: u16 = 16;
+/// second chance after a false alarm. 12, not 16: at 16 a packet (69.9ms)
+/// plus a repeater's relay of it overran the 160ms slot on the desk, and
+/// playback underran. 12 costs 4 symbols = 4.1ms per packet at SF7/125k
+/// (61.7 -> 65.8ms) and leaves a single repeater ~17ms of slack.
+const PREAMBLE_SYMBOLS: u16 = 12;
 
 /// A detected preamble is only a maybe: if no valid header follows within
 /// this, it wasn't a packet (e.g. we started listening mid-packet and the
 /// detector locked onto the payload; then no further IRQ ever comes). The
 /// header landed ~20ms after the detection with an 8-symbol preamble at
-/// SF7/125k; the 8 extra symbols add ~8ms.
-const HEADER_WAIT: Duration = Duration::from_millis(40);
+/// SF7/125k; the 4 extra symbols add ~4ms.
+const HEADER_WAIT: Duration = Duration::from_millis(35);
 
 /// After a valid header, the longest until the packet's end IRQ. Our 26B
 /// packets end ~41ms after their header at SF7/125k. A longer packet from
