@@ -30,7 +30,7 @@ embassy-sync = "0.7"
 # Our fork (avantgardnerio/lora-rs), branch lora-phy-3.0.2-alpha: fixes we mean
 # to upstream. To work on it, point this at a local checkout
 # (path = "../lora-rs/lora-phy"); tag the fork and switch back before pushing
-lora-phy = { git = "https://github.com/avantgardnerio/lora-rs", tag = "lora-phy-v3.0.2-alpha-oswst.1" }
+lora-phy = { git = "https://github.com/avantgardnerio/lora-rs", tag = "lora-phy-v3.0.2-alpha-oswst.2" }
 ssd1306 = "0.9"
 embedded-graphics = "0.8"
 heapless = "0.8"
@@ -41,6 +41,8 @@ anyhow = "1"
 # The traits lora-phy talks to hardware through; radio_timing wraps them to time each call
 embedded-hal = "1"
 embedded-hal-async = "1"
+# A waker an interrupt can wake: atomics only, no lock (devices::radio_bus)
+atomic-waker = "1"
 codec2 = "0.3.0"
 
 # LittleFS for the `storage` partition (see partitions.csv). esp-idf-sys already

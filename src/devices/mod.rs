@@ -4,6 +4,7 @@ pub mod gps;
 pub mod mic;
 pub mod ptt;
 pub mod radio;
+pub mod radio_bus;
 pub mod screen;
 pub mod settings;
 pub mod speaker;

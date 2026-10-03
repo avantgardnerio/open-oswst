@@ -1072,12 +1072,12 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 [[package]]
 name = "lora-modulation"
 version = "0.1.5"
-source = "git+https://github.com/avantgardnerio/lora-rs?tag=lora-phy-v3.0.2-alpha-oswst.1#44dbd4a8c4f32981c71f93170b2cfff0f2672c2f"
+source = "git+https://github.com/avantgardnerio/lora-rs?tag=lora-phy-v3.0.2-alpha-oswst.2#c3a2fa21a7fbe8fd847c4b8e56db1b7d1099cfea"
 
 [[package]]
 name = "lora-phy"
 version = "3.0.2-alpha"
-source = "git+https://github.com/avantgardnerio/lora-rs?tag=lora-phy-v3.0.2-alpha-oswst.1#44dbd4a8c4f32981c71f93170b2cfff0f2672c2f"
+source = "git+https://github.com/avantgardnerio/lora-rs?tag=lora-phy-v3.0.2-alpha-oswst.2#c3a2fa21a7fbe8fd847c4b8e56db1b7d1099cfea"
 dependencies = [
  "document-features",
  "embedded-hal 1.0.0",
@@ -1229,6 +1229,7 @@ name = "open-oswst"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "atomic-waker",
  "codec2",
  "embassy-futures",
  "embassy-sync",
