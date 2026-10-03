@@ -242,12 +242,13 @@ fn letter(level: Level) -> char {
     }
 }
 
-fn log_path(dir: &Path, number: u32) -> PathBuf {
+/// The file for log NNNN: NNNN.txt
+pub fn log_path(dir: &Path, number: u32) -> PathBuf {
     dir.join(format!("{:04}.txt", number))
 }
 
 /// Numbers of the existing NNNN.txt files
-fn log_file_numbers(dir: &Path) -> Vec<u32> {
+pub fn log_file_numbers(dir: &Path) -> Vec<u32> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };

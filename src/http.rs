@@ -2,8 +2,8 @@
 //! knowing the WiFi password is the security.
 //!
 //!   GET  /status          name, MAC, firmware, OTA slot, mode, uptime, heap (JSON)
-//!   GET  /logs            the log files on /data/log, with sizes (JSON)
-//!   GET  /logs/NNNN.txt   one log file
+//!   /logs/                the log files, as a read-only WebDAV folder:
+//!                         PROPFIND lists them, GET /logs/NNNN.txt fetches one
 //!   GET  /config          config.toml
 //!   PUT  /config          replace config.toml (checked first); applies on reboot
 //!   POST /ota             a new app image (`espflash save-image`): written to
@@ -15,6 +15,7 @@
 
 use std::fs;
 use std::io::Read as _;
+use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
@@ -23,6 +24,7 @@ use esp_idf_svc::http::server::{Configuration, EspHttpConnection, EspHttpServer,
 use esp_idf_svc::http::Method;
 use esp_idf_svc::io::Write;
 use esp_idf_svc::ota::EspOta;
+use open_oswst_core::logger;
 use open_oswst_core::mode::{self, Mode};
 
 use crate::devices::{settings, storage};
@@ -50,7 +52,10 @@ pub fn start(name: &str, mac: &str, wifi_off: Sender<()>) -> Option<EspHttpServe
     let (name, mac) = (name.to_string(), mac.to_string());
     let routes = server
         .fn_handler("/status", Method::Get, move |req| status(req, &name, &mac))
-        .and_then(|s| s.fn_handler("/logs", Method::Get, list_logs))
+        .and_then(|s| s.fn_handler("/logs", Method::Options, dav_options))
+        .and_then(|s| s.fn_handler("/logs/*", Method::Options, dav_options))
+        .and_then(|s| s.fn_handler("/logs", Method::Propfind, dav_propfind))
+        .and_then(|s| s.fn_handler("/logs/*", Method::Propfind, dav_propfind))
         .and_then(|s| s.fn_handler("/logs/*", Method::Get, get_log))
         .and_then(|s| s.fn_handler("/config", Method::Get, get_config))
         .and_then(|s| s.fn_handler("/config", Method::Put, put_config))
@@ -108,28 +113,92 @@ fn log_dir() -> String {
     format!("{}/log", storage::ROOT)
 }
 
-fn list_logs(req: Req) -> Result {
-    let mut files: Vec<(String, u64)> = fs::read_dir(log_dir())?
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            let size = entry.metadata().ok()?.len();
-            Some((entry.file_name().into_string().ok()?, size))
-        })
-        .collect();
-    files.sort();
-    let items: Vec<String> = files
-        .iter()
-        .map(|(name, size)| format!("{{\"name\":\"{}\",\"size\":{}}}", name, size))
-        .collect();
-    req.into_response(200, None, &[("Content-Type", "application/json")])?
-        .write_all(format!("[{}]\n", items.join(",")).as_bytes())?;
+// --- The logs, as a read-only WebDAV folder (RFC 4918) ---
+//
+// Any WebDAV client lists and copies them like a folder: a file manager at
+// dav://oswst-XXXX.local/logs/, davfs2, rclone. PROPFIND lists (sizes only:
+// the radio's clock isn't set to real time, so no dates), GET fetches. The
+// listing is written one entry at a time, never held whole.
+
+fn dav_options(req: Req) -> Result {
+    req.into_response(
+        200,
+        None,
+        &[("DAV", "1"), ("Allow", "OPTIONS, GET, PROPFIND")],
+    )?;
     Ok(())
+}
+
+/// PROPFIND /logs/ (Depth 0: the folder; otherwise the folder and its files)
+/// or PROPFIND /logs/NNNN.txt (that file)
+fn dav_propfind(req: Req) -> Result {
+    let name = req
+        .uri()
+        .trim_start_matches("/logs")
+        .trim_start_matches('/')
+        .to_string();
+    let depth_0 = req.header("Depth") == Some("0");
+    let dir = PathBuf::from(log_dir());
+
+    if !name.is_empty() {
+        let size = match plain_log_name(&name).then(|| fs::metadata(dir.join(&name))) {
+            Some(Ok(meta)) => meta.len(),
+            _ => {
+                req.into_status_response(404)?.write_all(b"no such log\n")?;
+                return Ok(());
+            }
+        };
+        let mut response = req.into_response(207, Some("Multi-Status"), DAV_XML)?;
+        response.write_all(DAV_START.as_bytes())?;
+        response.write_all(dav_file(&name, size).as_bytes())?;
+        response.write_all(DAV_END.as_bytes())?;
+        return Ok(());
+    }
+
+    let mut response = req.into_response(207, Some("Multi-Status"), DAV_XML)?;
+    response.write_all(DAV_START.as_bytes())?;
+    response.write_all(DAV_FOLDER.as_bytes())?;
+    if !depth_0 {
+        let mut numbers = logger::log_file_numbers(&dir);
+        numbers.sort_unstable();
+        for number in numbers {
+            let path = logger::log_path(&dir, number);
+            let size = fs::metadata(&path).map_or(0, |meta| meta.len());
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            response.write_all(dav_file(&name, size).as_bytes())?;
+        }
+    }
+    response.write_all(DAV_END.as_bytes())?;
+    Ok(())
+}
+
+const DAV_XML: &[(&str, &str)] = &[("Content-Type", "application/xml; charset=utf-8")];
+const DAV_START: &str =
+    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<D:multistatus xmlns:D=\"DAV:\">\n";
+const DAV_END: &str = "</D:multistatus>\n";
+const DAV_FOLDER: &str = "<D:response><D:href>/logs/</D:href><D:propstat><D:prop>\
+    <D:resourcetype><D:collection/></D:resourcetype></D:prop>\
+    <D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>\n";
+
+/// One file's entry in a PROPFIND reply
+fn dav_file(name: &str, size: u64) -> String {
+    format!(
+        "<D:response><D:href>/logs/{}</D:href><D:propstat><D:prop><D:resourcetype/>\
+         <D:getcontentlength>{}</D:getcontentlength>\
+         <D:getcontenttype>text/plain</D:getcontenttype></D:prop>\
+         <D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>\n",
+        name, size
+    )
+}
+
+/// Only plain file names: nothing outside the log directory
+fn plain_log_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains('/') && !name.contains("..")
 }
 
 fn get_log(req: Req) -> Result {
     let name = req.uri().trim_start_matches("/logs/").to_string();
-    // Only plain file names: nothing outside the log directory
-    if name.is_empty() || name.contains('/') || name.contains("..") {
+    if !plain_log_name(&name) {
         req.into_status_response(400)?
             .write_all(b"bad file name\n")?;
         return Ok(());
