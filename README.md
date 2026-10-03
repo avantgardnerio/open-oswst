@@ -180,7 +180,11 @@ curl -O http://$R/logs/0007.txt               # fetch one: a 25 KB log in under 
 curl http://$R/config                         # read config.toml
 curl -X PUT --data-binary @config.toml http://$R/config    # replace it (checked first); applies on reboot
 curl -X POST http://$R/reboot
+curl -X POST http://$R/wifi/off               # WiFi off until the next power cycle (for timing-sensitive tests)
 ```
+
+`/wifi/off` isn't saved: every boot starts with WiFi on again, so a power cycle always gets the radio back on the network. Once it's
+off, the radio can't be reached over WiFi until then.
 
 ### Update firmware over WiFi (OTA)
 

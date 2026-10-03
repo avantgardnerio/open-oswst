@@ -9,11 +9,14 @@
 //!   POST /ota             a new app image (`espflash save-image`): written to
 //!                         the spare OTA slot, then the board reboots into it
 //!   POST /reboot
+//!   POST /wifi/off        WiFi off until the next reboot (net.rs)
+//!   POST /noise/on|off    burst logging (radio.rs); off at every boot
 //!
 //! Handlers run on the server's own task, never the app's or the radio's.
 
 use std::fs;
 use std::io::Read as _;
+use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use esp_idf_svc::hal::cpu::Core;
@@ -23,7 +26,7 @@ use esp_idf_svc::io::Write;
 use esp_idf_svc::ota::EspOta;
 use open_oswst_core::mode::{self, Mode};
 
-use crate::devices::{settings, storage};
+use crate::devices::{radio, settings, storage};
 
 /// Request bodies and files go through this much at a time
 const CHUNK: usize = 4096;
@@ -34,7 +37,8 @@ type Req<'a, 'r> = Request<&'a mut EspHttpConnection<'r>>;
 type Result<T = ()> = std::result::Result<T, anyhow::Error>;
 
 /// Start the server. It runs until the returned server is dropped.
-pub fn start(name: &str, mac: &str) -> Option<EspHttpServer<'static>> {
+/// `wifi_off` tells the net thread to switch WiFi off.
+pub fn start(name: &str, mac: &str, wifi_off: Sender<()>) -> Option<EspHttpServer<'static>> {
     let config = Configuration {
         stack_size: 10240,
         core: Some(Core::Core0),
@@ -52,7 +56,14 @@ pub fn start(name: &str, mac: &str) -> Option<EspHttpServer<'static>> {
         .and_then(|s| s.fn_handler("/config", Method::Get, get_config))
         .and_then(|s| s.fn_handler("/config", Method::Put, put_config))
         .and_then(|s| s.fn_handler("/ota", Method::Post, ota))
-        .and_then(|s| s.fn_handler("/reboot", Method::Post, reboot));
+        .and_then(|s| s.fn_handler("/reboot", Method::Post, reboot))
+        .and_then(|s| s.fn_handler("/noise/on", Method::Post, |req| noise_logging(req, true)))
+        .and_then(|s| s.fn_handler("/noise/off", Method::Post, |req| noise_logging(req, false)))
+        .and_then(|s| {
+            s.fn_handler("/wifi/off", Method::Post, move |req| {
+                switch_wifi_off(req, &wifi_off)
+            })
+        });
     if let Err(e) = routes {
         log::error!("HTTP routes failed: {}", e);
         return None;
@@ -80,7 +91,7 @@ fn status(req: Req, name: &str, mac: &str) -> Result {
     let body = format!(
         concat!(
             "{{\"name\":\"{}\",\"mac\":\"{}\",\"firmware\":\"{}\",\"slot\":\"{}\",\"mode\":\"{}\",",
-            "\"uptime_s\":{},\"heap_free\":{},\"heap_min\":{}}}\n"
+            "\"uptime_s\":{},\"heap_free\":{},\"heap_min\":{},\"noise_log\":{}}}\n"
         ),
         name,
         mac,
@@ -89,7 +100,8 @@ fn status(req: Req, name: &str, mac: &str) -> Result {
         mode::get().name(),
         uptime_s,
         heap_free,
-        heap_min
+        heap_min,
+        radio::noise_logging()
     );
     req.into_response(200, None, &[("Content-Type", "application/json")])?
         .write_all(body.as_bytes())?;
@@ -225,6 +237,29 @@ fn reboot_soon() {
         std::thread::sleep(Duration::from_millis(500));
         unsafe { esp_idf_svc::sys::esp_restart() };
     });
+}
+
+/// Burst logging on or off, until the next reboot. The radio picks it up
+/// within 10 s; its log says "RX noise: logging on" when it does
+fn noise_logging(req: Req, on: bool) -> Result {
+    radio::set_noise_logging(on);
+    let reply = if on {
+        "ok, burst logging on until the next reboot\n"
+    } else {
+        "ok, burst logging off\n"
+    };
+    req.into_ok_response()?.write_all(reply.as_bytes())?;
+    Ok(())
+}
+
+/// Ask the net thread to switch WiFi off. It waits for this reply to go out
+/// first. Not saved: the next boot has WiFi on again
+fn switch_wifi_off(req: Req, wifi_off: &Sender<()>) -> Result {
+    log::info!("WiFi: switching off until the next reboot");
+    req.into_ok_response()?
+        .write_all(b"ok, WiFi off until the next reboot\n")?;
+    let _ = wifi_off.send(());
+    Ok(())
 }
 
 fn read_body(req: &mut Req, max: usize) -> Result<Vec<u8>> {

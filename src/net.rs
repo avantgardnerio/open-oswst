@@ -8,7 +8,12 @@
 //! nothing transmitted. ⚠️ WiFi beacons and probes are easy to
 //! direction-find. It's on whenever networks are configured, by choice,
 //! until the menus come back to switch it (see the wifi-ota plan).
+//!
+//! `POST /wifi/off` switches it off until the next reboot, for field tests:
+//! WiFi on core 0 costs the audio its timing. Nothing is saved, so a reboot
+//! always brings WiFi back (and with it, a way to reach the radio).
 
+use std::sync::mpsc;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -70,17 +75,32 @@ fn run(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
         .unwrap();
     wifi.start().unwrap();
 
-    // Kept alive for as long as this thread runs
-    let _mdns = announce(&name, &mac);
-    let _http = http::start(&name, &mac);
+    // /wifi/off sends on this. We keep a sender too, so the channel never
+    // closes even if the HTTP server failed to start
+    let (off_tx, off_rx) = mpsc::channel();
+    let mdns = announce(&name, &mac);
+    let http = http::start(&name, &mac, off_tx.clone());
 
     loop {
         if !wifi.is_connected().unwrap_or(false) {
             set_state(Network::Searching);
             join(&mut wifi, &networks);
         }
-        sleep(CHECK_EVERY);
+        if off_rx.recv_timeout(CHECK_EVERY).is_ok() {
+            break;
+        }
     }
+
+    // Give /wifi/off's reply time to get out, then stop everything
+    sleep(Duration::from_millis(500));
+    drop(http);
+    drop(mdns);
+    if let Err(e) = wifi.stop() {
+        log::warn!("WiFi: stop failed: {}", e);
+    }
+    set_state(Network::Off);
+    log::info!("WiFi: off until the next reboot (/wifi/off)");
+    drop(off_tx);
 }
 
 /// Join the first configured network that's in range.
