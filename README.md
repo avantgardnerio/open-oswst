@@ -177,8 +177,8 @@ R=oswst-0f5c.local
 curl http://$R/status                         # name, MAC, firmware (git hash), OTA slot, mode, uptime, heap
 gio list -l dav://$R/logs/                    # the logs are a WebDAV folder: also dav://… in a file manager
 curl -O http://$R/logs/0007.txt               # fetch one: a 25 KB log in under 0.1 s (vs ~80 s over USB)
-curl http://$R/config                         # read config.toml
-curl -X PUT --data-binary @config.toml http://$R/config    # replace it (checked first); applies on reboot
+curl -O http://$R/config.toml                 # read the settings (also a file in dav://$R/)
+curl -T config.toml http://$R/config.toml     # replace them (checked first); applies on reboot
 curl -X POST http://$R/reboot
 curl -X POST http://$R/wifi/off               # WiFi off until the next power cycle (for timing-sensitive tests)
 ```

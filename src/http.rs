@@ -2,10 +2,11 @@
 //! knowing the WiFi password is the security.
 //!
 //!   GET  /status          name, MAC, firmware, OTA slot, mode, uptime, heap (JSON)
-//!   /logs/                the log files, as a read-only WebDAV folder:
-//!                         PROPFIND lists them, GET /logs/NNNN.txt fetches one
-//!   GET  /config          config.toml
-//!   PUT  /config          replace config.toml (checked first); applies on reboot
+//!   /                     WebDAV (RFC 4918): the radio's settings and logs
+//!                         as a folder. PROPFIND lists, GET reads
+//!   /config.toml          the settings. PUT replaces them (checked first:
+//!                         a bad file is refused); they apply on reboot
+//!   /logs/NNNN.txt        the logs, read-only
 //!   POST /ota             a new app image (`espflash save-image`): written to
 //!                         the spare OTA slot, then the board reboots into it
 //!   POST /reboot
@@ -52,13 +53,17 @@ pub fn start(name: &str, mac: &str, wifi_off: Sender<()>) -> Option<EspHttpServe
     let (name, mac) = (name.to_string(), mac.to_string());
     let routes = server
         .fn_handler("/status", Method::Get, move |req| status(req, &name, &mac))
+        .and_then(|s| s.fn_handler("/", Method::Options, dav_options))
+        .and_then(|s| s.fn_handler("/", Method::Propfind, dav_propfind))
+        .and_then(|s| s.fn_handler("/config.toml", Method::Options, dav_options))
+        .and_then(|s| s.fn_handler("/config.toml", Method::Propfind, dav_propfind))
+        .and_then(|s| s.fn_handler("/config.toml", Method::Get, get_config))
+        .and_then(|s| s.fn_handler("/config.toml", Method::Put, put_config))
         .and_then(|s| s.fn_handler("/logs", Method::Options, dav_options))
         .and_then(|s| s.fn_handler("/logs/*", Method::Options, dav_options))
         .and_then(|s| s.fn_handler("/logs", Method::Propfind, dav_propfind))
         .and_then(|s| s.fn_handler("/logs/*", Method::Propfind, dav_propfind))
         .and_then(|s| s.fn_handler("/logs/*", Method::Get, get_log))
-        .and_then(|s| s.fn_handler("/config", Method::Get, get_config))
-        .and_then(|s| s.fn_handler("/config", Method::Put, put_config))
         .and_then(|s| s.fn_handler("/ota", Method::Post, ota))
         .and_then(|s| s.fn_handler("/reboot", Method::Post, reboot))
         .and_then(|s| {
@@ -113,59 +118,78 @@ fn log_dir() -> String {
     format!("{}/log", storage::ROOT)
 }
 
-// --- The logs, as a read-only WebDAV folder (RFC 4918) ---
+// --- WebDAV (RFC 4918): the settings and logs as a folder ---
 //
-// Any WebDAV client lists and copies them like a folder: a file manager at
-// dav://oswst-XXXX.local/logs/, davfs2, rclone. PROPFIND lists (sizes only:
-// the radio's clock isn't set to real time, so no dates), GET fetches. The
-// listing is written one entry at a time, never held whole.
+// Any WebDAV client sees the radio as a folder: a file manager at
+// dav://oswst-XXXX.local/, gio, davfs2, rclone.
+//   /              config.toml and logs/
+//   /config.toml   read, and replaced with PUT (checked first: put_config)
+//   /logs/         the logs, read-only
+// PROPFIND lists (names and sizes; no dates: the radio's clock isn't set to
+// real time, and they're optional), GET reads. Listings are written one entry
+// at a time, never held whole.
 
 fn dav_options(req: Req) -> Result {
-    req.into_response(
-        200,
-        None,
-        &[("DAV", "1"), ("Allow", "OPTIONS, GET, PROPFIND")],
-    )?;
+    let allow = if req.uri() == "/config.toml" {
+        "OPTIONS, GET, PUT, PROPFIND"
+    } else {
+        "OPTIONS, GET, PROPFIND"
+    };
+    req.into_response(200, None, &[("DAV", "1"), ("Allow", allow)])?;
     Ok(())
 }
 
-/// PROPFIND /logs/ (Depth 0: the folder; otherwise the folder and its files)
-/// or PROPFIND /logs/NNNN.txt (that file)
+/// PROPFIND on a folder (Depth 0: the folder alone; otherwise the folder
+/// and what's in it) or on one file
 fn dav_propfind(req: Req) -> Result {
-    let name = req
-        .uri()
-        .trim_start_matches("/logs")
-        .trim_start_matches('/')
-        .to_string();
+    let uri = req.uri().to_string();
     let depth_0 = req.header("Depth") == Some("0");
-    let dir = PathBuf::from(log_dir());
+    let logs = PathBuf::from(log_dir());
+    let config_size = || fs::metadata(settings::path()).map(|meta| meta.len()).ok();
 
-    if !name.is_empty() {
-        let size = match plain_log_name(&name).then(|| fs::metadata(dir.join(&name))) {
-            Some(Ok(meta)) => meta.len(),
-            _ => {
-                req.into_status_response(404)?.write_all(b"no such log\n")?;
-                return Ok(());
-            }
+    // One file: config.toml or a log
+    if uri == "/config.toml" || (uri.starts_with("/logs/") && uri.len() > "/logs/".len()) {
+        let size = if uri == "/config.toml" {
+            config_size()
+        } else {
+            let name = &uri["/logs/".len()..];
+            plain_log_name(name)
+                .then(|| fs::metadata(logs.join(name)).ok().map(|meta| meta.len()))
+                .flatten()
+        };
+        let Some(size) = size else {
+            req.into_status_response(404)?.write_all(b"not found\n")?;
+            return Ok(());
         };
         let mut response = req.into_response(207, Some("Multi-Status"), DAV_XML)?;
         response.write_all(DAV_START.as_bytes())?;
-        response.write_all(dav_file(&name, size).as_bytes())?;
+        response.write_all(dav_file(&uri, size).as_bytes())?;
         response.write_all(DAV_END.as_bytes())?;
         return Ok(());
     }
 
+    // A folder: the root or the logs
     let mut response = req.into_response(207, Some("Multi-Status"), DAV_XML)?;
     response.write_all(DAV_START.as_bytes())?;
-    response.write_all(DAV_FOLDER.as_bytes())?;
-    if !depth_0 {
-        let mut numbers = logger::log_file_numbers(&dir);
-        numbers.sort_unstable();
-        for number in numbers {
-            let path = logger::log_path(&dir, number);
-            let size = fs::metadata(&path).map_or(0, |meta| meta.len());
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            response.write_all(dav_file(&name, size).as_bytes())?;
+    if uri == "/" {
+        response.write_all(dav_folder("/").as_bytes())?;
+        if !depth_0 {
+            if let Some(size) = config_size() {
+                response.write_all(dav_file("/config.toml", size).as_bytes())?;
+            }
+            response.write_all(dav_folder("/logs/").as_bytes())?;
+        }
+    } else {
+        response.write_all(dav_folder("/logs/").as_bytes())?;
+        if !depth_0 {
+            let mut numbers = logger::log_file_numbers(&logs);
+            numbers.sort_unstable();
+            for number in numbers {
+                let path = logger::log_path(&logs, number);
+                let size = fs::metadata(&path).map_or(0, |meta| meta.len());
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                response.write_all(dav_file(&format!("/logs/{}", name), size).as_bytes())?;
+            }
         }
     }
     response.write_all(DAV_END.as_bytes())?;
@@ -176,18 +200,25 @@ const DAV_XML: &[(&str, &str)] = &[("Content-Type", "application/xml; charset=ut
 const DAV_START: &str =
     "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<D:multistatus xmlns:D=\"DAV:\">\n";
 const DAV_END: &str = "</D:multistatus>\n";
-const DAV_FOLDER: &str = "<D:response><D:href>/logs/</D:href><D:propstat><D:prop>\
-    <D:resourcetype><D:collection/></D:resourcetype></D:prop>\
-    <D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>\n";
 
-/// One file's entry in a PROPFIND reply
-fn dav_file(name: &str, size: u64) -> String {
+/// A folder's entry in a PROPFIND reply
+fn dav_folder(href: &str) -> String {
     format!(
-        "<D:response><D:href>/logs/{}</D:href><D:propstat><D:prop><D:resourcetype/>\
+        "<D:response><D:href>{}</D:href><D:propstat><D:prop>\
+         <D:resourcetype><D:collection/></D:resourcetype></D:prop>\
+         <D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>\n",
+        href
+    )
+}
+
+/// A file's entry in a PROPFIND reply
+fn dav_file(href: &str, size: u64) -> String {
+    format!(
+        "<D:response><D:href>{}</D:href><D:propstat><D:prop><D:resourcetype/>\
          <D:getcontentlength>{}</D:getcontentlength>\
          <D:getcontenttype>text/plain</D:getcontenttype></D:prop>\
          <D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>\n",
-        name, size
+        href, size
     )
 }
 
