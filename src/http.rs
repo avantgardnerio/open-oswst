@@ -1,14 +1,17 @@
 //! The HTTP API, on port 80 once WiFi is up (net.rs). No authentication:
 //! knowing the WiFi password is the security.
 //!
-//!   GET  /status          name, MAC, firmware, OTA slot, mode, uptime, heap (JSON)
-//!   /                     WebDAV (RFC 4918): the radio's settings and logs
-//!                         as a folder. PROPFIND lists, GET reads
+//!   GET  /status          name, MAC, firmware (and whether it's confirmed),
+//!                         OTA slot, mode, uptime, heap (JSON)
+//!   /                     WebDAV (RFC 4918): the radio's settings, firmware
+//!                         and logs as a folder. PROPFIND lists, GET reads
 //!   /config.toml          the settings. PUT replaces them (checked first:
 //!                         a bad file is refused); they apply on reboot
+//!   /firmware.bin         the app image running. PUT installs a new one
+//!                         (`espflash save-image`): written to the spare OTA
+//!                         slot, checked, then the board reboots into it;
+//!                         it must run a minute or the old one comes back
 //!   /logs/NNNN.txt        the logs, read-only
-//!   POST /ota             a new app image (`espflash save-image`): written to
-//!                         the spare OTA slot, then the board reboots into it
 //!   POST /reboot
 //!   POST /wifi/off        WiFi off until the next reboot (net.rs)
 //!
@@ -29,6 +32,7 @@ use open_oswst_core::logger;
 use open_oswst_core::mode::{self, Mode};
 
 use crate::devices::{settings, storage};
+use crate::firmware;
 
 /// Request bodies and files go through this much at a time
 const CHUNK: usize = 4096;
@@ -64,7 +68,10 @@ pub fn start(name: &str, mac: &str, wifi_off: Sender<()>) -> Option<EspHttpServe
         .and_then(|s| s.fn_handler("/logs", Method::Propfind, dav_propfind))
         .and_then(|s| s.fn_handler("/logs/*", Method::Propfind, dav_propfind))
         .and_then(|s| s.fn_handler("/logs/*", Method::Get, get_log))
-        .and_then(|s| s.fn_handler("/ota", Method::Post, ota))
+        .and_then(|s| s.fn_handler("/firmware.bin", Method::Options, dav_options))
+        .and_then(|s| s.fn_handler("/firmware.bin", Method::Propfind, dav_propfind))
+        .and_then(|s| s.fn_handler("/firmware.bin", Method::Get, get_firmware))
+        .and_then(|s| s.fn_handler("/firmware.bin", Method::Put, put_firmware))
         .and_then(|s| s.fn_handler("/reboot", Method::Post, reboot))
         .and_then(|s| {
             s.fn_handler("/wifi/off", Method::Post, move |req| {
@@ -99,6 +106,7 @@ fn status(req: Req, name: &str, mac: &str) -> Result {
         name,
         mac,
         firmware: &firmware,
+        firmware_state: firmware::state(),
         slot: &slot,
         mode: mode::get().name(),
         uptime_s,
@@ -119,6 +127,8 @@ struct Status<'a> {
     mac: &'a str,
     /// The build's git hash (-dirty if built with uncommitted changes)
     firmware: &'a str,
+    /// "valid", or "pending" for a new one not yet confirmed (firmware.rs)
+    firmware_state: &'static str,
     /// The app partition running: ota_0 or ota_1
     slot: &'a str,
     mode: &'static str,
@@ -135,15 +145,16 @@ fn log_dir() -> String {
 //
 // Any WebDAV client sees the radio as a folder: a file manager at
 // dav://oswst-XXXX.local/, gio, davfs2, rclone.
-//   /              config.toml and logs/
+//   /              config.toml, firmware.bin and logs/
 //   /config.toml   read, and replaced with PUT (checked first: put_config)
+//   /firmware.bin  the running app image; PUT installs one (put_firmware)
 //   /logs/         the logs, read-only
 // PROPFIND lists (names and sizes; no dates: the radio's clock isn't set to
 // real time, and they're optional), GET reads. Listings are written one entry
 // at a time, never held whole.
 
 fn dav_options(req: Req) -> Result {
-    let allow = if req.uri() == "/config.toml" {
+    let allow = if req.uri() == "/config.toml" || req.uri() == "/firmware.bin" {
         "OPTIONS, GET, PUT, PROPFIND"
     } else {
         "OPTIONS, GET, PROPFIND"
@@ -160,10 +171,13 @@ fn dav_propfind(req: Req) -> Result {
     let logs = PathBuf::from(log_dir());
     let config_size = || fs::metadata(settings::path()).map(|meta| meta.len()).ok();
 
-    // One file: config.toml or a log
-    if uri == "/config.toml" || (uri.starts_with("/logs/") && uri.len() > "/logs/".len()) {
+    // One file: config.toml, firmware.bin or a log
+    let is_log = uri.starts_with("/logs/") && uri.len() > "/logs/".len();
+    if uri == "/config.toml" || uri == "/firmware.bin" || is_log {
         let size = if uri == "/config.toml" {
             config_size()
+        } else if uri == "/firmware.bin" {
+            firmware::image_len().map(u64::from)
         } else {
             let name = &uri["/logs/".len()..];
             plain_log_name(name)
@@ -189,6 +203,9 @@ fn dav_propfind(req: Req) -> Result {
         if !depth_0 {
             if let Some(size) = config_size() {
                 response.write_all(dav_file("/config.toml", size).as_bytes())?;
+            }
+            if let Some(size) = firmware::image_len() {
+                response.write_all(dav_file("/firmware.bin", size.into()).as_bytes())?;
             }
             response.write_all(dav_folder("/logs/").as_bytes())?;
         }
@@ -304,8 +321,31 @@ fn put_config(mut req: Req) -> Result {
     Ok(())
 }
 
-/// Stream a new app image into the spare OTA slot, then reboot into it
-fn ota(mut req: Req) -> Result {
+/// The running app image, read straight from its slot: a backup, or the
+/// same build for another radio (PUT it there)
+fn get_firmware(req: Req) -> Result {
+    let Some(len) = firmware::image_len() else {
+        req.into_status_response(500)?
+            .write_all(b"can't read the running image\n")?;
+        return Ok(());
+    };
+    let mut response =
+        req.into_response(200, None, &[("Content-Type", "application/octet-stream")])?;
+    let mut buf = vec![0u8; CHUNK];
+    let mut offset = 0;
+    while offset < len as usize {
+        let n = CHUNK.min(len as usize - offset);
+        firmware::read(offset, &mut buf[..n])?;
+        response.write_all(&buf[..n])?;
+        offset += n;
+    }
+    Ok(())
+}
+
+/// Stream a new app image into the spare OTA slot, then reboot into it. It
+/// boots pending: if it doesn't run a minute, the bootloader goes back to
+/// this one (src/firmware.rs)
+fn put_firmware(mut req: Req) -> Result {
     log::info!("OTA: receiving an image");
     let mut ota = EspOta::new()?;
     let mut update = ota.initiate_update()?;

@@ -24,6 +24,10 @@ CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 
 # Disable SPI ISR in IRAM to enable async SPI trait (embedded_hal_async::spi::SpiDevice)
 # CONFIG_SPI_MASTER_ISR_IN_IRAM is not set
+# App rollback: a new app (PUT /firmware.bin) is pending until it has run a
+# minute (src/firmware.rs); a reboot before that and the bootloader goes
+# back to the previous one. A bootloader setting: needs one USB flash
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 # Quad-I/O flash: code and constants run from flash through a 16KB cache, and
 # a miss measured 3.67µs in DIO (src/bin/cache_miss.rs). QIO moves 4 bits per

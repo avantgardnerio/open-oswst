@@ -6,7 +6,7 @@ use embassy_futures::join::join3;
 use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::hal::task::block_on;
 use open_oswst::devices::{encoder, fem, gps, mic, ptt, radio, screen, settings, speaker, storage};
-use open_oswst::{board, net, thread};
+use open_oswst::{board, firmware, net, thread};
 use open_oswst_core::devices::network::Network;
 use open_oswst_core::platform::Platform;
 use open_oswst_core::{app, codec, logger, mode};
@@ -106,6 +106,7 @@ fn main() {
     // WiFi and the HTTP API, on core 0 at a low priority (only if networks
     // are configured)
     net::start(board.modem, wifi_networks, mac_str.to_string());
+    firmware::confirm_later();
 
     unsafe { esp_idf_svc::sys::vTaskPrioritySet(core::ptr::null_mut(), APP_PRIORITY as u32) };
     block_on(async {
