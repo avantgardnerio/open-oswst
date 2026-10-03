@@ -125,6 +125,7 @@ pub async fn init<P: Platform>(
         echo: Recorder::new(silence),
         // 3KB: on the heap, once. In the App it overflowed the main task's stack
         playback: Box::default(),
+        own_txid: None,
         last_activity: Instant::now(),
     };
 
@@ -159,6 +160,7 @@ struct App<P: Platform> {
 
     echo: Recorder,                // only used in echo mode
     playback: Box<PlaybackTiming>, // per received transmission, logged at its end
+    own_txid: Option<u8>,          // our last transmission's, so we ignore it relayed back
 
     last_activity: Instant, // last packet heard or sent: gates log flushes
 }
@@ -306,6 +308,16 @@ impl<P: Platform> App<P> {
             return;
         }
 
+        // Our own transmission, relayed back by a repeater
+        if Some(txid) == self.own_txid {
+            log::info!(
+                "RX txid={} seq={} is our own, relayed back: dropping",
+                txid,
+                seq
+            );
+            return;
+        }
+
         // Echo mode records live voice instead of playing it. Echoes are never
         // echoed, so they fall through and play like voice.
         if mode::get() == Mode::Echo && pkt_type == TYPE_VOICE {
@@ -341,9 +353,6 @@ impl<P: Platform> App<P> {
 
         let payload = &rx_pkt.data[HEADER_BYTES..];
 
-        // TODO: ignore our own txid. A repeater relays our last packets back
-        // after PTT release; we lock onto them and ignore the echo's replay
-        // (or anyone else) until RX_TIMEOUT.
         let verdict = self.rx.check(txid, seq);
         if let Verdict::OtherTxid { locked } = verdict {
             log::warn!("RX ignoring txid={} (locked to {})", txid, locked);
@@ -448,7 +457,9 @@ impl<P: Platform> App<P> {
         log::info!("ECHO replaying {} packets", packets.len());
         self.draw_tx_screen();
         // Drop anything heard while we transmit it, as it comes: like on_ptt
-        let replay = echo::replay(packets, random_txid::<P>());
+        let txid = random_txid::<P>();
+        self.own_txid = Some(txid);
+        let replay = echo::replay(packets, txid);
         if let Either::Second(()) = select(replay, discard_rx()).await {
             unreachable!("discard_rx never returns");
         }
@@ -461,6 +472,7 @@ impl<P: Platform> App<P> {
         self.rx.end();
 
         let txid = random_txid::<P>();
+        self.own_txid = Some(txid);
         log::info!("PTT pressed — streaming (txid={})", txid);
 
         self.draw_tx_screen();
