@@ -10,7 +10,6 @@ pub mod fec;
 pub mod logger;
 pub mod menu;
 pub mod mode;
-pub mod noise;
 pub mod packet;
 pub mod platform;
 pub mod playback_timing;

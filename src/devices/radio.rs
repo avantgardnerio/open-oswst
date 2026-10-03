@@ -1,5 +1,5 @@
 use core::fmt::Write as _;
-use embassy_futures::select::{select, select4, Either, Either4};
+use embassy_futures::select::{select, select3, Either, Either3};
 use esp_idf_svc::hal::gpio::{AnyIOPin, AnyInputPin, AnyOutputPin};
 use esp_idf_svc::hal::gpio::{Input, Output, Pin, PinDriver, Pull};
 use esp_idf_svc::hal::spi::config::Config as SpiConfig;
@@ -10,9 +10,8 @@ use lora_phy::mod_params::*;
 use lora_phy::mod_traits::IrqState;
 use lora_phy::sx126x::{self, Sx1262, Sx126x, TcxoCtrlVoltage};
 use lora_phy::LoRa;
-use open_oswst_core::noise::{NoiseMeter, SAMPLE_EVERY_MS};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 // The queues the app talks to; this driver connects them to the SX1262
@@ -58,20 +57,6 @@ const PACKET_END_WAIT: Duration = Duration::from_millis(60);
 /// How often to log the receiver's state. Matches the GPS log, so each check
 /// lines up with a position.
 const RX_STATE_EVERY_SECS: u64 = 10;
-
-/// Burst logging (an RSSI reading every ms, see core/src/noise.rs). OFF at
-/// every boot: with it on, the echo test broke while a repeater relayed
-/// (cause unknown). Switched over HTTP (/noise/on, /noise/off), not saved.
-/// Off, the radio does no readings at all: timing as without it.
-static NOISE_LOGGING: AtomicBool = AtomicBool::new(false);
-
-pub fn set_noise_logging(on: bool) {
-    NOISE_LOGGING.store(on, Ordering::Relaxed);
-}
-
-pub fn noise_logging() -> bool {
-    NOISE_LOGGING.load(Ordering::Relaxed)
-}
 
 pub struct Peripherals {
     pub spi: SPI2<'static>,
@@ -159,10 +144,6 @@ pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
         dio1_gpio,
         rx_buf: [0; 255],
         air: Air::Clear,
-        noise_logging: false,
-        noise: NoiseMeter::default(),
-        rssi_read_us: 0,
-        rssi_reads: 0,
     };
     async move { driver.run().await }
 }
@@ -177,13 +158,6 @@ struct Driver {
     dio1_gpio: i32,        // DIO1 pad, read by the IRQ stall log
     rx_buf: [u8; 255],
     air: Air,
-    /// Whether burst logging is on, as this loop last saw NOISE_LOGGING
-    noise_logging: bool,
-    /// Interference bursts, from an RSSI reading every ms while the air is clear
-    noise: NoiseMeter,
-    /// Time spent on those readings this window: what they cost the radio
-    rssi_read_us: i64,
-    rssi_reads: u32,
 }
 
 /// What's on the air, as far as this radio can tell
@@ -198,52 +172,28 @@ enum Air {
 
 impl Driver {
     /// Listen, and handle whichever comes first: an IRQ from the radio, a
-    /// packet to send, the periodic RX state check, or a noise reading.
+    /// packet to send, or the periodic RX state check.
     async fn run(&mut self) {
         self.enter_rx().await;
         self.log_rx_state().await;
-        // Fixed deadlines, not a fresh timer each pass: busy RX would keep
+        // A fixed deadline, not a fresh 10s timer each pass: busy RX would keep
         // resetting that one and the check would never run
         let every = embassy_time::Duration::from_secs(RX_STATE_EVERY_SECS);
         let mut next_rx_state = embassy_time::Instant::now() + every;
-        let sample_every = embassy_time::Duration::from_millis(SAMPLE_EVERY_MS);
-        let mut next_sample = embassy_time::Instant::now() + sample_every;
 
         loop {
-            // Picked up within 10 s of the switch: the RX state timer always
-            // comes round
-            if noise_logging() != self.noise_logging {
-                self.switch_noise_logging(noise_logging());
-                next_sample = embassy_time::Instant::now() + sample_every;
-            }
-            let logging = self.noise_logging;
-            let sample_due = async {
-                if logging {
-                    embassy_time::Timer::at(next_sample).await
-                } else {
-                    core::future::pending().await
-                }
-            };
-
-            match select4(
+            match select3(
                 self.lora.wait_for_irq(),
                 TX_CHAN.receive(),
                 embassy_time::Timer::at(next_rx_state),
-                sample_due,
             )
             .await
             {
-                Either4::First(irq) => self.on_irq(irq).await,
-                Either4::Second(tx_req) => self.on_tx(tx_req).await,
-                Either4::Third(()) => {
+                Either3::First(irq) => self.on_irq(irq).await,
+                Either3::Second(tx_req) => self.on_tx(tx_req).await,
+                Either3::Third(()) => {
                     next_rx_state += every;
                     self.on_rx_state_due().await;
-                }
-                Either4::Fourth(()) => {
-                    // After a TX or a slow IRQ, skip the readings missed
-                    // rather than take them all at once
-                    next_sample = (next_sample + sample_every).max(embassy_time::Instant::now());
-                    self.on_sample_due().await;
                 }
             }
         }
@@ -264,8 +214,6 @@ impl Driver {
         };
         let state = self.lora.get_irq_state().await;
         self.air = Air::after(&state);
-        // A packet is arriving: the "burst" the noise meter is in is it
-        self.noise.interrupted();
         match state {
             Ok(Some(IrqState::PreambleReceived)) => log::info!("RX preamble"),
             Ok(Some(IrqState::HeaderValid)) => log::info!("RX header"),
@@ -404,8 +352,6 @@ impl Driver {
     async fn transmit(&mut self, data: &[u8]) {
         log::info!("TX start [{}B]", data.len());
         TX_SINCE_MS.store(uptime_ms(), Ordering::Relaxed);
-        // Our own TX isn't interference, and we can't listen during it
-        self.noise.interrupted();
         let start = Instant::now();
         self.lora.enter_standby().await.unwrap();
         let standby_us = start.elapsed().as_micros();
@@ -432,49 +378,12 @@ impl Driver {
         TX_SINCE_MS.store(0, Ordering::Relaxed);
     }
 
-    /// Burst logging switched on or off: start a fresh meter either way, so
-    /// a window never mixes the two
-    fn switch_noise_logging(&mut self, on: bool) {
-        log::info!("RX noise: logging {}", if on { "on" } else { "off" });
-        self.noise_logging = on;
-        self.noise = NoiseMeter::default();
-        self.rssi_read_us = 0;
-        self.rssi_reads = 0;
-    }
-
     /// Time for the periodic RX state log. Mid-packet the reading would be
-    /// the packet, not the noise floor, so skip it then. The burst summary
-    /// covers the whole 10 s, so it's logged either way.
+    /// the packet, not the noise floor, so skip it then.
     async fn on_rx_state_due(&mut self) {
         if self.air.busy_until().is_none() {
             self.log_rx_state().await;
         }
-        if !self.noise_logging {
-            return;
-        }
-        log::info!(
-            "RX noise: {} read_avg={}us",
-            self.noise,
-            self.rssi_read_us / self.rssi_reads.max(1) as i64
-        );
-        self.noise.next_window();
-        self.rssi_read_us = 0;
-        self.rssi_reads = 0;
-    }
-
-    /// One reading for the noise meter, if the air is clear: with a packet on
-    /// the air we'd be measuring the packet.
-    async fn on_sample_due(&mut self) {
-        if self.air.busy_until().is_some() {
-            return;
-        }
-        let start = uptime_us();
-        match self.lora.get_rssi().await {
-            Ok(rssi) => self.noise.sample(rssi),
-            Err(e) => log::error!("RX noise: RSSI read failed: {:?}", e),
-        }
-        self.rssi_read_us += uptime_us() - start;
-        self.rssi_reads += 1;
     }
 
     async fn enter_rx(&mut self) {
