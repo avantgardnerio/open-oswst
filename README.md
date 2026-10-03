@@ -166,44 +166,45 @@ after boot. If a radio doesn't show up:
 - check that avahi-browse ran at all. Don't pipe its errors into grep: if it isn't installed, `2>&1 | grep` prints nothing,
   which looks exactly like "no radios"
 - last resort, scan the subnet for the API:
-  `for i in $(seq 1 254); do curl -s -m 1 http://192.168.0.$i/status | grep -q mac && echo 192.168.0.$i & done; wait`
+  `for i in $(seq 1 254); do curl -s -m 1 http://192.168.0.$i/api/status | grep -q mac && echo 192.168.0.$i & done; wait`
 
 ### Talk to a radio
 
-The HTTP API (`src/http.rs`), port 80, no password (the WiFi password is the security):
+Port 80, no password (the WiFi password is the security). `/fs/` is the radio's storage as a read-write WebDAV folder
+(`src/webdav.rs`): open `dav://oswst-XXXX.local/fs/` in a file manager, or:
 
 ```bash
 R=oswst-0f5c.local
-curl http://$R/status                         # name, MAC, firmware (git hash, confirmed?), OTA slot, mode, uptime, heap
-gio list -l dav://$R/logs/                    # the logs are a WebDAV folder: also dav://… in a file manager
-curl -O http://$R/logs/0007.txt               # fetch one: a 25 KB log in under 0.1 s (vs ~80 s over USB)
-curl -O http://$R/config.toml                 # read the settings (also a file in dav://$R/)
-curl -T config.toml http://$R/config.toml     # replace them (checked first); applies on reboot
-curl -X POST http://$R/reboot
-curl -X POST http://$R/wifi/off               # WiFi off until the next power cycle (for timing-sensitive tests)
+curl http://$R/api/status                     # name, MAC, firmware (git hash, confirmed?), OTA slot, mode, uptime, heap
+gio list -l dav://$R/fs/log/                  # after `gio mount dav://$R/fs/`
+curl -O http://$R/fs/log/0007.txt             # fetch a log: 25 KB in under 0.1 s (vs ~80 s over USB)
+curl -O http://$R/fs/config.toml              # the settings
+curl -T config.toml http://$R/fs/config.toml  # replace them (checked first: a bad file is refused); apply on reboot
+curl -X POST http://$R/api/reboot
+curl -X POST http://$R/api/wifi/off           # WiFi off until the next power cycle (for timing-sensitive tests)
 ```
 
-`/wifi/off` isn't saved: every boot starts with WiFi on again, so a power cycle always gets the radio back on the network. Once it's
+`/api/wifi/off` isn't saved: every boot starts with WiFi on again, so a power cycle always gets the radio back on the network. Once it's
 off, the radio can't be reached over WiFi until then.
 
 ### Update firmware over WiFi (OTA)
 
-Build, save an app image, and put it on the radio as `firmware.bin` (a file in its WebDAV folder: a file manager or `gio copy` works
-too). The radio writes it to its spare slot and reboots into it (~2 MB in 10–13 s, back up ~4 s later). `/status` then shows the
-new git hash, the other slot and `"firmware_state":"pending"`: a new app must run a minute (then `valid`), or the radio goes back to
-the old one. `GET /firmware.bin` downloads the app a radio is running.
+Build, save an app image, put it on the radio as `/fs/firmware.bin` (an ordinary file: a file manager works too), then
+`POST /api/ota`: the radio copies it into its spare slot and reboots into it (back up in ~15 s). `/api/status` then shows the new
+git hash, the other slot and `"firmware_state":"pending"`: a new app must run a minute (then `valid`), or the radio goes back to the
+old one. `GET /api/firmware` downloads the app a radio is running.
 
 ```bash
 . ~/export-esp.sh && cargo build
 espflash save-image --chip esp32s3 target/xtensa-esp32s3-espidf/debug/open-oswst app.bin
-curl -T app.bin http://oswst-0f5c.local/firmware.bin
+curl -T app.bin http://oswst-0f5c.local/fs/firmware.bin && curl -X POST http://oswst-0f5c.local/api/ota
 ```
 
 Every radio found:
 
 ```bash
 for host in $(avahi-browse -rtp _oswst._tcp | grep "^=" | cut -d';' -f7 | sort -u); do
-    curl -T app.bin http://$host/firmware.bin
+    curl -T app.bin http://$host/fs/firmware.bin && curl -X POST http://$host/api/ota
 done
 ```
 
