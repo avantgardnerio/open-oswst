@@ -19,8 +19,24 @@ use esp_idf_svc::mdns::EspMdns;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::wifi::{AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi};
 
+use std::sync::Mutex;
+
+use open_oswst_core::devices::network::Network;
+
 use crate::devices::settings::WifiNetwork;
 use crate::{http, thread};
+
+/// Where the WiFi is at, for the screen (Platform::network). Off until
+/// `start` finds networks configured.
+static STATE: Mutex<Network> = Mutex::new(Network::Off);
+
+pub fn state() -> Network {
+    STATE.lock().unwrap().clone()
+}
+
+fn set_state(network: Network) {
+    *STATE.lock().unwrap() = network;
+}
 
 /// How often to check the connection, and rejoin if it's gone
 const CHECK_EVERY: Duration = Duration::from_secs(10);
@@ -34,6 +50,7 @@ pub fn start(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
         log::info!("WiFi: no networks in config.toml, staying off");
         return;
     }
+    set_state(Network::Searching);
     thread::spawn(c"net", 8192, Some(PRIORITY), Some(Core::Core0), move || {
         run(modem, networks, mac)
     });
@@ -59,6 +76,7 @@ fn run(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
 
     loop {
         if !wifi.is_connected().unwrap_or(false) {
+            set_state(Network::Searching);
             join(&mut wifi, &networks);
         }
         sleep(CHECK_EVERY);
@@ -105,6 +123,9 @@ fn join(wifi: &mut BlockingWifi<EspWifi<'static>>, networks: &[WifiNetwork]) {
                     ap.signal_strength,
                     ip
                 );
+                set_state(Network::Joined(
+                    network.ssid.as_str().try_into().unwrap_or_default(),
+                ));
                 return;
             }
             Err(e) => {

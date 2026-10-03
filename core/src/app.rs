@@ -1,6 +1,7 @@
 use crate::devices::gps::{Fix, Gps};
 use crate::devices::knob::{Event as Knob, Knob as _};
 use crate::devices::mic::Mic;
+use crate::devices::network::Network;
 use crate::devices::ptt::Ptt;
 use crate::devices::radio::{RxPacket, TxRequest, RX_CHAN, TX_CHAN};
 use crate::devices::screen::{Frame, Screen};
@@ -103,6 +104,7 @@ pub async fn init<P: Platform>(
         screen,
         gps,
         shown_fix: None,
+        shown_network: Network::Off,
         last_gps_log: None,
         // Last 3 bytes are enough to tell our boards apart, and leave room for the time
         short_mac: heapless::String::try_from(&mac_str[mac_str.len() - 8..]).unwrap(),
@@ -136,6 +138,7 @@ struct App<P: Platform> {
     screen: Screen,
     gps: P::Gps,
     shown_fix: Option<Fix>, // what the screen shows, to redraw when it changes
+    shown_network: Network, // likewise
     last_gps_log: Option<(Instant, bool)>, // when, and whether it had a position
     short_mac: heapless::String<8>, // e.g. A2:C6:2C
     settings: Option<P::Settings>, // None if they couldn't be opened
@@ -230,7 +233,8 @@ impl<P: Platform> App<P> {
 
         // Idle: keep the clock and position on screen current
         let receiving = self.rx.txid().is_some() || self.echo.txid().is_some();
-        if !receiving && self.gps.latest() != self.shown_fix {
+        if !receiving && (self.gps.latest() != self.shown_fix || P::network() != self.shown_network)
+        {
             self.draw_rx_screen();
         }
 
@@ -570,6 +574,19 @@ impl<P: Platform> App<P> {
         Text::new("RX Listening", Point::new(28, 40), self.style)
             .draw(&mut frame)
             .unwrap();
+
+        let network = P::network();
+        let mut line = heapless::String::<40>::new();
+        let _ = match &network {
+            Network::Off => write!(line, "WiFi: off"),
+            Network::Searching => write!(line, "WiFi: searching"),
+            Network::Joined(ssid) => write!(line, "WiFi: {}", ssid),
+        };
+        Text::new(&line, Point::new(1, 51), self.style)
+            .draw(&mut frame)
+            .unwrap();
+        self.shown_network = network;
+
         self.draw_status(&mut frame);
         self.screen.show(frame);
     }
@@ -635,18 +652,27 @@ impl<P: Platform> App<P> {
         self.screen.show(frame);
     }
 
-    /// Bottom line of the RX screens: volume, and LOCKED when locked.
+    /// Bottom line of the RX screens: volume (and LOCKED when locked), and
+    /// the mode on the right.
     fn draw_status(&self, frame: &mut Frame) {
-        let mut vol = heapless::String::<8>::new();
-        let _ = core::fmt::write(&mut vol, format_args!("Vol {}", speaker::volume()));
-        Text::new(&vol, Point::new(1, 62), self.style)
+        let mut left = heapless::String::<16>::new();
+        let _ = write!(left, "Vol {}", speaker::volume());
+        if self.locked {
+            let _ = write!(left, " LOCKED");
+        }
+        Text::new(&left, Point::new(1, 62), self.style)
             .draw(frame)
             .unwrap();
-        if self.locked {
-            Text::new("LOCKED", Point::new(91, 62), self.style)
-                .draw(frame)
-                .unwrap();
+
+        // The mode, right-aligned (6px per character)
+        let mut mode = heapless::String::<8>::new();
+        for c in mode::get().name().chars() {
+            let _ = mode.push(c.to_ascii_uppercase());
         }
+        let x = 128 - 6 * mode.len() as i32 - 1;
+        Text::new(&mode, Point::new(x, 62), self.style)
+            .draw(frame)
+            .unwrap();
     }
 
     /// Title, then up to 4 rows; the cursor row is inverted, current values get a *.

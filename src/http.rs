@@ -1,7 +1,7 @@
 //! The HTTP API, on port 80 once WiFi is up (net.rs). No authentication:
 //! knowing the WiFi password is the security.
 //!
-//!   GET  /status          name, MAC, firmware, mode, uptime, heap (JSON)
+//!   GET  /status          name, MAC, firmware, OTA slot, mode, uptime, heap (JSON)
 //!   GET  /logs            the log files on /data/log, with sizes (JSON)
 //!   GET  /logs/NNNN.txt   one log file
 //!   GET  /config          config.toml
@@ -62,12 +62,16 @@ pub fn start(name: &str, mac: &str) -> Option<EspHttpServer<'static>> {
 }
 
 fn status(req: Req, name: &str, mac: &str) -> Result {
-    let (firmware, uptime_s, heap_free, heap_min) = unsafe {
+    let (firmware, slot, uptime_s, heap_free, heap_min) = unsafe {
         use esp_idf_svc::sys::*;
         let app = &*esp_app_get_description();
         let version = core::ffi::CStr::from_ptr(app.version.as_ptr()).to_string_lossy();
+        // Which app partition is running: ota_0 or ota_1
+        let running = &*esp_ota_get_running_partition();
+        let slot = core::ffi::CStr::from_ptr(running.label.as_ptr()).to_string_lossy();
         (
             version.into_owned(),
+            slot.into_owned(),
             esp_timer_get_time() / 1_000_000,
             esp_get_free_heap_size(),
             esp_get_minimum_free_heap_size(),
@@ -75,12 +79,13 @@ fn status(req: Req, name: &str, mac: &str) -> Result {
     };
     let body = format!(
         concat!(
-            "{{\"name\":\"{}\",\"mac\":\"{}\",\"firmware\":\"{}\",\"mode\":\"{}\",",
+            "{{\"name\":\"{}\",\"mac\":\"{}\",\"firmware\":\"{}\",\"slot\":\"{}\",\"mode\":\"{}\",",
             "\"uptime_s\":{},\"heap_free\":{},\"heap_min\":{}}}\n"
         ),
         name,
         mac,
         firmware,
+        slot,
         mode::get().name(),
         uptime_s,
         heap_free,

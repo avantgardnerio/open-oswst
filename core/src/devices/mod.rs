@@ -4,6 +4,7 @@
 pub mod gps;
 pub mod knob;
 pub mod mic;
+pub mod network;
 pub mod ptt;
 pub mod radio;
 pub mod screen;

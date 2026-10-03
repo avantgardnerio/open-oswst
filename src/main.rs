@@ -7,6 +7,7 @@ use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::hal::task::block_on;
 use open_oswst::devices::{encoder, fem, gps, mic, ptt, radio, screen, settings, speaker, storage};
 use open_oswst::{board, net, thread};
+use open_oswst_core::devices::network::Network;
 use open_oswst_core::platform::Platform;
 use open_oswst_core::{app, codec, logger, mode};
 use std::path::Path;
@@ -27,6 +28,10 @@ impl Platform for Esp {
 
     fn random() -> u32 {
         unsafe { esp_idf_svc::sys::esp_random() }
+    }
+
+    fn network() -> Network {
+        net::state()
     }
 }
 
