@@ -7,6 +7,13 @@
 //! marker records the gap in the file.
 //!
 //! Line format matches ESP-IDF's: `I (12345) target: message`.
+//!
+//! Files rotate the usual way: a new one per boot, `NNNN.txt`, numbered one
+//! past the newest; a file that reaches MAX_FILE_BYTES continues in the next
+//! number (its first line says so). The oldest are deleted to keep at most
+//! MAX_FILES and the storage under MAX_USED_PERCENT full, and empty files
+//! (boots that never wrote a line) are dropped. A boot loop once left 300+
+//! files, and listing them ran the HTTP server out of memory.
 
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use std::collections::VecDeque;
@@ -22,6 +29,10 @@ const BUFFER_BYTES: usize = 16 * 1024;
 const CHUNK_BYTES: usize = 512;
 /// Delete old log files until the partition is below this full
 const MAX_USED_PERCENT: usize = 80;
+/// A file this big continues in the next one: a walk (~500KB) is 2-3 files
+const MAX_FILE_BYTES: u64 = 256 * 1024;
+/// Most log files kept
+const MAX_FILES: usize = 50;
 
 /// Milliseconds since boot, for the line timestamps. Set by `init`
 static UPTIME_MS: OnceLock<fn() -> u32> = OnceLock::new();
@@ -30,7 +41,17 @@ struct Logger {
     serial_level: LevelFilter,
     file_level: LevelFilter,
     buffer: Mutex<Buffer>,
-    file: Mutex<Option<File>>,
+    file: Mutex<Option<LogFile>>,
+}
+
+/// The file being written, and what rotating it needs
+struct LogFile {
+    file: File,
+    dir: PathBuf,
+    number: u32,
+    bytes: u64,
+    /// The storage's (used, total) bytes
+    usage: fn() -> (usize, usize),
 }
 
 struct Buffer {
@@ -62,25 +83,18 @@ pub fn init(uptime_ms: fn() -> u32) {
     log::set_max_level(LOGGER.serial_level.max(LOGGER.file_level));
 }
 
-/// Start this boot's log file, `dir/NNNN.txt`, numbered one past the newest.
-/// Clears out the oldest files first while `usage()` (used, total bytes) says
-/// the storage is filling up.
-pub fn open_file(dir: &Path, usage: impl Fn() -> (usize, usize)) -> std::io::Result<PathBuf> {
+/// Start this boot's log file, `dir/NNNN.txt`, numbered one past the newest,
+/// after dropping empty files and making room. `usage` gives the storage's
+/// (used, total) bytes.
+pub fn open_file(dir: &Path, usage: fn() -> (usize, usize)) -> std::io::Result<PathBuf> {
     fs::create_dir_all(dir)?;
     let mut numbers = log_file_numbers(dir);
     numbers.sort_unstable();
-    for oldest in numbers.clone() {
-        let (used, total) = usage();
-        if total == 0 || used * 100 / total < MAX_USED_PERCENT {
-            break;
-        }
-        let _ = fs::remove_file(log_path(dir, oldest));
-        numbers.retain(|&n| n != oldest);
-    }
-    let path = log_path(dir, numbers.last().map_or(1, |newest| newest + 1));
-
-    let file = OpenOptions::new().create(true).append(true).open(&path)?;
-    *LOGGER.file.lock().unwrap() = Some(file);
+    drop_empty_logs(dir, &mut numbers);
+    let number = numbers.last().map_or(1, |newest| newest + 1);
+    let log_file = LogFile::start(dir, number, usage)?;
+    let path = log_path(dir, number);
+    *LOGGER.file.lock().unwrap() = Some(log_file);
     Ok(path)
 }
 
@@ -112,12 +126,75 @@ pub fn flush_chunk() -> bool {
     let mut file = LOGGER.file.lock().unwrap();
     if let Some(file) = file.as_mut() {
         if dropped > 0 {
-            let _ = writeln!(file, "-- {} lines dropped (log buffer full) --", dropped);
+            let marker = format!("-- {} lines dropped (log buffer full) --\n", dropped);
+            let _ = file.write(marker.as_bytes());
         }
-        let _ = file.write_all(&chunk);
-        let _ = file.sync_all();
+        let _ = file.write(&chunk);
     }
     more
+}
+
+impl LogFile {
+    /// Make room, then create file `number`
+    fn start(dir: &Path, number: u32, usage: fn() -> (usize, usize)) -> std::io::Result<Self> {
+        let mut numbers = log_file_numbers(dir);
+        numbers.sort_unstable();
+        make_room(dir, &mut numbers, usage);
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path(dir, number))?;
+        Ok(LogFile {
+            file,
+            dir: dir.to_path_buf(),
+            number,
+            bytes: 0,
+            usage,
+        })
+    }
+
+    /// Append and sync. A file that has reached MAX_FILE_BYTES continues in
+    /// the next number, starting with a line that says where it came from
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        if self.bytes >= MAX_FILE_BYTES {
+            let previous = self.number;
+            *self = LogFile::start(&self.dir, previous + 1, self.usage)?;
+            let continued = format!("-- continued from {:04}.txt --\n", previous);
+            self.file.write_all(continued.as_bytes())?;
+            self.bytes += continued.len() as u64;
+        }
+        self.file.write_all(bytes)?;
+        self.file.sync_all()?;
+        self.bytes += bytes.len() as u64;
+        Ok(())
+    }
+}
+
+/// Delete the oldest files (`numbers` sorted, oldest first) until there's room
+/// for one more under MAX_FILES, and the storage is under MAX_USED_PERCENT full
+fn make_room(dir: &Path, numbers: &mut Vec<u32>, usage: fn() -> (usize, usize)) {
+    while let Some(&oldest) = numbers.first() {
+        let (used, total) = usage();
+        let full = total > 0 && used * 100 / total >= MAX_USED_PERCENT;
+        if numbers.len() < MAX_FILES && !full {
+            break;
+        }
+        let _ = fs::remove_file(log_path(dir, oldest));
+        numbers.remove(0);
+    }
+}
+
+/// A boot that never wrote a line (it crashed or lost power first) leaves an
+/// empty file; a boot loop leaves hundreds. Delete them
+fn drop_empty_logs(dir: &Path, numbers: &mut Vec<u32>) {
+    numbers.retain(|&number| {
+        let path = log_path(dir, number);
+        let empty = fs::metadata(&path).is_ok_and(|meta| meta.len() == 0);
+        if empty {
+            let _ = fs::remove_file(&path);
+        }
+        !empty
+    });
 }
 
 impl Log for Logger {
@@ -180,4 +257,92 @@ fn log_file_numbers(dir: &Path) -> Vec<u32> {
             name.strip_suffix(".txt")?.parse().ok()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh directory for one test
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("oswst-log-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn sorted_numbers(dir: &Path) -> Vec<u32> {
+        let mut numbers = log_file_numbers(dir);
+        numbers.sort_unstable();
+        numbers
+    }
+
+    fn plenty_of_space() -> (usize, usize) {
+        (0, 100)
+    }
+
+    fn storage_full() -> (usize, usize) {
+        (90, 100)
+    }
+
+    #[test]
+    fn empty_files_are_dropped() {
+        let dir = test_dir("empty");
+        fs::write(log_path(&dir, 1), b"").unwrap();
+        fs::write(log_path(&dir, 2), b"I (1) a: line\n").unwrap();
+        fs::write(log_path(&dir, 3), b"").unwrap();
+        let mut numbers = vec![1, 2, 3];
+        drop_empty_logs(&dir, &mut numbers);
+        assert_eq!(numbers, [2]);
+        assert_eq!(sorted_numbers(&dir), [2]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn at_most_max_files_the_oldest_go() {
+        let dir = test_dir("count");
+        for n in 1..=60 {
+            fs::write(log_path(&dir, n), b"x\n").unwrap();
+        }
+        LogFile::start(&dir, 61, plenty_of_space).unwrap();
+        let numbers = sorted_numbers(&dir);
+        assert_eq!(numbers.len(), MAX_FILES);
+        assert_eq!(*numbers.first().unwrap(), 61 - MAX_FILES as u32 + 1);
+        assert_eq!(*numbers.last().unwrap(), 61);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_full_storage_is_cleared_down_to_the_newest() {
+        let dir = test_dir("space");
+        for n in 1..=5 {
+            fs::write(log_path(&dir, n), b"x\n").unwrap();
+        }
+        // usage() never drops below the cap here, so everything old goes
+        LogFile::start(&dir, 6, storage_full).unwrap();
+        assert_eq!(sorted_numbers(&dir), [6]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_full_file_continues_in_the_next() {
+        let dir = test_dir("rotate");
+        let mut log = LogFile::start(&dir, 7, plenty_of_space).unwrap();
+        let chunk = vec![b'x'; 100 * 1024];
+        // Three chunks: 300KB, past the cap, but a file is only checked
+        // before a write, so 7 takes them all
+        for _ in 0..3 {
+            log.write(&chunk).unwrap();
+        }
+        assert_eq!(sorted_numbers(&dir), [7]);
+        assert_eq!(fs::metadata(log_path(&dir, 7)).unwrap().len(), 300 * 1024);
+        // The next write starts 8, which says where it came from
+        log.write(&chunk).unwrap();
+        assert_eq!(sorted_numbers(&dir), [7, 8]);
+        let next = fs::read(log_path(&dir, 8)).unwrap();
+        assert!(next.starts_with(b"-- continued from 0007.txt --\n"));
+        log.write(&chunk).unwrap();
+        assert_eq!(sorted_numbers(&dir), [7, 8]); // 8 isn't full yet
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }
