@@ -1243,6 +1243,8 @@ dependencies = [
  "log",
  "lora-phy",
  "open-oswst-core",
+ "serde",
+ "serde_json",
  "ssd1306",
  "toml",
 ]

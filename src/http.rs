@@ -95,23 +95,36 @@ fn status(req: Req, name: &str, mac: &str) -> Result {
             esp_get_minimum_free_heap_size(),
         )
     };
-    let body = format!(
-        concat!(
-            "{{\"name\":\"{}\",\"mac\":\"{}\",\"firmware\":\"{}\",\"slot\":\"{}\",\"mode\":\"{}\",",
-            "\"uptime_s\":{},\"heap_free\":{},\"heap_min\":{}}}\n"
-        ),
+    let status = Status {
         name,
         mac,
-        firmware,
-        slot,
-        mode::get().name(),
+        firmware: &firmware,
+        slot: &slot,
+        mode: mode::get().name(),
         uptime_s,
         heap_free,
-        heap_min
-    );
+        heap_min,
+    };
+    let mut body = serde_json::to_vec(&status)?;
+    body.push(b'\n');
     req.into_response(200, None, &[("Content-Type", "application/json")])?
-        .write_all(body.as_bytes())?;
+        .write_all(&body)?;
     Ok(())
+}
+
+/// What GET /status answers, as JSON
+#[derive(serde::Serialize)]
+struct Status<'a> {
+    name: &'a str,
+    mac: &'a str,
+    /// The build's git hash (-dirty if built with uncommitted changes)
+    firmware: &'a str,
+    /// The app partition running: ota_0 or ota_1
+    slot: &'a str,
+    mode: &'static str,
+    uptime_s: i64,
+    heap_free: u32,
+    heap_min: u32,
 }
 
 fn log_dir() -> String {
