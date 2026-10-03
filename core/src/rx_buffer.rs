@@ -24,8 +24,12 @@ pub struct RxBuffer<T> {
 pub enum Verdict {
     /// Decode it and `insert` the audio
     Take,
-    /// Already played, or a duplicate: drop it
+    /// Already played: drop it
     Old(i8),
+    /// Its audio is already decoded and waiting: a second copy (direct, then
+    /// a repeater's relay ~80ms later). Drop it rather than decode it again:
+    /// decoding every packet twice kept the codec ~85% busy
+    Duplicate,
     /// Someone else, while we're locked to `locked`: drop it
     OtherTxid { locked: u8 },
     /// Too far from what we expected: probably a corrupt header. Drop it
@@ -92,6 +96,8 @@ impl<T> RxBuffer<T> {
         self.impossible_in_a_row = 0;
         if diff < 0 {
             Verdict::Old(diff)
+        } else if self.slots[seq as usize].is_some() {
+            Verdict::Duplicate
         } else {
             Verdict::Take
         }
@@ -159,6 +165,21 @@ mod tests {
     use super::*;
 
     const TXID: u8 = 43;
+
+    #[test]
+    fn a_second_copy_waiting_is_a_duplicate() {
+        let mut rx = RxBuffer::<u32>::default();
+        assert_eq!(rx.check(TXID, 0), Verdict::Take);
+        assert_eq!(rx.insert(TXID, 0, 100), None); // waits for a second packet
+                                                   // The repeater's relay of seq 0 arrives before it has played
+        assert_eq!(rx.check(TXID, 0), Verdict::Duplicate);
+        assert_eq!(rx.check(TXID, 1), Verdict::Take);
+        assert_eq!(rx.insert(TXID, 1, 101), Some(100)); // playback starts
+                                                        // Played now: its copy is old, not a duplicate
+        assert_eq!(rx.check(TXID, 0), Verdict::Old(-1));
+        // seq 1 is still waiting
+        assert_eq!(rx.check(TXID, 1), Verdict::Duplicate);
+    }
 
     /// What came out of the speaker, one entry per 160ms packet slot
     #[derive(Debug, PartialEq, Clone, Copy)]

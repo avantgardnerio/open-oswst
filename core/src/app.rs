@@ -349,6 +349,10 @@ impl<P: Platform> App<P> {
                 log::info!("RX seq={} old (diff={}), dropping", seq, diff);
                 return;
             }
+            Verdict::Duplicate => {
+                log::info!("RX seq={} duplicate, dropping", seq);
+                return;
+            }
             Verdict::Corrupt(diff) => {
                 log::warn!(
                     "RX seq={} impossible (diff={}), dropping as corrupt",
