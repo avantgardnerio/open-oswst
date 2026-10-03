@@ -1,27 +1,25 @@
 //! CAD bench, for the frequency-hopping design: an idle radio finds a
 //! transmission by sweeping 50 channels with channel activity detection
-//! (CAD). Two questions decide whether that works:
+//! (CAD). A sweep must fit inside a wake-up preamble, which the 0.4s dwell
+//! limit caps, so one channel check has to cost under ~8ms.
 //!
-//! 1. Does the SX1262's CAD notice a packet in the middle of its payload, or
-//!    only its preamble? Payload: a sweep catches a late joiner within a few
-//!    packets. Preamble only: it takes 10-20.
-//! 2. What does checking one channel cost us: retune, CAD, read the result?
-//!    50 of those is one sweep.
+//! Found so far (lora-rs 43e89d5): CAD sees preambles only, never payload;
+//! 2 symbols at peak 22 is the fastest setting with no false alarms. A
+//! retune is one command (retune_for_cad, ~0.6ms), but every CAD ends with
+//! the chip in STDBY_RC, which stops the TCXO, so the next CAD waits for it
+//! to start again: lora-phy's default wait is 10ms.
+//!
+//! This run: how short can the TCXO wait be? For each of TCXO_WAKEUPS, the
+//! radio is re-initialized with it, then checks channels for REPORT_EVERY.
+//! The time per check shows what it saves; the hit rate on the busy channel
+//! shows whether the radio still detects reliably (a TCXO that hasn't
+//! settled would cost detections).
 //!
 //! Two roles, by MAC:
-//! - TRANSMITTER sends long packets back to back on BUSY_HZ: ~400ms each, of
-//!   which only ~12ms is preamble, so the channel carries payload ~97% of
-//!   the time
+//! - TRANSMITTER sends tiny packets back to back on BUSY_HZ: about half of
+//!   each is preamble, so CAD has plenty to find
 //! - every other board alternates CAD checks on BUSY_HZ and on EMPTY_HZ
-//!   (nobody transmits there) and logs, every 10s, the hit rate on each and
-//!   how long a check took
-//!
-//! Reading it: CAD that sees payload hits BUSY_HZ ~95% of the time. CAD that
-//! sees only preambles hits ~5%. EMPTY_HZ shows the false alarms.
-//!
-//! lora-phy's CAD listens for 8 symbols (~8.2ms at SF7/125k); it isn't
-//! configurable. The hopping math assumed 2 (Semtech's suggestion for SF7):
-//! if the hit rate is good, a shorter CAD is the next thing to try.
+//!   (nobody transmits there: false alarms)
 //!
 //! Desk only: the boards are close, so the signal is strong. How CAD does
 //! near the edge (low SNR) needs distance or attenuators.
@@ -32,17 +30,13 @@
 //! Watch: python3 scripts/boot-log.py <PORT> 60
 
 use esp_idf_svc::hal::cpu::Core;
-use esp_idf_svc::hal::gpio::{PinDriver, Pull};
-use esp_idf_svc::hal::spi::config::Config as SpiConfig;
-use esp_idf_svc::hal::spi::{SpiDeviceDriver, SpiDriver, SpiDriverConfig};
 use esp_idf_svc::hal::task::block_on;
 use esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration;
-use esp_idf_svc::hal::units::Hertz;
-use lora_phy::iv::GenericSx126xInterfaceVariant;
 use lora_phy::mod_params::*;
-use lora_phy::sx126x::{self, Sx1262, Sx126x, TcxoCtrlVoltage};
+use lora_phy::sx126x::{self, CADSymbols, Sx1262, Sx126x, TcxoCtrlVoltage};
 use lora_phy::LoRa;
 use open_oswst::board;
+use open_oswst::devices::radio_bus::{self, RadioSpi};
 use open_oswst::devices::{fem, radio};
 use std::time::{Duration, Instant};
 
@@ -58,22 +52,23 @@ const EMPTY_HZ: u32 = 921_000_000;
 const PREAMBLE_SYMBOLS: u16 = 12;
 /// The lowest the SX1262 allows. The FEM adds ~13dB: plenty across a desk
 const TX_POWER_DBM: i32 = -9;
-/// The longest packet: ~400ms on air at SF7/125k
-const PAYLOAD_BYTES: usize = 255;
+/// Tiny packets: ~26ms on air, ~12ms of it preamble
+const PAYLOAD_BYTES: usize = 2;
 
-const REPORT_EVERY: Duration = Duration::from_secs(10);
+const REPORT_EVERY: Duration = Duration::from_secs(5);
 
-type Radio = LoRa<
-    Sx126x<
-        SpiDeviceDriver<'static, SpiDriver<'static>>,
-        GenericSx126xInterfaceVariant<
-            PinDriver<'static, esp_idf_svc::hal::gpio::Output>,
-            PinDriver<'static, esp_idf_svc::hal::gpio::Input>,
-        >,
-        Sx1262,
-    >,
-    embassy_time::Delay,
->;
+/// CAD: 2 symbols, detection peak 22, minimum 10. From a sweep of settings
+/// (lora-rs 43e89d5): half the time of lora-phy's default (8, 20, 10), no
+/// false alarms. No setting saw payload, only preambles
+const CAD_SETTINGS: (CADSymbols, u8, u8) = (CADSymbols::_2, 22, 10);
+
+/// TCXO start-up waits to try, us. lora-phy's default is 10ms; Semtech's
+/// reference design uses 5
+const TCXO_WAKEUPS: [u32; 3] = [10_000, 2_000, 1_000];
+
+/// On our own SPI bus and pin interrupts (devices::radio_bus), not
+/// esp-idf-hal's
+type Radio = LoRa<Sx126x<RadioSpi, radio_bus::Interface, Sx1262>, embassy_time::Delay>;
 
 fn main() {
     esp_idf_svc::sys::link_patches();
@@ -150,28 +145,37 @@ async fn transmit(lora: &mut Radio) {
     }
 }
 
-/// CAD on the busy channel, then the empty one, over and over
+/// For each TCXO wait in turn: re-initialize the radio with it, then CAD on
+/// the busy channel and the empty one, over and over, for REPORT_EVERY
 async fn scan(lora: &mut Radio) {
     let channels = [
         ("busy ", modulation(lora, BUSY_HZ)),
         ("empty", modulation(lora, EMPTY_HZ)),
     ];
     let mut stats = [Stats::new(), Stats::new()];
-    let mut since = Instant::now();
     loop {
-        for ((_, mdltn), stats) in channels.iter().zip(stats.iter_mut()) {
-            // The retune: what moving to the next channel costs
-            let started = Instant::now();
-            lora.prepare_for_cad(mdltn).await.unwrap();
-            let retuned = Instant::now();
-            let hit = lora.cad(mdltn).await.unwrap();
-            stats.record(hit, retuned - started, retuned.elapsed());
-        }
-        if since.elapsed() >= REPORT_EVERY {
+        for wakeup_us in TCXO_WAKEUPS {
+            lora.radio_kind_mut().set_tcxo_wakeup_us(wakeup_us);
+            lora.init().await.unwrap();
+            let (symbols, det_peak, det_min) = CAD_SETTINGS;
+            lora.radio_kind_mut()
+                .set_cad_params(symbols, det_peak, det_min);
+            lora.prepare_for_cad(&channels[0].1).await.unwrap();
+            log::info!("TCXO wake-up: {}us", wakeup_us);
+
+            let since = Instant::now();
+            while since.elapsed() < REPORT_EVERY {
+                for ((_, mdltn), stats) in channels.iter().zip(stats.iter_mut()) {
+                    let started = Instant::now();
+                    lora.retune_for_cad(mdltn.frequency_in_hz).await.unwrap();
+                    let retuned = Instant::now();
+                    let hit = lora.cad(mdltn).await.unwrap();
+                    stats.record(hit, retuned - started, retuned.elapsed());
+                }
+            }
             for ((name, _), stats) in channels.iter().zip(stats.iter_mut()) {
                 stats.log_and_reset(name);
             }
-            since = Instant::now();
         }
     }
 }
@@ -242,23 +246,9 @@ fn modulation(lora: &mut Radio, hz: u32) -> ModulationParams {
     .unwrap()
 }
 
-/// The same radio setup as devices::radio
+/// The same radio setup as devices::radio, on devices::radio_bus
 async fn new_radio(p: radio::Peripherals) -> Radio {
-    let spi = SpiDeviceDriver::new_single(
-        p.spi,
-        p.sck,
-        p.mosi,
-        Some(p.miso),
-        Some(p.nss),
-        &SpiDriverConfig::new(),
-        &SpiConfig::new().baudrate(Hertz(2_000_000)),
-    )
-    .unwrap();
-    let reset = PinDriver::output(p.reset).unwrap();
-    let dio1 = PinDriver::input(p.dio1, Pull::Floating).unwrap();
-    let busy = PinDriver::input(p.busy, Pull::Floating).unwrap();
-    let rf_switch_tx = p.rf_switch_tx.map(|pin| PinDriver::output(pin).unwrap());
-    let iv = GenericSx126xInterfaceVariant::new(reset, dio1, busy, None, rf_switch_tx).unwrap();
+    let (spi, iv) = radio_bus::take(p);
     let config = sx126x::Config {
         chip: Sx1262,
         tcxo_ctrl: Some(TcxoCtrlVoltage::Ctrl1V7),
