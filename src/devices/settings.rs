@@ -16,6 +16,8 @@
 use std::fs;
 use std::io::ErrorKind;
 
+use open_oswst_core::mode::Mode;
+
 use crate::devices::storage;
 
 const FILE: &str = "config.toml";
@@ -63,6 +65,20 @@ pub fn replace(text: &str) -> std::io::Result<()> {
     let new = format!("{}.new", path);
     fs::write(&new, text)?;
     fs::rename(&new, &path)
+}
+
+/// Can this firmware use `text` as its config? It must parse as TOML, and a
+/// mode, if there is one, must be one we know. A file that fails is refused
+/// (webdav.rs), and the old one stays
+pub fn check(text: &str) -> Result<(), String> {
+    let table = text.parse::<toml::Table>().map_err(|e| e.to_string())?;
+    match table
+        .get("mode")
+        .map(|mode| mode.as_str().and_then(Mode::from_name))
+    {
+        Some(None) => Err("mode must be normal, repeater or echo".to_string()),
+        _ => Ok(()),
+    }
 }
 
 impl Settings {

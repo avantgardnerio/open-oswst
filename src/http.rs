@@ -1,25 +1,21 @@
 //! The HTTP API, on port 80 once WiFi is up (net.rs). No authentication:
 //! knowing the WiFi password is the security.
 //!
-//!   GET  /status          name, MAC, firmware (and whether it's confirmed),
+//!   GET  /api/status      name, MAC, firmware (and whether it's confirmed),
 //!                         OTA slot, mode, uptime, heap (JSON)
-//!   /                     WebDAV (RFC 4918): the radio's settings, firmware
-//!                         and logs as a folder. PROPFIND lists, GET reads
-//!   /config.toml          the settings. PUT replaces them (checked first:
-//!                         a bad file is refused); they apply on reboot
-//!   /firmware.bin         the app image running. PUT installs a new one
-//!                         (`espflash save-image`): written to the spare OTA
-//!                         slot, checked, then the board reboots into it;
-//!                         it must run a minute or the old one comes back
-//!   /logs/NNNN.txt        the logs, read-only
-//!   POST /reboot
-//!   POST /wifi/off        WiFi off until the next reboot (net.rs)
+//!   POST /api/ota         install /data/firmware.bin (`espflash save-image`,
+//!                         put there over /fs/): into the spare app slot,
+//!                         checked, then reboot. It must run a minute or the
+//!                         old one comes back (firmware.rs)
+//!   GET  /api/firmware    download the app image running
+//!   POST /api/reboot
+//!   POST /api/wifi/off    WiFi off until the next reboot (net.rs)
+//!   /fs/...               the storage (/data) as a WebDAV folder, read and
+//!                         write: config.toml, log/, anything (webdav.rs)
 //!
 //! Handlers run on the server's own task, never the app's or the radio's.
 
-use std::fs;
-use std::io::Read as _;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
@@ -27,17 +23,13 @@ use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::http::server::{Configuration, EspHttpConnection, EspHttpServer, Request};
 use esp_idf_svc::http::Method;
 use esp_idf_svc::io::Write;
-use esp_idf_svc::ota::EspOta;
-use open_oswst_core::logger;
-use open_oswst_core::mode::{self, Mode};
+use open_oswst_core::mode;
 
-use crate::devices::{settings, storage};
-use crate::firmware;
+use crate::devices::storage;
+use crate::{firmware, webdav};
 
-/// Request bodies and files go through this much at a time
+/// Files go through this much at a time
 const CHUNK: usize = 4096;
-/// The biggest config.toml accepted
-const MAX_CONFIG: usize = 16 * 1024;
 
 type Req<'a, 'r> = Request<&'a mut EspHttpConnection<'r>>;
 type Result<T = ()> = std::result::Result<T, anyhow::Error>;
@@ -56,28 +48,19 @@ pub fn start(name: &str, mac: &str, wifi_off: Sender<()>) -> Option<EspHttpServe
         .ok()?;
     let (name, mac) = (name.to_string(), mac.to_string());
     let routes = server
-        .fn_handler("/status", Method::Get, move |req| status(req, &name, &mac))
-        .and_then(|s| s.fn_handler("/", Method::Options, dav_options))
-        .and_then(|s| s.fn_handler("/", Method::Propfind, dav_propfind))
-        .and_then(|s| s.fn_handler("/config.toml", Method::Options, dav_options))
-        .and_then(|s| s.fn_handler("/config.toml", Method::Propfind, dav_propfind))
-        .and_then(|s| s.fn_handler("/config.toml", Method::Get, get_config))
-        .and_then(|s| s.fn_handler("/config.toml", Method::Put, put_config))
-        .and_then(|s| s.fn_handler("/logs", Method::Options, dav_options))
-        .and_then(|s| s.fn_handler("/logs/*", Method::Options, dav_options))
-        .and_then(|s| s.fn_handler("/logs", Method::Propfind, dav_propfind))
-        .and_then(|s| s.fn_handler("/logs/*", Method::Propfind, dav_propfind))
-        .and_then(|s| s.fn_handler("/logs/*", Method::Get, get_log))
-        .and_then(|s| s.fn_handler("/firmware.bin", Method::Options, dav_options))
-        .and_then(|s| s.fn_handler("/firmware.bin", Method::Propfind, dav_propfind))
-        .and_then(|s| s.fn_handler("/firmware.bin", Method::Get, get_firmware))
-        .and_then(|s| s.fn_handler("/firmware.bin", Method::Put, put_firmware))
-        .and_then(|s| s.fn_handler("/reboot", Method::Post, reboot))
+        .fn_handler("/api/status", Method::Get, move |req| {
+            status(req, &name, &mac)
+        })
+        .and_then(|s| s.fn_handler("/api/ota", Method::Post, ota))
+        .and_then(|s| s.fn_handler("/api/firmware", Method::Get, download_firmware))
+        .and_then(|s| s.fn_handler("/api/reboot", Method::Post, reboot))
         .and_then(|s| {
-            s.fn_handler("/wifi/off", Method::Post, move |req| {
+            s.fn_handler("/api/wifi/off", Method::Post, move |req| {
                 switch_wifi_off(req, &wifi_off)
             })
-        });
+        })
+        .map(|_| ())
+        .and_then(|()| webdav::register(&mut server));
     if let Err(e) = routes {
         log::error!("HTTP routes failed: {}", e);
         return None;
@@ -137,193 +120,31 @@ struct Status<'a> {
     heap_min: u32,
 }
 
-fn log_dir() -> String {
-    format!("{}/log", storage::ROOT)
-}
-
-// --- WebDAV (RFC 4918): the settings and logs as a folder ---
-//
-// Any WebDAV client sees the radio as a folder: a file manager at
-// dav://oswst-XXXX.local/, gio, davfs2, rclone.
-//   /              config.toml, firmware.bin and logs/
-//   /config.toml   read, and replaced with PUT (checked first: put_config)
-//   /firmware.bin  the running app image; PUT installs one (put_firmware)
-//   /logs/         the logs, read-only
-// PROPFIND lists (names and sizes; no dates: the radio's clock isn't set to
-// real time, and they're optional), GET reads. Listings are written one entry
-// at a time, never held whole.
-
-fn dav_options(req: Req) -> Result {
-    let allow = if req.uri() == "/config.toml" || req.uri() == "/firmware.bin" {
-        "OPTIONS, GET, PUT, PROPFIND"
-    } else {
-        "OPTIONS, GET, PROPFIND"
-    };
-    req.into_response(200, None, &[("DAV", "1"), ("Allow", allow)])?;
-    Ok(())
-}
-
-/// PROPFIND on a folder (Depth 0: the folder alone; otherwise the folder
-/// and what's in it) or on one file
-fn dav_propfind(req: Req) -> Result {
-    let uri = req.uri().to_string();
-    let depth_0 = req.header("Depth") == Some("0");
-    let logs = PathBuf::from(log_dir());
-    let config_size = || fs::metadata(settings::path()).map(|meta| meta.len()).ok();
-
-    // One file: config.toml, firmware.bin or a log
-    let is_log = uri.starts_with("/logs/") && uri.len() > "/logs/".len();
-    if uri == "/config.toml" || uri == "/firmware.bin" || is_log {
-        let size = if uri == "/config.toml" {
-            config_size()
-        } else if uri == "/firmware.bin" {
-            firmware::image_len().map(u64::from)
-        } else {
-            let name = &uri["/logs/".len()..];
-            plain_log_name(name)
-                .then(|| fs::metadata(logs.join(name)).ok().map(|meta| meta.len()))
-                .flatten()
-        };
-        let Some(size) = size else {
-            req.into_status_response(404)?.write_all(b"not found\n")?;
-            return Ok(());
-        };
-        let mut response = req.into_response(207, Some("Multi-Status"), DAV_XML)?;
-        response.write_all(DAV_START.as_bytes())?;
-        response.write_all(dav_file(&uri, size).as_bytes())?;
-        response.write_all(DAV_END.as_bytes())?;
-        return Ok(());
-    }
-
-    // A folder: the root or the logs
-    let mut response = req.into_response(207, Some("Multi-Status"), DAV_XML)?;
-    response.write_all(DAV_START.as_bytes())?;
-    if uri == "/" {
-        response.write_all(dav_folder("/").as_bytes())?;
-        if !depth_0 {
-            if let Some(size) = config_size() {
-                response.write_all(dav_file("/config.toml", size).as_bytes())?;
-            }
-            if let Some(size) = firmware::image_len() {
-                response.write_all(dav_file("/firmware.bin", size.into()).as_bytes())?;
-            }
-            response.write_all(dav_folder("/logs/").as_bytes())?;
-        }
-    } else {
-        response.write_all(dav_folder("/logs/").as_bytes())?;
-        if !depth_0 {
-            let mut numbers = logger::log_file_numbers(&logs);
-            numbers.sort_unstable();
-            for number in numbers {
-                let path = logger::log_path(&logs, number);
-                let size = fs::metadata(&path).map_or(0, |meta| meta.len());
-                let name = path.file_name().unwrap_or_default().to_string_lossy();
-                response.write_all(dav_file(&format!("/logs/{}", name), size).as_bytes())?;
-            }
-        }
-    }
-    response.write_all(DAV_END.as_bytes())?;
-    Ok(())
-}
-
-const DAV_XML: &[(&str, &str)] = &[("Content-Type", "application/xml; charset=utf-8")];
-const DAV_START: &str =
-    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<D:multistatus xmlns:D=\"DAV:\">\n";
-const DAV_END: &str = "</D:multistatus>\n";
-
-/// A folder's entry in a PROPFIND reply
-fn dav_folder(href: &str) -> String {
-    format!(
-        "<D:response><D:href>{}</D:href><D:propstat><D:prop>\
-         <D:resourcetype><D:collection/></D:resourcetype></D:prop>\
-         <D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>\n",
-        href
-    )
-}
-
-/// A file's entry in a PROPFIND reply
-fn dav_file(href: &str, size: u64) -> String {
-    format!(
-        "<D:response><D:href>{}</D:href><D:propstat><D:prop><D:resourcetype/>\
-         <D:getcontentlength>{}</D:getcontentlength>\
-         <D:getcontenttype>text/plain</D:getcontenttype></D:prop>\
-         <D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>\n",
-        href, size
-    )
-}
-
-/// Only plain file names: nothing outside the log directory
-fn plain_log_name(name: &str) -> bool {
-    !name.is_empty() && !name.contains('/') && !name.contains("..")
-}
-
-fn get_log(req: Req) -> Result {
-    let name = req.uri().trim_start_matches("/logs/").to_string();
-    if !plain_log_name(&name) {
-        req.into_status_response(400)?
-            .write_all(b"bad file name\n")?;
-        return Ok(());
-    }
-    let Ok(mut file) = fs::File::open(format!("{}/{}", log_dir(), name)) else {
-        req.into_status_response(404)?.write_all(b"no such log\n")?;
-        return Ok(());
-    };
-    let mut resp = req.into_response(200, None, &[("Content-Type", "text/plain")])?;
-    let mut buf = vec![0u8; CHUNK];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            return Ok(());
-        }
-        resp.write_all(&buf[..n])?;
-    }
-}
-
-fn get_config(req: Req) -> Result {
-    match fs::read_to_string(settings::path()) {
-        Ok(text) => req
-            .into_response(200, None, &[("Content-Type", "text/plain")])?
-            .write_all(text.as_bytes())?,
-        Err(_) => req
-            .into_status_response(404)?
-            .write_all(b"no config.toml\n")?,
-    }
-    Ok(())
-}
-
-/// Replace config.toml, but only with one that parses and has a known mode
-fn put_config(mut req: Req) -> Result {
-    let body = read_body(&mut req, MAX_CONFIG)?;
-    let checked = std::str::from_utf8(&body)
-        .map_err(|e| e.to_string())
-        .and_then(|text| {
-            let table = text.parse::<toml::Table>().map_err(|e| e.to_string())?;
-            match table
-                .get("mode")
-                .map(|mode| mode.as_str().and_then(Mode::from_name))
-            {
-                Some(None) => Err("mode must be normal, repeater or echo".to_string()),
-                _ => Ok(text),
-            }
-        });
-    match checked {
-        Ok(text) => {
-            settings::replace(text)?;
-            log::info!("HTTP: config.toml replaced ({} bytes)", text.len());
+/// Install /data/firmware.bin (put it there over WebDAV first), then reboot
+/// into it. It boots pending: if it doesn't run a minute, the bootloader goes
+/// back to the app running now (firmware.rs). The file stays
+fn ota(req: Req) -> Result {
+    let image = Path::new(storage::ROOT).join("firmware.bin");
+    log::info!("OTA: installing {}", image.display());
+    match firmware::install(&image) {
+        Ok(size) => {
+            log::info!("OTA: {} bytes installed, rebooting into them", size);
             req.into_ok_response()?
-                .write_all(b"saved, applies on reboot (POST /reboot)\n")?;
+                .write_all(format!("ok, {} bytes, rebooting\n", size).as_bytes())?;
+            reboot_soon();
         }
         Err(e) => {
+            log::warn!("OTA: failed: {}", e);
             req.into_status_response(400)?
-                .write_all(format!("rejected: {}\n", e).as_bytes())?;
+                .write_all(format!("not installed: {}\n", e).as_bytes())?;
         }
     }
     Ok(())
 }
 
 /// The running app image, read straight from its slot: a backup, or the
-/// same build for another radio (PUT it there)
-fn get_firmware(req: Req) -> Result {
+/// same build for another radio (put it there as /fs/firmware.bin)
+fn download_firmware(req: Req) -> Result {
     let Some(len) = firmware::image_len() else {
         req.into_status_response(500)?
             .write_all(b"can't read the running image\n")?;
@@ -339,38 +160,6 @@ fn get_firmware(req: Req) -> Result {
         response.write_all(&buf[..n])?;
         offset += n;
     }
-    Ok(())
-}
-
-/// Stream a new app image into the spare OTA slot, then reboot into it. It
-/// boots pending: if it doesn't run a minute, the bootloader goes back to
-/// this one (src/firmware.rs)
-fn put_firmware(mut req: Req) -> Result {
-    log::info!("OTA: receiving an image");
-    let mut ota = EspOta::new()?;
-    let mut update = ota.initiate_update()?;
-    let mut buf = vec![0u8; CHUNK];
-    let mut total = 0usize;
-    loop {
-        let n = match req.read(&mut buf) {
-            Ok(n) => n,
-            Err(e) => {
-                update.abort()?;
-                return Err(e.into());
-            }
-        };
-        if n == 0 {
-            break;
-        }
-        update.write(&buf[..n])?;
-        total += n;
-    }
-    // complete() checks the image before marking the slot to boot
-    update.complete()?;
-    log::info!("OTA: {} bytes written, rebooting into them", total);
-    req.into_ok_response()?
-        .write_all(format!("ok, {} bytes, rebooting\n", total).as_bytes())?;
-    reboot_soon();
     Ok(())
 }
 
@@ -396,19 +185,4 @@ fn switch_wifi_off(req: Req, wifi_off: &Sender<()>) -> Result {
         .write_all(b"ok, WiFi off until the next reboot\n")?;
     let _ = wifi_off.send(());
     Ok(())
-}
-
-fn read_body(req: &mut Req, max: usize) -> Result<Vec<u8>> {
-    let mut body = Vec::new();
-    let mut buf = [0u8; 512];
-    loop {
-        let n = req.read(&mut buf)?;
-        if n == 0 {
-            return Ok(body);
-        }
-        if body.len() + n > max {
-            anyhow::bail!("body over {} bytes", max);
-        }
-        body.extend_from_slice(&buf[..n]);
-    }
 }

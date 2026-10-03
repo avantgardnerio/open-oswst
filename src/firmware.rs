@@ -1,7 +1,8 @@
 //! The app image this radio is running, and the rollback that guards new ones.
 //!
 //! The flash holds two app slots (ota_0, ota_1). A new app goes into the one
-//! not running (http.rs, PUT /firmware.bin) and the bootloader boots it next.
+//! not running (`install`: POST /api/ota copies /data/firmware.bin there) and
+//! the bootloader boots it next.
 //! With rollback on (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE), a new app starts
 //! out pending: if the radio reboots for any reason before the app confirms
 //! itself, the bootloader goes back to the previous app. The app confirms
@@ -9,8 +10,11 @@
 //! boot-loops undoes itself, and a radio updated over WiFi can't be lost to a
 //! bad build. (One that runs but misbehaves past a minute is on us.)
 
+use std::io::Read as _;
+use std::path::Path;
 use std::time::Duration;
 
+use esp_idf_svc::ota::EspOta;
 use esp_idf_svc::sys::*;
 
 /// How long a new app must run before it's kept
@@ -26,6 +30,33 @@ pub fn confirm_later() {
             log::info!("Firmware: running {:?}, confirmed", CONFIRM_AFTER);
         }
     });
+}
+
+/// Copy an app image file (`espflash save-image`) into the spare app slot.
+/// ESP-IDF checks it before marking the slot to boot, so a bad file leaves
+/// the running app as it is. Returns the image's size; the caller reboots
+pub fn install(image: &Path) -> anyhow::Result<usize> {
+    let mut file = std::fs::File::open(image)?;
+    let mut ota = EspOta::new()?;
+    let mut update = ota.initiate_update()?;
+    let mut buf = vec![0u8; 4096];
+    let mut total = 0;
+    loop {
+        let n = match file.read(&mut buf) {
+            Ok(n) => n,
+            Err(e) => {
+                update.abort()?;
+                return Err(e.into());
+            }
+        };
+        if n == 0 {
+            break;
+        }
+        update.write(&buf[..n])?;
+        total += n;
+    }
+    update.complete()?;
+    Ok(total)
 }
 
 /// The running app's state: "valid" (confirmed, or flashed over USB),
