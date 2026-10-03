@@ -174,7 +174,7 @@ The HTTP API (`src/http.rs`), port 80, no password (the WiFi password is the sec
 
 ```bash
 R=oswst-0f5c.local
-curl http://$R/status                         # name, MAC, firmware (git hash), OTA slot, mode, uptime, heap
+curl http://$R/status                         # name, MAC, firmware (git hash, confirmed?), OTA slot, mode, uptime, heap
 gio list -l dav://$R/logs/                    # the logs are a WebDAV folder: also dav://… in a file manager
 curl -O http://$R/logs/0007.txt               # fetch one: a 25 KB log in under 0.1 s (vs ~80 s over USB)
 curl -O http://$R/config.toml                 # read the settings (also a file in dav://$R/)
@@ -188,20 +188,22 @@ off, the radio can't be reached over WiFi until then.
 
 ### Update firmware over WiFi (OTA)
 
-Build, save an app image, and post it. The radio writes it to its spare slot and reboots into it (~2 MB in 10–13 s, back up ~4 s
-later). `/status` then shows the new git hash and the other slot.
+Build, save an app image, and put it on the radio as `firmware.bin` (a file in its WebDAV folder: a file manager or `gio copy` works
+too). The radio writes it to its spare slot and reboots into it (~2 MB in 10–13 s, back up ~4 s later). `/status` then shows the
+new git hash, the other slot and `"firmware_state":"pending"`: a new app must run a minute (then `valid`), or the radio goes back to
+the old one. `GET /firmware.bin` downloads the app a radio is running.
 
 ```bash
 . ~/export-esp.sh && cargo build
 espflash save-image --chip esp32s3 target/xtensa-esp32s3-espidf/debug/open-oswst app.bin
-curl --data-binary @app.bin http://oswst-0f5c.local/ota
+curl -T app.bin http://oswst-0f5c.local/firmware.bin
 ```
 
 Every radio found:
 
 ```bash
 for host in $(avahi-browse -rtp _oswst._tcp | grep "^=" | cut -d';' -f7 | sort -u); do
-    curl --data-binary @app.bin http://$host/ota
+    curl -T app.bin http://$host/firmware.bin
 done
 ```
 
