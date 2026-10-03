@@ -12,7 +12,7 @@ use lora_phy::sx126x::{self, Sx1262, Sx126x, TcxoCtrlVoltage};
 use lora_phy::LoRa;
 use open_oswst_core::noise::{NoiseMeter, SAMPLE_EVERY_MS};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 // The queues the app talks to; this driver connects them to the SX1262
@@ -102,8 +102,10 @@ pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
     let reset = PinDriver::output(p.reset).unwrap();
     // DIO1's number too: a stall log reads its pad to see if an IRQ is pending
     let dio1_gpio = p.dio1.pin() as i32;
+    let busy_gpio = p.busy.pin() as i32;
     let dio1 = PinDriver::input(p.dio1, Pull::Floating).unwrap();
     let busy = PinDriver::input(p.busy, Pull::Floating).unwrap();
+    watch_for_stuck_tx(dio1_gpio, busy_gpio);
 
     // Remember the CTX pin's number so the RX state check can read its pad.
     // An output pad reads as 0 unless its input buffer is on, so turn that on.
@@ -401,6 +403,7 @@ impl Driver {
     /// relay has to fit in the talker's gap, so every ms of turnaround counts.
     async fn transmit(&mut self, data: &[u8]) {
         log::info!("TX start [{}B]", data.len());
+        TX_SINCE_MS.store(uptime_ms(), Ordering::Relaxed);
         // Our own TX isn't interference, and we can't listen during it
         self.noise.interrupted();
         let start = Instant::now();
@@ -426,6 +429,7 @@ impl Driver {
             rx_us - sent_us,
             uptime_us()
         );
+        TX_SINCE_MS.store(0, Ordering::Relaxed);
     }
 
     /// Burst logging switched on or off: start a fresh meter either way, so
@@ -562,6 +566,53 @@ impl Air {
     }
 }
 
+/// When the transmit in progress started (ms since boot), or 0. 32 bits:
+/// Xtensa has no 64-bit atomics
+static TX_SINCE_MS: AtomicU32 = AtomicU32::new(0);
+
+/// A transmit takes ~70ms. Past this, it's stuck
+const TX_STUCK_MS: u32 = 200;
+
+/// The echo station's replays sometimes stop dead: a `TX start` with no `TX
+/// end`, and the radio thread silent for 15-27s. lora-phy's tx() has no
+/// timeout: it waits for TxDone, and loops while the IRQ it sees isn't one
+/// it wants. This logs once per stuck transmit, with the pins that tell
+/// those apart: DIO1 high = an IRQ is up but tx() isn't taking it; DIO1 low
+/// = TxDone never came. Reads pins only, never the SPI bus, so it can't
+/// disturb the radio (lora-phy's IRQ handling must never be interrupted).
+fn watch_for_stuck_tx(dio1_gpio: i32, busy_gpio: i32) {
+    crate::thread::spawn(
+        c"tx_watch",
+        3072,
+        Some(2),
+        Some(esp_idf_svc::hal::cpu::Core::Core0),
+        move || {
+            let mut logged = false;
+            loop {
+                std::thread::sleep(Duration::from_millis(100));
+                let since = TX_SINCE_MS.load(Ordering::Relaxed);
+                if since == 0 {
+                    logged = false;
+                } else if !logged && uptime_ms().wrapping_sub(since) > TX_STUCK_MS {
+                    let (dio1, busy) = unsafe {
+                        (
+                            esp_idf_svc::sys::gpio_get_level(dio1_gpio),
+                            esp_idf_svc::sys::gpio_get_level(busy_gpio),
+                        )
+                    };
+                    log::warn!(
+                        "RADIO TX STUCK: {}ms since TX start, dio1={} busy={}",
+                        uptime_ms().wrapping_sub(since),
+                        dio1,
+                        busy
+                    );
+                    logged = true;
+                }
+            }
+        },
+    );
+}
+
 /// Short name for what lora-phy made of the IRQ register
 fn irq_name(state: &Result<Option<IrqState>, RadioError>) -> &'static str {
     match state {
@@ -571,6 +622,11 @@ fn irq_name(state: &Result<Option<IrqState>, RadioError>) -> &'static str {
         Ok(None) => "none-or-header-error",
         Err(_) => "error",
     }
+}
+
+/// Milliseconds since boot, for TX_SINCE_MS
+fn uptime_ms() -> u32 {
+    (uptime_us() / 1000) as u32
 }
 
 /// Microseconds since boot. The log's own timestamp moves in 10ms ticks.
