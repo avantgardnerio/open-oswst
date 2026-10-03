@@ -21,3 +21,9 @@ critical-section = { version = "1", features = ["std"] }
 # Its own workspace, so `cd core && cargo test` runs the tests on this PC. The
 # firmware and desktop use it by path.
 [workspace]
+
+# The FEC comparison: `cargo run --release --example fec_sim`. Its LoRa modem
+# tests run with `cargo test`
+[[example]]
+name = "fec_sim"
+test = true
