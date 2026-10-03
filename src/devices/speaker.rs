@@ -9,7 +9,7 @@ use esp_idf_svc::hal::i2s::{I2sDriver, I2sTx, I2S0};
 
 // The queues and volume the app talks to; this driver plays them over I2S
 pub use open_oswst_core::devices::speaker::{
-    scale, set_volume, volume, MAX_VOLUME, SPK_FRAMES, SPK_REQ,
+    note_underrun, scale, set_volume, volume, MAX_VOLUME, SPK_FRAMES, SPK_REQ,
 };
 
 pub struct Peripherals {
@@ -66,6 +66,7 @@ async fn speaker_loop(mut i2s_tx: I2sDriver<'_, I2sTx>) {
         let waited = wait_start.elapsed().as_millis();
         if starved && last_frame.elapsed().as_millis() < 500 && waited > 5 {
             log::warn!("SPK underrun: waited {}ms for next frame", waited);
+            note_underrun(waited as u32);
         }
         last_frame = std::time::Instant::now();
 

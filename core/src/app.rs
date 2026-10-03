@@ -9,6 +9,7 @@ use crate::devices::settings::Settings;
 use crate::devices::speaker::{self, MAX_VOLUME, SPK_FRAMES, SPK_REQ};
 use crate::logger;
 use crate::platform::Platform;
+use crate::playback_timing::PlaybackTiming;
 use core::fmt::Write as _;
 use embassy_futures::join::join;
 use embassy_futures::select::{select, select5, Either, Either5};
@@ -122,6 +123,8 @@ pub async fn init<P: Platform>(
         last_rx_time: Instant::now(),
         locked: false,
         echo: Recorder::new(silence),
+        // 3KB: on the heap, once. In the App it overflowed the main task's stack
+        playback: Box::default(),
         last_activity: Instant::now(),
     };
 
@@ -154,7 +157,8 @@ struct App<P: Platform> {
 
     locked: bool, // PTT ignored; the menu still opens, so it can be unlocked
 
-    echo: Recorder, // only used in echo mode
+    echo: Recorder,                // only used in echo mode
+    playback: Box<PlaybackTiming>, // per received transmission, logged at its end
 
     last_activity: Instant, // last packet heard or sent: gates log flushes
 }
@@ -217,6 +221,7 @@ impl<P: Platform> App<P> {
         if self.rx.txid().is_some() && self.last_rx_time.elapsed() > RX_TIMEOUT {
             log::info!("RX timeout, resetting txid lock");
             log_worst_alloc();
+            self.playback.log_and_reset();
             self.rx.end();
             // A repeater's "Repeating" screen ends with the transmission
             if mode::get() == Mode::Repeater {
@@ -321,6 +326,7 @@ impl<P: Platform> App<P> {
             }
             log::info!("RX EOT from txid={}", txid);
             log_worst_alloc();
+            self.playback.log_and_reset();
             self.rx.end();
             if mode::get() == Mode::Repeater {
                 self.draw_rx_screen();
@@ -382,10 +388,19 @@ impl<P: Platform> App<P> {
         // Send to codec thread for decode, await reply
         let mut payload_arr = [0u8; PAYLOAD_BYTES];
         payload_arr.copy_from_slice(payload);
+        let asked = Instant::now();
         self.codec_tx
             .send(CodecRequest::decode(seq, txid, payload_arr))
             .unwrap();
-        if let CodecResponse::Decoded { seq, txid, pcm } = CODEC_REPLY.receive().await {
+        if let CodecResponse::Decoded {
+            seq,
+            txid,
+            pcm,
+            decode_us,
+        } = CODEC_REPLY.receive().await
+        {
+            let waited_us = asked.elapsed().as_micros() as u32;
+            self.playback.record(decode_us, waited_us, SPK_FRAMES.len());
             // The speaker starts once two in a row are here
             if let Some(first) = self.rx.insert(txid, seq, timed_alloc(|| pcm.into())) {
                 send_to_speaker(&first);

@@ -13,4 +13,5 @@ pub mod mode;
 pub mod noise;
 pub mod packet;
 pub mod platform;
+pub mod playback_timing;
 pub mod rx_buffer;

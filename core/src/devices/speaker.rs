@@ -3,7 +3,7 @@
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 
 /// Speaker requests next audio packet from app
@@ -30,6 +30,24 @@ pub fn set_volume(level: u8) {
 
 pub fn volume() -> u8 {
     VOLUME.load(Ordering::Relaxed)
+}
+
+/// Underruns since the last `take_underruns`: how many, and ms spent waiting
+static UNDERRUNS: AtomicU32 = AtomicU32::new(0);
+static UNDERRUN_MS: AtomicU32 = AtomicU32::new(0);
+
+/// The driver ran dry and waited `ms` for the next frame
+pub fn note_underrun(ms: u32) {
+    UNDERRUNS.fetch_add(1, Ordering::Relaxed);
+    UNDERRUN_MS.fetch_add(ms, Ordering::Relaxed);
+}
+
+/// Underruns (count, total ms) since the last call
+pub fn take_underruns() -> (u32, u32) {
+    (
+        UNDERRUNS.swap(0, Ordering::Relaxed),
+        UNDERRUN_MS.swap(0, Ordering::Relaxed),
+    )
 }
 
 /// Copy `frame` into `out` at the current volume. Frames are shared (Arc),

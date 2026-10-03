@@ -51,6 +51,7 @@ pub enum CodecResponse {
         seq: u8,
         txid: u8,
         pcm: Box<[i16]>, // 2560 stereo samples
+        decode_us: u32,  // the codec thread's time on it
     },
 }
 
@@ -59,8 +60,13 @@ impl CodecResponse {
         Self::Encoded { packet }
     }
 
-    pub fn decoded(seq: u8, txid: u8, pcm: Box<[i16]>) -> Self {
-        Self::Decoded { seq, txid, pcm }
+    pub fn decoded(seq: u8, txid: u8, pcm: Box<[i16]>, decode_us: u32) -> Self {
+        Self::Decoded {
+            seq,
+            txid,
+            pcm,
+            decode_us,
+        }
     }
 }
 
@@ -95,6 +101,7 @@ pub fn run(rx: Receiver<CodecRequest>) {
                 CODEC_REPLY.try_send(CodecResponse::encoded(packet)).ok();
             }
             CodecRequest::Decode { seq, txid, payload } => {
+                let started = std::time::Instant::now();
                 let mut pcm = vec![0i16; STEREO_PACKET_SAMPLES].into_boxed_slice();
 
                 for i in 0..FRAMES_PER_PACKET {
@@ -108,7 +115,12 @@ pub fn run(rx: Receiver<CodecRequest>) {
                 }
 
                 CODEC_REPLY
-                    .try_send(CodecResponse::decoded(seq, txid, pcm))
+                    .try_send(CodecResponse::decoded(
+                        seq,
+                        txid,
+                        pcm,
+                        started.elapsed().as_micros() as u32,
+                    ))
                     .ok();
             }
         }
