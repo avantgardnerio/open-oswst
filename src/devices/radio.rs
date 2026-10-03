@@ -33,11 +33,20 @@ pub const TX_POWER_DBM: i32 = 6;
 /// turns; not if they all relay at the same instant (QMesh-style).
 const TX_JITTER_MAX_MS: u32 = 0;
 
+/// Preamble length in symbols, TX and RX alike (every radio must agree). Was
+/// 8. The 2026-10-03 walk lost its return packets to missed detections, not
+/// corruption, with interference setting off the detector between real
+/// packets. A longer preamble gives the detector more to lock onto, and a
+/// second chance after a false alarm. Costs 8 symbols = 8.2ms of air per
+/// packet at SF7/125k (61.7 -> 69.9ms).
+const PREAMBLE_SYMBOLS: u16 = 16;
+
 /// A detected preamble is only a maybe: if no valid header follows within
 /// this, it wasn't a packet (e.g. we started listening mid-packet and the
 /// detector locked onto the payload; then no further IRQ ever comes). The
-/// header lands ~20ms after the detection at SF7/125k.
-const HEADER_WAIT: Duration = Duration::from_millis(30);
+/// header landed ~20ms after the detection with an 8-symbol preamble at
+/// SF7/125k; the 8 extra symbols add ~8ms.
+const HEADER_WAIT: Duration = Duration::from_millis(40);
 
 /// After a valid header, the longest until the packet's end IRQ. Our 26B
 /// packets end ~41ms after their header at SF7/125k. A longer packet from
@@ -130,11 +139,11 @@ pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
         .unwrap();
 
     let tx_params = lora
-        .create_tx_packet_params(8, false, true, false, &mdltn)
+        .create_tx_packet_params(PREAMBLE_SYMBOLS, false, true, false, &mdltn)
         .unwrap();
 
     let rx_params = lora
-        .create_rx_packet_params(8, false, 255, true, false, &mdltn)
+        .create_rx_packet_params(PREAMBLE_SYMBOLS, false, 255, true, false, &mdltn)
         .unwrap();
 
     let mut driver = Driver {
