@@ -16,6 +16,12 @@ use std::path::Path;
 /// delay a TX or an IRQ, and below the hal's IsrReactor (11), which wakes it.
 const RADIO_PRIORITY: u8 = 10;
 
+/// The app and speaker (this, the main task, on core 0). The main task starts
+/// at 1, below everything: the codec, screen, GPS and HTTP server (5) could
+/// all delay the speaker. Now level with the radio, which is on the other
+/// core; only WiFi and the hal's IsrReactor (11) come first.
+const APP_PRIORITY: u8 = 10;
+
 /// The board, as the app sees it
 struct Esp;
 
@@ -89,14 +95,19 @@ fn main() {
 
     // Spawn codec thread with sync channel (capacity 2 to allow pipelining)
     let (codec_tx, codec_rx) = std::sync::mpsc::sync_channel::<codec::CodecRequest>(2);
-    // ~25.6KB used at worst (Stack free log, 2026-10-02): Codec2 is deep
-    thread::spawn(c"codec", 32768, None, None, move || codec::run(codec_rx));
+    // ~25.6KB used at worst (Stack free log, 2026-10-02): Codec2 is deep.
+    // On core 1, away from the app, speaker and WiFi on core 0. The radio is
+    // there too, but above it (10 vs 5), and mostly waiting
+    thread::spawn(c"codec", 32768, None, Some(Core::Core1), move || {
+        codec::run(codec_rx)
+    });
 
     spawn_radio(board.radio);
     // WiFi and the HTTP API, on core 0 at a low priority (only if networks
     // are configured)
     net::start(board.modem, wifi_networks, mac_str.to_string());
 
+    unsafe { esp_idf_svc::sys::vTaskPrioritySet(core::ptr::null_mut(), APP_PRIORITY as u32) };
     block_on(async {
         let speaker_fut = speaker::init(board.speaker).await;
 
