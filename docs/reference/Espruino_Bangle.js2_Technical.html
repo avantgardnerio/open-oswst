@@ -1,0 +1,612 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head>
+<meta name="viewport" content="width=650, initial-scale=1">
+<meta name="Description" content="JavaScript on a Microcontroller" />
+<meta name="Keywords" content="Espruino, Pico, Espruino Pico, Espurino, Espruino WiFi, Puck.js, Puckjs, Puck-js, JavaScript, JS, ARM, Arduino, MCU, STM32, NRF, NRF52, Microcontroller, Embedded, Bangle.js, Bangle, Banglejs, Smartwatch, Watch, pinout, pins, io, specs, spec" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="Distribution" content="Global" />
+<meta name="Robots" content="index,follow" />
+<title>Bangle.js 2 Technical Information - Espruino</title>
+<link rel="canonical" href="https://www.espruino.com/Bangle.js2 Technical" />
+
+<script type="text/javascript" src="/js/jquery-1.11.1.min.js"></script>
+
+<link href="/css/bootstrap.min.css?20180904" rel="stylesheet">
+<!--[if lt IE 9]>
+  <script src="https://oss.maxcdn.com/libs/html5shiv/3.7.0/html5shiv.js"></script>
+  <script src="https://oss.maxcdn.com/libs/respond.js/1.4.2/respond.min.js"></script>
+<![endif]-->
+<link rel="stylesheet" href="/css/carousel.css" type="text/css" />
+<link rel="stylesheet" href="/css/sitewide.css" type="text/css" />
+<link rel="stylesheet" href="/css/prettify.css" type="text/css" />
+<script src="/js/prettify.js"></script>
+<script type="application/ld+json">
+{
+  "@context": "http://schema.org",
+  "@type": "WebSite",
+  "url": "https://www.espruino.com/",
+  "potentialAction": {
+    "@type": "SearchAction",
+    "target": "http://www.espruino.com/Search?kw={search_term}",
+    "query-input": "required name=search_term"
+  }
+}
+</script>
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-PBBPK636L8"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'G-PBBPK636L8');
+</script>
+</head>
+
+<body>
+  <div class="navbar-wrapper" id="header"> <!-- id=header for search -->
+    <div class="navbar navbar-inverse" role="navigation">
+      <div class="container">
+        <div class="navbar-header">
+          <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-collapse">
+            <span class="sr-only">Toggle navigation</span>
+            <span class="icon-bar"></span>
+            <span class="icon-bar"></span>
+            <span class="icon-bar"></span>
+          </button>
+          <a class="navbar-brand" href="/">Espruino</a>
+        </div>
+        <div class="navbar-collapse collapse">
+           <ul class="nav navbar-nav">
+              <li class="dropdown">
+                <a href="#" class="dropdown-toggle" data-toggle="dropdown">Get Espruino<b class="caret"></b></a>
+                <ul class="dropdown-menu">
+                  <li><a href="https://shop.espruino.com" target="_blank">&#x1F1EC;&#x1F1E7; Espruino Shop</a></li>
+                  <li><a href="/Order">&#x1F30E; Distributors</a></li>
+                  <li><a href="/Download">Download firmware</a></li>
+                </ul>
+              </li>
+              <li><a href="/Donate">Donate</a></li>
+              <li class="dropdown">
+                <a href="#" class="dropdown-toggle" data-toggle="dropdown">Documentation <b class="caret"></b></a>
+                <ul class="dropdown-menu">
+                  <li><a href="/Quick+Start">Quick Start</a></li>
+                  <li class="divider"></li>
+                  <li><a href="/Reference#software">API Reference</a></li>
+                  <li><a href="/Tutorials">Tutorials &amp; Examples</a></li>
+                  <li><a href="/Modules">Modules</a></li>
+                  <li><a href="/Tips+and+Tricks">Tips &amp; Tricks</a></li>
+                  <li><a href="https://www.youtube.com/user/espruino">Videos</a></li>
+                  <li class="divider"></li>
+                  <li><a href="/Bangle.js2">Bangle.js 2</a></li>
+                  <li><a href="/Bangle.js">Bangle.js 1</a></li>
+                  <li><a href="/Pixl.js">Pixl.js</a></li>
+                  <li><a href="/Puck.js">Puck.js</a></li>
+                  <li><a href="/Jolt.js">Jolt.js</a></li>
+                  <li><a href="/WiFi">Espruino WiFi</a></li>
+                  <li><a href="/Pico">Espruino Pico</a></li>
+                  <li><a href="/Original">Original Espruino</a></li>
+                  <li><a href="/MDBT42Q">MDBT42Q Module</a></li>
+                  <li class="divider"></li>
+                  <li><a href="/Other+Boards">Other Boards</a></li>
+                </ul>
+              </li>
+              <li class="dropdown">
+                <a href="#" class="dropdown-toggle" data-toggle="dropdown">Support <b class="caret"></b></a>
+                <ul class="dropdown-menu">
+
+                  <li><a href="http://forum.espruino.com">Forums</a></li>
+                  <li class="divider"></li>
+                  <li><a href="/Quick+Start">Getting Started</a></li>
+                  <li><a href="/FAQ">FAQ</a></li>
+                  <li><a href="/Troubleshooting">Troubleshooting</a></li>
+                  <li class="divider"></li>
+                  <li><a href="https://banglejs.com/apps/">Bangle.js App Loader</a></li>
+                  <li><a href="/apps">Espruino.js App Loader</a></li>
+                  <li class="divider"></li>
+                  <li><a href="/Business">Espruino for Business</a></li>
+                  <li><a href="/Contact+Us">Contact Us</a></li>
+                  <li><a href="/Press">Press Info</a></li>
+                </ul>
+              </li>
+            </ul>
+          <form class="navbar-form navbar-right">
+            <span class="hidden-sm hidden-xs">
+                <a href="http://www.facebook.com/sharer.php?u=http://www.espruino.com&amp;t=Espruino+JavaScript+for+Microcontrollers" target="_blank" title="Share on Facebook"><img width="20" height="20" src="/images/socialtiny_facebook.png" class="socialtiny"/></a>
+                <a href="http://twitter.com/Espruino" target="_blank" title="Follow us on Twitter"><img width="20" height="20" src="/images/socialtiny_twitter.png"  class="socialtiny" /></a>
+                <a href="https://www.linkedin.com/company/espruino" target="_blank" title="Espruino on LinkedIn"><img width="20" height="20" alt="Espruino on LinkedIn" src="/images/socialtiny_linkedin.png" /></a>
+                <a href="https://www.youtube.com/user/espruino" target="_blank" title="YouTube"><img alt="YouTube" src="/images/youtube_tinyw.png" /></a>
+              </span>
+              <input type="text" class="form-control searchbox" name="searchbox" placeholder="Search..." autocomplete="off" size="15"/>
+          </form>
+        </div>
+      </div><!-- /.container -->
+    </div><!-- /.navbar -->
+  </div><!-- /.navbar-wrapper -->
+
+  <!-- Wrap the rest of the page in another container to center all the content. -->
+  <div id="mainscroller">
+    <div class="container">
+      <div id="maincontent"><div style="min-height:700px;"><img class="topthumbnail" src="refimages/info_Bangle.js2_Technical_thumb.png"><h1 id="bangle-js-2-technical-information">Bangle.js 2 Technical Information</h1>
+<!---
+* KEYWORDS: Bangle.js,Bangle,Banglejs,Smartwatch,Watch,pinout,pins,io,specs,spec
+---><!---
+* USES: Bangle.js
+--->
+<p><strong>For general Bangle.js information, try <a href="/Bangle.js">the Bangle.js 1</a> or <a href="/Bangle.js2">the Bangle.js 2</a> pages</strong></p>
+<p>This page contains detailed information on Bangle.js&#39;s 2&#39;s internals. If you&#39;re
+just writing JS then you should have no need for this information, but if you
+plan on modifying the Bangle.js firmware it might be of interest.</p>
+<p>This file is based on reverse engineering of publically available firmware
+and information, buy Gordon Williams, <a href="https://github.com/fanoush">fanoush</a>, and <a href="https://github.com/atc1441">atc1441</a>.
+It was originally published as a <a href="https://hackaday.io/project/175577-hackable-nrf52840-smart-watch">hackaday.io project page</a></p>
+<h2 id="contents">Contents</h2>
+<ul>
+<ul><li><a href="#features">Features</a></li>
+<li><a href="#software">Software</a></li>
+<li><a href="#hardware">Hardware</a></li>
+<li><a href="#pcb">PCB</a></li>
+<li><a href="#swd">SWD</a></li>
+<li><a href="#gps">GPS</a></li>
+<li><a href="#gpio">GPIO</a></li>
+<li><a href="#unused-pins-adding-hardware-">Unused pins (adding hardware)</a></li>
+</ul>
+</ul>
+<h2 id="features">Features</h2>
+<ul>
+<li>IP67 Water Resistant (everyday use, <strong>not swimming or baths</strong>)</li>
+<li>Nordic 64MHz <a href="/datasheets/nRF52840_PS_v1.1.pdf">nRF52840</a> ARM Cortex-M4 processor with Bluetooth LE</li>
+<li>256kB RAM 1024kB on-chip flash, 8MB external flash (<a href="/datasheets/GD25Q64C.pdf">GD25Q64C</a>/<a href="/datasheets/GD25Q64E.pdf">GD25Q64E</a>)</li>
+<li>1.3 inch 176x176 always-on 3 bit colour LCD display (<a href="/datasheets/LPM013M126C.pdf">LPM013M126</a>)</li>
+<li>Full touchscreen (<a href="/datasheets/CST816D_CN.pdf">Hynitron CST816D</a>)</li>
+<li>Single button on side of watch</li>
+<li>GPS/Glonass receiver (<a href="#gps">AT6558 / AT6558R</a>)</li>
+<li>Heart rate monitor (<a href="/datasheets/VC31B.pdf">Vcare VC31 / VC31B</a>)</li>
+<li>3 Axis Accelerometer (<a href="/datasheets/KX022-1020.pdf">Kionix KX022</a>)</li>
+<li>3 Axis Magnetometer</li>
+<li>Air Pressure/Temperature sensor (Bosch BMP280 / <a href="/datasheets/SPL06.pdf">Goertek SPL06</a>)</li>
+<li>Vibration motor</li>
+<li>SWD program/debug pins on rear of watch</li>
+<li>175mAh battery (XK302627,  3 x 26 x 27mm), 4 weeks standby time</li>
+<li>36mm x 43mm x 12mm watch body, with standard 20mm watch straps</li>
+</ul>
+<h2 id="software">Software</h2>
+<p>Where mentioned in the source code or filenames, <code>Q3</code> references Bangle.js 2, and <code>F18</code> references Bangle.js 1.</p>
+<p>The Espruino version for Bangle.js has a few specific modifications:</p>
+<ul>
+<li><a href="https://github.com/espruino/Espruino/blob/master/libs/banglejs/jswrap_bangle.c"><code>jswrap_bangle.c</code></a> contains
+all <code>Bangle.*</code> functions and pretty much all Bangle.js functionality.</li>
+<li>Some functionality (like menus) is in JavaScript which is built into the firmware. Those <a href="https://github.com/espruino/Espruino/tree/master/libs/js/banglejs">JavaScript files are here</a></li>
+<li><a href="https://github.com/espruino/Espruino/blob/master/boards/BANGLEJS2.py"><code>BANGLEJS2.py</code></a> describes the build<ul>
+<li>The <code>SPIFLASH</code> device causes <code>SPIFLASH_BASE</code> to be defined, which enables external SPI flash memory support in <a href="https://github.com/espruino/Espruino/blob/master/targets/nrf5x/jshardware.c"><code>jshardware.c</code></a></li>
+</ul>
+</li>
+</ul>
+<p>If you don&#39;t want to use Espruino and would prefer to develop your app as bare-metal in C, <a href="https://github.com/espruino/BangleJS2BareMetal">check out the example in the BangleJS2BareMetal repository</a></p>
+<h2 id="hardware">Hardware</h2>
+<p>The watch body is made of ABS plastic, with the LCD+touchscreen assembly glued to the front.</p>
+<p>Want to get inside? Check out the <a href="/Bangle.js2+Disassembly">Bangle.js 2 Disassembly page</a></p>
+<p>There are CAD files for the Bangle.js 2 stand, as well as an STL of the watch body <a href="https://github.com/espruino/EspruinoBoard/blob/master/Bangle.js2">available here</a></p>
+<h2 id="pcb">PCB</h2>
+<p>Below are shots of the Bangle.js 2 PCB:</p>
+<p><img src="refimages/Bangle.js2_Technical_PCB_front.jpg" alt=""></p>
+<p><img src="refimages/Bangle.js2_Technical_PCB_back.jpg" alt=""></p>
+<p>The components on the PCB are marked here:</p>
+<p><img src="refimages/Bangle.js2_Technical_PCB_parts.png" alt=""></p>
+<h2 id="swd">SWD</h2>
+<p>SWD - the 4 pads on the rear of the watch are GND, SWDIO/SWDCLK, VCC. The charge cable has wires for all 4 leads brought out to the USB connector, so the easiest method is just to attach wires from a USB socket to an nRF52DK</p>
+<p><img src="refimages/Bangle.js2_Technical_SWD.jpg" alt=""></p>
+<p>This can be connected to an SWD programmer. We&#39;d recommend using an <a href="https://www.nordicsemi.com/Products/Development-hardware/nrf52-dk">nRF52 DK</a> (or nRF52840DK).
+When using the nRF52DK you&#39;ll need to short the <code>GND DETECT</code> pin to <code>GND</code> and short the <code>VTG</code> pin to <code>VDD</code> to tell it you&#39;re programming the Bangle.js and not the on-board nRF52. See the example schematic below.</p>
+<p><img src="refimages/Bangle.js2_Technical_nRF52DK_schematic.png" alt=""></p>
+<p>The easiest way to connect to these is to use the provided USB charge cable and to wire up a USB type A socket:</p>
+<table>
+<thead>
+<tr>
+<th>Pin #</th>
+<th>Connect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>5v (not required)</td>
+</tr>
+<tr>
+<td>2</td>
+<td>SWDIO</td>
+</tr>
+<tr>
+<td>3</td>
+<td>SWDCLK</td>
+</tr>
+<tr>
+<td>4</td>
+<td>GND</td>
+</tr>
+</tbody>
+</table>
+<p>Be sure to fully remove the tape and adhesive covering the SWDIO and SWDCLK pins.</p>
+<p>See <a href="/AdvancedDebug">Advanced Debug</a> for more information on programming via SWD.</p>
+<h2 id="gps">GPS</h2>
+<p>The GPS is a <a href="/datasheets/AT6558.pdf">AT6558</a> (or AT6558R on newest Bangle.js devices)</p>
+<p>For more information on common usage, check out <a href="/Bangle.js2#gps">the Bangle.js 2 GPS page</a></p>
+<p>Espruino handles reception and parsing of NMEA data from the GPS UART when <code>Bangle.setGPSPower(1)</code> is called.</p>
+<p>On startup the GPS reports information about itself - this can be viewed with the following (assuming GPS was off before):</p>
+<pre><code class="lang-JS">Bangle.setGPSPower(1);
+Bangle.on(&#39;GPS-raw&#39;,print);
+setTimeout(function() {
+  Bangle.removeAllListeners(&#39;GPS-raw&#39;);
+}, 1000);
+</code></pre>
+<p>The first few batches of Bangle.js devices report the following data upon startup, using <code>AT6558</code> with <code>V5.1.0.0</code> firmware:</p>
+<pre><code>$GPTXT,01,01,02,MA=CASIC*27 false                   # MA = Manufacturer
+$GPTXT,01,01,02,IC=AT6558-5N-32-1C510800*48 false   # IC = Chip
+$GPTXT,01,01,02,SW=URANUS5,V5.1.0.0*1F false        # SW = Firmware version
+$GPTXT,01,01,02,TB=2018-04-18,10:28:16*40 false     # TB = Firmware compile date
+$GPTXT,01,01,02,MO=GB*77 false                      # MO = working mode
+</code></pre><p>Newer ones use a <code>AT6558R</code> with <code>V5.3.0.0</code> firmware.</p>
+<pre><code>$GPTXT,01,01,02,MA=CASIC*27 false
+$GPTXT,01,01,02,IC=AT6558R-5N-32-1C580901*13 false
+$GPTXT,01,01,02,SW=URANUS5,V5.3.0.0*1D false
+$GPTXT,01,01,02,TB=2020-03-26,13:25:12*4B false
+$GPTXT,01,01,02,MO=GR*67 false
+</code></pre><p>The receiver can be configured with <code>$PCAS</code> commands. It&#39;s hard to find decent documentation
+on these - the best we have found is <a href="/datasheets/Bangle.js2-GPS-CASIC-cn.pdf">a Chinese Language datasheet here</a>.</p>
+<p>You need to calculate a checksum when sending, which can be done with the following:</p>
+<pre><code class="lang-JS">function CASIC_CMD(cmd) {
+  var cs = 0;
+  for (var i=1;i&lt;cmd.length;i++)
+    cs = cs ^ cmd.charCodeAt(i);
+  Serial1.println(cmd+&quot;*&quot;+cs.toString(16).toUpperCase().padStart(2, &#39;0&#39;));
+}
+</code></pre>
+<p>Here are some example commands that work;</p>
+<pre><code class="lang-JS">CASIC_CMD(&quot;$PCAS03,1,0,0,1,0,0,0,0&quot;); // send only &#39;GGA+GSV&#39; NMEA data (minimum for Bangle.js GPS event)
+// $PCAS03,GGA,GLL,GSA,GSV,RMC,VTG,ZDA,ANT,DHV,LPS...
+CASIC_CMD(&quot;$PCAS03,1,0,0,1,1,0,0,0&quot;); // send the NMEA packets Bangle.js expects
+CASIC_CMD(&quot;$PCAS04,1&quot;); // Set to GPS-only mode
+/*
+1=GPS
+2=BDS
+3=GPS+BDS
+4=GLONASS
+5=GPS+GLONASS
+6=BDS+GLONASS
+7=GPS+BDS+GLONASS
+*/
+CASIC_CMD(&quot;$PCAS02,500&quot;); // Change output speed from default 1000ms to 500ms
+// The valid range is 100-&gt;1000ms, but to get below 500ms you must disable un-needed packets with PCAS03
+
+CASIC_CMD(&quot;$PCAS00&quot;); // Save all changes to flash memory (be careful!)
+</code></pre>
+<p>The receiver also accepts and returns a binary protocol that begins with the characters <code>&quot;\xBA\xCA&quot;</code>, but you&#39;ll need to consult the CASIC datasheet for more information on that.
+ We have an <a href="/files/CASIC_en.pdf">English translated version here</a></p>
+<p> There&#39;s mention in some forum posts:</p>
+<ul>
+<li><a href="https://forum.espruino.com/conversations/371336/?offset=25#16332430">https://forum.espruino.com/conversations/371336/?offset=25#16332430</a></li>
+<li><a href="https://forum.espruino.com/conversations/371360/">https://forum.espruino.com/conversations/371360/</a></li>
+</ul>
+<p>But working code to send/decode packets is:</p>
+<pre><code class="lang-JS">// Decode CASIC binary packets
+Bangle.on(&quot;GPS-raw&quot;, d=&gt;{
+  if (d.substr(0,2)!=&quot;\xBA\xCE&quot;) return;
+  var ab = E.toArrayBuffer(d);
+  var dv = new DataView(ab);
+  var len = dv.getUint16(2,true);
+  var pkt = {
+    classId : dv.getUint8(4),
+    messageId : dv.getUint8(5),
+    payload : new Uint8Array(ab, 4, len),
+    crc : dv.getUint32(6+len,true)
+  };
+  if (pkt.classId == 5 &amp;&amp; pkt.messageId==0) pkt.type = &quot;ACK-NACK&quot;;
+  if (pkt.classId == 5 &amp;&amp; pkt.messageId==1) pkt.type = &quot;ACK-ACK&quot;;
+  print(&quot;CASIC&quot;, pkt);
+});
+// Send a binary CASIC packet, eg: {classId:6, messageId:0, payload:[]}
+function CASIC_PKT(pkt) {
+  pkt.payload = pkt.payload || [];
+  var plen = pkt.payload.length;
+  var msg = new Uint8Array(10+pkt.payload.length);
+  msg.set([0xBA,0xCE,
+           plen, // LENGTH
+           0x00,
+           pkt.classId, // CLASS    ID
+           pkt.messageId]); // MESSAGE    ID
+  msg.set(pkt.payload, 6);
+  var dv = new DataView(msg.buffer);
+  // checksum
+  var ckSum = 0;
+  for (i = -4; i &lt; plen; i+=4)
+    ckSum = 0|(ckSum+dv.getUint32(6+i, true));
+  dv.setUint32(6+plen, ckSum, true);
+  return msg;
+}
+
+// Send AID_INI message, {lat,lon,alt}
+function AID_INI(pos) {
+  var msg = new Uint8Array(56);
+  var dv = new DataView(msg.buffer);
+  /*
+    double                            xOrLat, yOrLon, zOrAlt;
+    double                            tow; // 24
+    float                            df; // 32
+    float                            posAcc; // 36
+    float                            tAcc; // 40
+    float                            fAcc; // 44
+    unsigned int                    res; // 48
+    unsigned short int                wn; // 52
+    unsigned char                    timeSource; // 54
+    unsigned char                    flags; // 55
+*/
+  var ms = Date.now();
+  var wk = (ms-new Date(&quot;1980-01-06T00:00:00Z&quot;)) / 604800000;
+  var wn = Math.floor(wk); // week number
+  var tow = (wk-wn) * 604800; // seconds in week
+  dv.setFloat64(0, pos.lat, true); // xOrLat
+  dv.setFloat64(8, pos.lon, true); // yOrLon
+  dv.setFloat64(16, pos.alt, true); // zOrAlt
+  dv.setFloat64(24, tow, true); // tow
+  dv.setFloat32(32, 0, true); // df
+  dv.setFloat32(36, 0, true); // posAcc
+  dv.setFloat32(40, 0, true); // tAcc
+  dv.setFloat32(44, 0, true); // fAcc
+  dv.setUint32(48, 0, true); // res
+  dv.setUint16(52, wn, true); // wn
+  dv.setUint8(54,0); // timeSource
+  dv.setUint8(55, 0x23); // flags ( lat/lon and clock valid, no drift data )
+  return CASIC_PKT({classId:0x0B, messageId:0x01, payload:msg});
+}
+// Query/config UART - just query atm
+function CFG_PTR() {
+  return CASIC_PKT({classId:6, messageId:0, payload:[]});
+}
+
+// Do these a few seconds after GPS has been started
+
+// Request UART config info (quick test)
+//Serial1.write(CFG_PTR());
+// Set Auxiliary position, time
+//Serial1.write(AID_INI({lat : 51.65, lon : -1.267, alt : 30 }));
+</code></pre>
+<h2 id="gpio">GPIO</h2>
+<p>Unlike Bangle.js 1, all IO is connected direct to the nRF52840 - there&#39;s no need for an IO expander</p>
+<table>
+<thead>
+<tr>
+<th>Pin</th>
+<th>Connected</th>
+<th>State</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>32876 oscillator</td>
+<td></td>
+</tr>
+<tr>
+<td>1</td>
+<td>32876 oscillator</td>
+<td></td>
+</tr>
+<tr>
+<td>2</td>
+<td>PRESSURE_SCL</td>
+<td></td>
+</tr>
+<tr>
+<td>3</td>
+<td>Battery voltage analog GND-[1M]-D3-[3M]-VBATT</td>
+<td></td>
+</tr>
+<tr>
+<td>5</td>
+<td>MEMLCD_CS (active high)</td>
+<td>out</td>
+</tr>
+<tr>
+<td>6</td>
+<td>MEMLCD_EXTCOMIN</td>
+<td>Needs to be toggled at 5ms or 250ms in sleep all the time</td>
+</tr>
+<tr>
+<td>7</td>
+<td>MEMLCD_DISP 1=disp on, 0=disp off</td>
+<td>out, pulsed high</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Backlight</td>
+<td>out</td>
+</tr>
+<tr>
+<td>13 (0x0d)</td>
+<td>Flash_MISO</td>
+<td>input</td>
+</tr>
+<tr>
+<td>14 (0x0e)</td>
+<td>Flash_CS</td>
+<td>out</td>
+</tr>
+<tr>
+<td>15 (0x0f)</td>
+<td>Flash_MOSI</td>
+<td>out</td>
+</tr>
+<tr>
+<td>16 (0x10)</td>
+<td>Flash_SCK</td>
+<td>in_pullup</td>
+</tr>
+<tr>
+<td>17 (0x11)</td>
+<td>Button</td>
+<td>In_pullup, edge detect</td>
+</tr>
+<tr>
+<td>19 (0x13)</td>
+<td>Vibrate, active=1</td>
+<td>out</td>
+</tr>
+<tr>
+<td>21 (0x15)</td>
+<td>HRM_POWER, active=1</td>
+<td>out</td>
+</tr>
+<tr>
+<td>22 (0x16)</td>
+<td>HRM_INT</td>
+<td></td>
+</tr>
+<tr>
+<td>23 (0x17)</td>
+<td>Charge port</td>
+<td>in_pullup</td>
+</tr>
+<tr>
+<td>24 (0x18)</td>
+<td>HRM_SDA</td>
+<td></td>
+</tr>
+<tr>
+<td>25 (0x19)</td>
+<td>Charging complete</td>
+<td></td>
+</tr>
+<tr>
+<td>26 (0x1a)</td>
+<td>MEMLCD_SCK</td>
+<td></td>
+</tr>
+<tr>
+<td>27 (0x1b)</td>
+<td>MEMLCD_MOSI</td>
+<td></td>
+</tr>
+<tr>
+<td>29 (0x1d)</td>
+<td>GPS power, active=1</td>
+<td>out</td>
+</tr>
+<tr>
+<td>30 (0x1e)</td>
+<td>GPS TXD</td>
+<td></td>
+</tr>
+<tr>
+<td>31 (0x1f)</td>
+<td>GPS RXD</td>
+<td></td>
+</tr>
+<tr>
+<td>32 (0x20)</td>
+<td>HRM_SCL</td>
+<td></td>
+</tr>
+<tr>
+<td>33 (0x21)</td>
+<td>TOUCH_SDA</td>
+<td></td>
+</tr>
+<tr>
+<td>34 (0x22)</td>
+<td>TOUCH_SCL</td>
+<td></td>
+</tr>
+<tr>
+<td>35 (0x23)</td>
+<td>TOUCH_RESET (active low)</td>
+<td>out</td>
+</tr>
+<tr>
+<td>36 (0x24)</td>
+<td>TOUCH_INT (active low)</td>
+<td></td>
+</tr>
+<tr>
+<td>37 (0x25)</td>
+<td>ACCEL_SDA</td>
+<td></td>
+</tr>
+<tr>
+<td>38 (0x26)</td>
+<td>ACCEL_SCL</td>
+<td></td>
+</tr>
+<tr>
+<td>39 (0x27)</td>
+<td>ACCEL_INT</td>
+<td>input</td>
+</tr>
+<tr>
+<td>42 (0x2a)</td>
+<td>UARX</td>
+<td>unused debug pin</td>
+</tr>
+<tr>
+<td>43 (0x2b)</td>
+<td>UATX</td>
+<td>unused debug pin</td>
+</tr>
+<tr>
+<td>44 (0x2c)</td>
+<td>COMPASS_SDA</td>
+<td></td>
+</tr>
+<tr>
+<td>45 (0x2d)</td>
+<td>COMPASS_SCL</td>
+<td></td>
+</tr>
+<tr>
+<td>47 (0x2f)</td>
+<td>PRESSURE_SDA</td>
+</tr>
+</tbody>
+</table>
+<p>To access these pins from Espruino, all you need to do is add <code>D</code> to the pin number. For example to read the analog battery voltage (pin 3), use the command <code>analogRead(D3)</code>.</p>
+<h2 id="i2c">I2C</h2>
+<p>Bangle.js 2 has the following I2C devices. These are connected via their own pins and don&#39;t share an I2C bus - see above for the connections.</p>
+<ul>
+<li>PRESSURE - BMP280, I2C 0x3C(0x1E)</li>
+<li>TOUCH - Hynitron CST816D, I2C 0x2A(0x15)</li>
+<li>HRM - VCare VC31, I2C 0x66(0x33)</li>
+<li>ACCEL - Kionix KX022, I2C 0x3C(0x1E)</li>
+<li>COMPASS - I2C 0x18(0x0C)</li>
+</ul>
+<h2 id="unused-pins-adding-hardware-">Unused pins (adding hardware)</h2>
+<p>Most of the pins on the nRF52 chip in Bangle.js 2 are either used or not connected. However there are two exceptions - <code>UARX</code> (<code>D42</code> in Espruino) and <code>UATX</code> (<code>D43</code> in Espruino). These pins
+are not connected to any hardware, but are available as test points so can be connected to whatever you want. They are accessible on the rear of the Bangle.js PCB, under the battery:</p>
+<p><img src="refimages/Bangle.js2_Technical_PCB_uart.jpg" alt=""></p>
+<p>There are also test pads for the touchscreen I2C <code>TOUCH_SDA</code> and <code>TOUCH_SCL</code> lines (see <code>GPIO</code> table above) that could be used to connect other I2C devices.</p>
+<p><strong>Note:</strong> The battery is attached to the back of the Bangle.js PCB with double-sided sticky tape. Take care when removing it, as it&#39;s almost impossible to remove the battery without bending it slightly.</p>
+<p>If you wish to add your own hardware to Bangle.js, we&#39;d suggest sourcing and fitting a smaller battery, which would then leave room in the rear of the case for your circuitry.</p>
+</div><p style="text-align:right;font-size:75%;">This page is auto-generated from <a href="https://github.com/espruino/EspruinoDocs/blob/master/info/Bangle.js2 Technical.md">GitHub</a>. If you see any mistakes or have suggestions, please <a href="https://github.com/espruino/EspruinoDocs/issues/new?title=info/Bangle.js2 Technical.md">let us know</a>.</p></div>
+      <div class="row">
+        <div id="sidebar" class="col-md-3 hidden-sm hidden-xs"></div>
+        <div id="maincolumn" class="col-md-9"></div>
+      </div>
+
+      <hr>
+      <!-- FOOTER -->
+      <footer>
+        <p>
+  			&copy; 2023 <strong>Pur3 Ltd</strong>
+  			(<a href="Bangle.js2+Technical?print">Printable Version</a>)
+        <a href="edit.php?page=Bangle.js2+Technical" class="edit" style="float:right;">&pi;</a>
+  			</p>
+      </footer>
+
+    </div><!-- /.container -->
+  </div><!-- /#mainscroller -->
+  <!-- Placed at the end of the document so the pages load faster -->
+  <script src="/js/jquery-1.11.1.min.js"></script>
+  <script src="/js/bootstrap.min.js"></script>
+  <script type="text/javascript" src="/js/sitewide.js?20180904"></script>
+  <script type="text/javascript" src="/js/search.js?20180904"></script>
+</body>
+</html>
