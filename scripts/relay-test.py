@@ -40,9 +40,12 @@ import time
 import serial
 import serial.tools.list_ports
 
+# A voice packet's air time and the packet period, from the firmware's own
+# constants: hardcoded, AIR_MS stayed 61.7 (an 8-symbol preamble) after the
+# preamble went to 12 (13ca431), and every margin read 4.1ms too generous
+from lora_air import AIR_MS, PERIOD_MS
+
 ESP_VID = 0x303A
-PERIOD_MS = 160  # one packet of audio
-AIR_MS = 61.7  # a 26B packet at SF7/125k, CR4/5
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
