@@ -378,7 +378,7 @@ def render(m, capture):
         f"(+{air.symbols_per_block()} symbols, +{air.symbols_per_block() * sym:.1f} ms)"
     )
     out += ["", f"The {pb} bytes:", "", "```", bytes_box(), "", "our header, 16 bits, big-endian (core/src/packet.rs):", header_box(),
-            "       type: 0 voice, 1 echo replay, 2 wake",
+            "       type: 0 voice, 1 echo replay, 2 wake, 3 voice end, 4 echo end (core/src/packet.rs PacketType)",
             "       txid: random per transmission (the dedup key); seq: wraps at 16", "```", ""]
     out += [f"### Wake packet: {hb} bytes, {fmt(air.packet_symbols(hb, wake))} symbols, {air.packet_ms(hb, wake):.1f} ms", ""]
     out.append(
@@ -395,15 +395,28 @@ def render(m, capture):
                     [f"{wake - air.CAD_SYMBOLS} symbols ({cad_window:.0f} ms)", "", "", ""] + [None] * (wb - 1)],
                    [0, 1, 2, 3, 3 + wb]))
     out += ["```", ""]
-    out.append(f"End of transmission (EOT) is the same {hb} bytes with a normal {air.PREAMBLE_SYMBOLS}-symbol preamble: "
-               f"{fmt(eot_sym)} symbols, {eot_ms:.1f} ms.")
+    name_bytes = pb - hb - 6
+    out += [f"### End packet (EOT): {pb} bytes, {fmt(voice_sym)} symbols, {voice_ms:.1f} ms", ""]
+    out.append(
+        f"The last packet of every transmission says who sent it and where they were: a voice packet's size and air, so it "
+        f"fits a repeater's slot like one. The talker sends its own; a repeater relays it unchanged; an echo station ends "
+        f"its replay with its own. The screen shows who was last heard, how far away, and through a repeater or not."
+    )
+    out += ["", "```"]
+    out.append(f"byte   {0:<16}{hb:<12}{hb + 3:<12}{hb + 6:<33}{pb}")
+    out.append("       +---------------+-----------+-----------+" + "-" * 32 + "+")
+    out.append("       |  our header   | latitude  | longitude |" + f"name, UTF-8, up to {name_bytes} bytes".center(32) + "|")
+    out.append("       | type 3 or 4   | 24 bits   | 24 bits   |" + "zero-padded".center(32) + "|")
+    out.append("       +---------------+-----------+-----------+" + "-" * 32 + "+")
+    out.append("       latitude: ±90° in ±2^23 steps (~1.2 m); longitude: ±180° (~2.4 m); -2^23 latitude = no fix")
+    out += ["```"]
     out += ["", "### A transmission", "", "```", "PTT pressed"]
     wake_at = f"+{m['wake']:.0f} ms" if m and "wake" in m else "first"
     voice_at = f"~{m['voice']:.0f} ms" if m and "voice" in m else "then"
     out.append(f"{wake_at:>8}   wake packet         {fmt(air.packet_symbols(hb, wake))} sym   (sent while the first {air.PERIOD_MS:.0f} ms of audio is captured)")
     out.append(f"{voice_at:>8}   voice seq 0         {fmt(voice_sym)} sym   then one voice packet every {air.PERIOD_MS:.0f} ms ({fmt(slot_sym)} sym)")
     out.append("     ...")
-    out.append(f" release   last voice packet, then EOT    {fmt(eot_sym)} sym")
+    out.append(f" release   last voice packet, then EOT    {fmt(voice_sym)} sym  (who and where)")
     out += ["```", "", "An echo station sends its wake packet one slot before its replay. A repeater relays a wake packet like any other "
             "(once per transmission), so radios that only hear the repeater can find it.", ""]
     out.append(f"### One slot with a repeater: {air.PERIOD_MS:.0f} ms = {fmt(slot_sym)} symbols")

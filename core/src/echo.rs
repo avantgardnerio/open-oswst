@@ -11,7 +11,7 @@ use crate::devices::radio::{TxRequest, TX_CHAN};
 use embassy_time::{Duration, Ticker, Timer};
 use std::time::Instant;
 
-use crate::packet::{self, TYPE_ECHO};
+use crate::packet::{self, PacketType};
 
 type Payload = [u8; PAYLOAD_BYTES];
 
@@ -94,9 +94,15 @@ impl Recorder {
     }
 }
 
-/// Send a recording back out at the pace it was spoken, then an EOT. With
-/// `wake`, a wake-up packet goes first, in the slot before the audio.
-pub async fn replay(packets: Vec<Payload>, txid: u8, wake: bool) {
+/// Send a recording back out at the pace it was spoken, then the end packet
+/// `end` makes for the seq after the last. With `wake`, a wake-up packet
+/// goes first, in the slot before the audio.
+pub async fn replay(
+    packets: Vec<Payload>,
+    txid: u8,
+    wake: bool,
+    end: impl FnOnce(u8) -> heapless::Vec<u8, 255>,
+) {
     Timer::after_millis(REPLAY_DELAY_MS).await;
     if wake {
         TX_CHAN.send(packet::wake(txid)).await;
@@ -107,7 +113,7 @@ pub async fn replay(packets: Vec<Payload>, txid: u8, wake: bool) {
     for payload in &packets {
         ticker.next().await;
         let mut data = heapless::Vec::new();
-        let _ = data.extend_from_slice(&packet::pack(TYPE_ECHO, txid, seq));
+        let _ = data.extend_from_slice(&packet::pack(PacketType::Echo, txid, seq));
         let _ = data.extend_from_slice(payload);
         TX_CHAN
             .send(TxRequest {
@@ -119,11 +125,13 @@ pub async fn replay(packets: Vec<Payload>, txid: u8, wake: bool) {
         seq = (seq + 1) & 0x0F;
     }
 
-    let mut eot = heapless::Vec::new();
-    let _ = eot.extend_from_slice(&packet::pack(TYPE_ECHO, txid, seq));
+    // On the beat, a slot after the last packet, like any packet: sent
+    // straight after it, it was on the air while a repeater relayed that
+    // last packet, and the repeater never heard it
+    ticker.next().await;
     TX_CHAN
         .send(TxRequest {
-            data: eot,
+            data: end(seq),
             preamble: None,
             channel: 0,
         })

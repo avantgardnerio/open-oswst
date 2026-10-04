@@ -23,6 +23,7 @@
 //!   profile code (`profile()`): radios with different codes can't talk
 
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Mutex;
 
 use crate::devices::settings::Settings;
 use crate::mode;
@@ -55,6 +56,12 @@ pub static TX_HOPS: Setting = Setting::number("tx_hops", 0, 0, 0).must_match();
 
 pub static SETTINGS: &[&Setting] = &[&MODE, &WIFI_ON, &START_SLOT, &HOP_SEED, &RX_HOPS, &TX_HOPS];
 
+/// This radio's friendly name, sent in every end packet (packet::Ident)
+/// and shown on the screens. None set: the short MAC
+pub static NAME: Text = Text::new("name");
+
+pub static TEXTS: &[&Text] = &[&NAME];
+
 // The flags
 
 /// Before each transmission we start (talking, or an echo replay), send a
@@ -70,6 +77,37 @@ pub static WAKE_PREAMBLE: Setting = Setting::bool("wake_preamble", false).live()
 pub static SWEEP: Setting = Setting::bool("sweep", false);
 
 pub static FLAGS: &[&Setting] = &[&WAKE_PREAMBLE, &SWEEP];
+
+/// A setting that's text: up to packet::NAME_BYTES of UTF-8, read at boot
+/// (a change applies after a reboot)
+pub struct Text {
+    pub name: &'static str,
+    value: Mutex<heapless::String<{ crate::packet::NAME_BYTES }>>,
+}
+
+impl Text {
+    const fn new(name: &'static str) -> Text {
+        Text {
+            name,
+            value: Mutex::new(heapless::String::new()),
+        }
+    }
+
+    /// Empty if the file has none
+    pub fn get(&self) -> heapless::String<{ crate::packet::NAME_BYTES }> {
+        self.value.lock().unwrap().clone()
+    }
+
+    fn parse(&self, text: &str) -> Result<heapless::String<{ crate::packet::NAME_BYTES }>, String> {
+        text.try_into().map_err(|_| {
+            format!(
+                "{} must be at most {} bytes",
+                self.name,
+                crate::packet::NAME_BYTES
+            )
+        })
+    }
+}
 
 /// One setting: its declaration and its current value
 pub struct Setting {
@@ -235,14 +273,30 @@ pub fn load(file: Option<&impl Settings>) {
         };
         setting.value.store(value, Ordering::Relaxed);
     }
+    for text in TEXTS {
+        let value = match file.and_then(|file| file.get(text.name)) {
+            Some(value) => text.parse(&value).unwrap_or_else(|e| {
+                log::warn!("Config: {}, using none", e);
+                heapless::String::new()
+            }),
+            None => heapless::String::new(),
+        };
+        *text.value.lock().unwrap() = value;
+    }
     if let Some(file) = file {
         for key in file.keys() {
-            if !all().any(|setting| setting.key() == key) {
+            let known = all().any(|setting| setting.key() == key)
+                || TEXTS.iter().any(|text| text.name == key);
+            if !known {
                 log::warn!("Config: {} is no setting of this firmware, ignored", key);
             }
         }
     }
-    log::info!("Config: {}", summary(SETTINGS));
+    log::info!(
+        "Config: {} name={:?}",
+        summary(SETTINGS),
+        NAME.get().as_str()
+    );
     log::info!("Config flags: {}", summary(FLAGS));
     log::info!("Config profile: {}", profile());
 }
@@ -253,6 +307,11 @@ pub fn check(file: &impl Settings) -> Result<(), String> {
     for setting in all() {
         if let Some(text) = file.get(&setting.key()) {
             setting.parse(&text)?;
+        }
+    }
+    for text in TEXTS {
+        if let Some(value) = file.get(text.name) {
+            text.parse(&value)?;
         }
     }
     Ok(())
@@ -312,6 +371,14 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
         )
+    }
+
+    #[test]
+    fn a_name_loads_and_a_too_long_one_is_refused() {
+        assert!(check(&file(&[("name", "eighteen-byte-name")])).is_ok());
+        assert!(check(&file(&[("name", "nineteen-bytes-name")])).is_err());
+        load(Some(&file(&[("name", "Cornelious")])));
+        assert_eq!(NAME.get(), "Cornelious");
     }
 
     #[test]

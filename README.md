@@ -281,7 +281,7 @@ bit     15     11 10          4 3      0
        +---------+-------------+--------+
        | type 5b |   txid 7b   | seq 4b |
        +---------+-------------+--------+
-       type: 0 voice, 1 echo replay, 2 wake
+       type: 0 voice, 1 echo replay, 2 wake, 3 voice end, 4 echo end (core/src/packet.rs PacketType)
        txid: random per transmission (the dedup key); seq: wraps at 16
 ```
 
@@ -301,16 +301,29 @@ symbol 0                                         42     46.25   54.25     64.25
 ms     0                                         43.0   47.4    55.6      65.8
 ```
 
-End of transmission (EOT) is the same 2 bytes with a normal 12-symbol preamble: 34.25 symbols, 35.1 ms.
+### End packet (EOT): 26 bytes, 64.25 symbols, 65.8 ms
+
+The last packet of every transmission says who sent it and where they were: a voice packet's size and air, so it fits a
+repeater's slot like one. The talker sends its own; a repeater relays it unchanged; an echo station ends its replay with its
+own. The screen shows who was last heard, how far away, and through a repeater or not.
+
+```
+byte   0               2           5           8                                26
+       +---------------+-----------+-----------+--------------------------------+
+       |  our header   | latitude  | longitude |  name, UTF-8, up to 18 bytes   |
+       | type 3 or 4   | 24 bits   | 24 bits   |          zero-padded           |
+       +---------------+-----------+-----------+--------------------------------+
+       latitude: ±90° in ±2^23 steps (~1.2 m); longitude: ±180° (~2.4 m); -2^23 latitude = no fix
+```
 
 ### A transmission
 
 ```
 PTT pressed
   +10 ms   wake packet         64.25 sym   (sent while the first 160 ms of audio is captured)
- ~220 ms   voice seq 0         64.25 sym   then one voice packet every 160 ms (156.25 sym)
+ ~190 ms   voice seq 0         64.25 sym   then one voice packet every 160 ms (156.25 sym)
      ...
- release   last voice packet, then EOT    34.25 sym
+ release   last voice packet, then EOT    64.25 sym  (who and where)
 ```
 
 An echo station sends its wake packet one slot before its replay. A repeater relays a wake packet like any other (once per
@@ -321,30 +334,30 @@ transmission), so radios that only hear the repeater can find it.
 Talkers don't hop yet (`tx_hops = 0`): every transmission stays on the start slot, channel 0. Receivers sweep `rx_hops`
 channels, and with the sweep flag a repeater relays each packet on the next of those after the one it heard it on (channel 1
 here), then goes back to listening on channel 0. It relays as soon as it has the packet, inside the gap before the talker's next
-one. Repeater steps are medians of 220 relays (the talker's packets and the echo station's replays) measured on the desk
-(`out/relay-test/20261004-103910`).
+one. Repeater steps are medians of 148 relays (the talker's packets and the echo station's replays) measured on the desk
+(`out/relay-test/20261004-111917`).
 
 ```
-symbol    0                               64.25                                138      156.25
-          |                               |                                    |        |
+symbol    0                               64.25                               137       156.25
+          |                               |                                   |         |
 talker    [=== voice seq n ===============]                                             [== seq n+1
-repeater   . RX (locked) .................]ttt[===== relay of seq n ===========]b. RX ..[
-                                           ^ t: RX done -> relay on air 8.5 ms
-                                                                                ^ b: back to RX 1.4 ms
-                                                                                 <-- slack 17.0 ms -->
-ms        0                               65.8                                 141.6    160
+repeater   . RX (locked) .................]ttt[===== relay of seq n ==========]b. RX ...[
+                                           ^ t: RX done -> relay on air 7.2 ms
+                                                                               ^ b: back to RX 1.5 ms
+                                                                                <-- slack 18.5 ms -->
+ms        0                               65.8                                140.1     160
 ```
 
 | Step (repeater) | Median | Symbols | |
 |---|---|---|---|
-| RX done → relay starts | 4.7 ms | 4.6 | `t`: read the packet out, the app hands it back to the radio |
-| standby | 0.9 ms | 0.9 | `t` |
-| prep (packet, modulation, buffer) | 2.9 ms | 2.8 | `t` |
-| tx: TX command → TxDone | 67.3 ms | 65.7 | 65.8 ms on the air + PA ramp and IRQ |
-| back to RX | 1.4 ms | 1.4 | `b` |
-| **slack before seq n+1** | **17.0 ms** | **16.6** | a relay ending later than this deafens the repeater to the next packet |
+| RX done → relay starts | 4.6 ms | 4.5 | `t`: read the packet out, the app hands it back to the radio |
+| standby | 1.0 ms | 0.9 | `t` |
+| prep (packet, modulation, buffer) | 1.6 ms | 1.6 | `t` |
+| tx: TX command → TxDone | 67.1 ms | 65.5 | 65.8 ms on the air + PA ramp and IRQ |
+| back to RX | 1.5 ms | 1.5 | `b` |
+| **slack before seq n+1** | **18.5 ms** | **18.0** | a relay ending later than this deafens the repeater to the next packet |
 
-Each repeater uses ~143 of the 160 ms. A second repeater in the chain can't fit the same slot on the same channel; that's what
+Each repeater uses ~142 of the 160 ms. A second repeater in the chain can't fit the same slot on the same channel; that's what
 hopping (each repeater relays on the next channel) is for.
 <!-- /air-diagram -->
 

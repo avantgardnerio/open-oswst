@@ -109,6 +109,18 @@ fn parse_coord(value: &str, hemisphere: &str) -> Option<f64> {
     }
 }
 
+/// Great-circle distance between two positions (lat, lon in degrees), in
+/// metres: haversine on a sphere of the Earth's mean radius. Within 0.5% of
+/// the true (ellipsoid) distance, plenty for "how far away were they"
+pub fn distance_m(a: (f64, f64), b: (f64, f64)) -> f64 {
+    const EARTH_RADIUS_M: f64 = 6_371_008.8;
+    let (lat1, lon1) = (a.0.to_radians(), a.1.to_radians());
+    let (lat2, lon2) = (b.0.to_radians(), b.1.to_radians());
+    let h = ((lat2 - lat1) / 2.0).sin().powi(2)
+        + lat1.cos() * lat2.cos() * ((lon2 - lon1) / 2.0).sin().powi(2);
+    2.0 * EARTH_RADIUS_M * h.sqrt().asin()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +184,15 @@ mod tests {
             "2026-09-30T20:55:46Z 40.54403,-105.09197 sats=6"
         );
         assert_eq!(Fix::default().to_string(), "no-date no-time no-fix sats=0");
+    }
+
+    #[test]
+    fn distances_match_known_ones() {
+        // One degree of latitude: ~111.2 km
+        assert!((distance_m((40.0, -105.0), (41.0, -105.0)) - 111_195.0).abs() < 50.0);
+        // Walk 6's far end to home, along the street: ~1.35 km
+        let d = distance_m((40.545_389, -105.107_722), (40.543_9, -105.091_85));
+        assert!((d - 1_350.0).abs() < 30.0, "{}", d);
+        assert_eq!(distance_m((40.5, -105.1), (40.5, -105.1)), 0.0);
     }
 }

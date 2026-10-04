@@ -57,8 +57,6 @@ const RADIO_CORE: Core = Core::Core0;
 const RADIO_PRIORITY: u8 = 1;
 /// Packets per run: ~6.4s each
 const PACKETS: usize = 40;
-/// A packet type nobody handles, so the app on the other radios drops it
-const TYPE_BENCH: u8 = 0x1F;
 
 type Iv =
     GenericSx126xInterfaceVariant<PinDriver<'static, esp_idf_svc::hal::gpio::Output>, TimedPin>;
@@ -262,7 +260,11 @@ async fn bench(lora: &mut Radio) -> Vec<Row> {
     for n in 0..PACKETS {
         ticker.next().await;
         let mut data = heapless::Vec::<u8, 26>::new();
-        let _ = data.extend_from_slice(&packet::pack(TYPE_BENCH, txid, n as u8 & 0x0F));
+        let _ = data.extend_from_slice(&packet::pack(
+            packet::PacketType::Bench,
+            txid,
+            n as u8 & 0x0F,
+        ));
         let _ = data.extend_from_slice(&[0xA5; PAYLOAD_BYTES]);
 
         SPI.reset();
