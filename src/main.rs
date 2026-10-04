@@ -2,7 +2,7 @@
 //! the core crate on it. Everything radio-behaviour lives in core.
 
 use core::fmt::Write as _;
-use embassy_futures::join::join3;
+use embassy_futures::join::join4;
 use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::hal::task::block_on;
 use open_oswst::devices::{encoder, fem, gps, mic, ptt, radio, screen, settings, speaker, storage};
@@ -124,7 +124,7 @@ fn main() {
         .await;
 
         log::info!("All systems ready");
-        join3(app_fut, speaker_fut, log_memory()).await;
+        join4(app_fut, speaker_fut, log_memory(), log_cpu()).await;
     });
 }
 
@@ -154,6 +154,126 @@ async fn log_memory() {
             log::info!("Stack free (least ever, B):{}", line);
         }
         embassy_time::Timer::after_secs(30).await;
+    }
+}
+
+/// Tasks the CPU log can follow; more are left out
+const CPU_MAX_TASKS: usize = 24;
+
+/// How often the CPU log samples, and how many samples make a log line
+const CPU_SAMPLE_SECS: u64 = 1;
+const CPU_SAMPLES_PER_LINE: u32 = 10;
+
+/// One task's CPU time, as the CPU log follows it
+struct TaskCpu {
+    number: u32, // FreeRTOS's task number: names aren't unique
+    name: heapless::String<16>,
+    last_us: u32,   // its run-time counter at the last sample
+    line_us: u64,   // run since the line began
+    worst_pct: u32, // its busiest second since then
+    least_pct: u32, // its idlest: for an idle task, the core's busiest
+}
+
+/// Log CPU use every 10s, like htop: each core's load and each busy task's
+/// share of a core, averaged over the 10s and in its worst 1s. The worst
+/// second is what starves the codec; an average hides it. A core's load is
+/// 100% less its idle task's share. Tasks under 1% both ways are left out
+async fn log_cpu() {
+    use esp_idf_svc::sys::*;
+    let mut tasks = heapless::Vec::<TaskCpu, CPU_MAX_TASKS>::new();
+    let mut snapshot: [TaskStatus_t; CPU_MAX_TASKS] = unsafe { core::mem::zeroed() };
+    let mut last_at = unsafe { esp_timer_get_time() };
+    let mut line_us = 0u64;
+    let mut samples = 0u32;
+    loop {
+        embassy_time::Timer::after_secs(CPU_SAMPLE_SECS).await;
+
+        let n = unsafe {
+            uxTaskGetSystemState(
+                snapshot.as_mut_ptr(),
+                CPU_MAX_TASKS as u32,
+                core::ptr::null_mut(),
+            )
+        } as usize;
+        let now = unsafe { esp_timer_get_time() };
+        let sample_us = (now - last_at).max(1) as u64;
+        last_at = now;
+        // The first sample only finds the tasks: nothing ran "since" yet
+        let priming = tasks.is_empty();
+        line_us += sample_us;
+        samples += 1;
+
+        for status in &snapshot[..n] {
+            // The counter is 32 bits of microseconds: it wraps every ~71
+            // minutes, so take differences with wrapping
+            let counter = status.ulRunTimeCounter;
+            let number = status.xTaskNumber;
+            match tasks.iter_mut().find(|t| t.number == number) {
+                Some(task) => {
+                    let ran_us = counter.wrapping_sub(task.last_us) as u64;
+                    task.last_us = counter;
+                    task.line_us += ran_us;
+                    let pct = (ran_us * 100 / sample_us) as u32;
+                    task.worst_pct = task.worst_pct.max(pct);
+                    task.least_pct = task.least_pct.min(pct);
+                }
+                // New: counted from the next sample on
+                None => {
+                    let name = unsafe { core::ffi::CStr::from_ptr(status.pcTaskName) };
+                    let mut task = TaskCpu {
+                        number,
+                        name: heapless::String::new(),
+                        last_us: counter,
+                        line_us: 0,
+                        worst_pct: 0,
+                        least_pct: u32::MAX,
+                    };
+                    let _ = task.name.push_str(&name.to_string_lossy());
+                    let _ = tasks.push(task);
+                }
+            }
+        }
+
+        if priming {
+            line_us = 0;
+            samples = 0;
+            continue;
+        }
+        if samples < CPU_SAMPLES_PER_LINE {
+            continue;
+        }
+        let avg_pct = |task: &TaskCpu| (task.line_us * 100 / line_us) as u32;
+        let mut line = heapless::String::<256>::new();
+        // Cores: 100% less idle. Idle's idlest second is the core's busiest
+        for core in ["IDLE0", "IDLE1"] {
+            if let Some(idle) = tasks.iter().find(|t| t.name == core) {
+                let _ = write!(
+                    line,
+                    " core{} {}/{}",
+                    &core[4..],
+                    100u32.saturating_sub(avg_pct(idle)),
+                    100u32.saturating_sub(idle.least_pct.min(100))
+                );
+            }
+        }
+        let _ = write!(line, " |");
+        tasks.sort_unstable_by_key(|t| core::cmp::Reverse(t.line_us));
+        for task in tasks.iter() {
+            let avg = avg_pct(task);
+            if task.name.starts_with("IDLE") || (avg < 1 && task.worst_pct < 1) {
+                continue;
+            }
+            let _ = write!(line, " {} {}/{}", task.name, avg, task.worst_pct);
+        }
+        log::info!("CPU % ({}s avg/worst 1s):{}", line_us / 1_000_000, line);
+
+        for task in tasks.iter_mut() {
+            task.line_us = 0;
+            task.worst_pct = 0;
+            task.least_pct = u32::MAX;
+        }
+        line_us = 0;
+        samples = 0;
     }
 }
 

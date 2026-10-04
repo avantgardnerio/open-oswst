@@ -40,6 +40,11 @@ CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 # (the `Stack free` log line), to size stacks and make room for WiFi
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 
+# Each task's CPU time, in microseconds from esp_timer (the `CPU` log line):
+# what starves what. Costs a timer read per context switch
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER=y
+
 # Lean WiFi (net.rs): it only carries OTA images, logs and config, so fewer
 # buffers and no frame aggregation, to leave heap for the rest of the radio
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=4
