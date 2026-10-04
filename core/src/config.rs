@@ -37,7 +37,18 @@ pub static MODE: Setting = Setting::choice("mode", &mode::NAMES, 0).live();
 /// must always bring WiFi back, the only way left to reach the radio
 pub static WIFI_ON: Setting = Setting::bool("wifi_on", true).live().unsaved();
 
-pub static SETTINGS: &[&Setting] = &[&MODE, &WIFI_ON];
+/// The channel to start on: a slot round the band (air::slots). 103 = 915
+/// MHz. The last slot is 206 at 125 kHz (a test keeps this in step)
+pub static START_SLOT: Setting = Setting::number("start_slot", 0, 206, 103).must_match();
+
+/// Seeds the order of the hop channels (air::hop_slots)
+pub static HOP_SEED: Setting = Setting::number("hop_seed", 0, i32::MAX, 0).must_match();
+
+/// How many channels to hop over, the start slot first. Only 1 works yet:
+/// nothing hops
+pub static HOP_COUNT: Setting = Setting::number("hop_count", 1, 207, 1).must_match();
+
+pub static SETTINGS: &[&Setting] = &[&MODE, &WIFI_ON, &START_SLOT, &HOP_SEED, &HOP_COUNT];
 
 // The flags
 
@@ -323,6 +334,18 @@ mod tests {
         boot.set(7, Some(&mut saved));
         assert_eq!(boot.get(), 5);
         assert_eq!(saved.get("n").as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn slot_and_hop_ranges_match_the_band() {
+        let Kind::Number { max, .. } = START_SLOT.kind else {
+            panic!("start_slot is a number");
+        };
+        assert_eq!(max as u32, crate::air::slots() - 1);
+        let Kind::Number { max, .. } = HOP_COUNT.kind else {
+            panic!("hop_count is a number");
+        };
+        assert_eq!(max as u32, crate::air::slots());
     }
 
     #[test]

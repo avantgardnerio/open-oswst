@@ -66,7 +66,8 @@ pub struct Peripherals {
     pub rf_switch_tx: Option<AnyOutputPin<'static>>,
 }
 
-pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
+/// `frequency_hz`: the channel to listen and send on
+pub async fn init(p: Peripherals, frequency_hz: u32) -> impl Future<Output = ()> {
     let spi = SpiDeviceDriver::new_single(
         p.spi,
         p.sck,
@@ -118,7 +119,7 @@ pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
             SpreadingFactor::_7,
             Bandwidth::_125KHz,
             CodingRate::_4_5,
-            915_000_000,
+            frequency_hz,
         )
         .unwrap();
 

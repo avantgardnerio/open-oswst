@@ -9,7 +9,7 @@ use open_oswst::devices::{encoder, fem, gps, mic, ptt, radio, screen, settings, 
 use open_oswst::{board, firmware, net, thread};
 use open_oswst_core::devices::network::Network;
 use open_oswst_core::platform::Platform;
-use open_oswst_core::{app, codec, config, logger};
+use open_oswst_core::{air, app, codec, config, logger};
 use std::path::Path;
 
 /// The radio thread's priority: above the codec's (5), so the codec can't
@@ -98,7 +98,7 @@ fn main() {
         codec::run(codec_rx)
     });
 
-    spawn_radio(board.radio);
+    spawn_radio(board.radio, start_frequency());
     // WiFi and the HTTP API, on core 0 at a low priority (only if networks
     // are configured)
     net::start(board.modem, wifi_networks, mac_str.to_string());
@@ -159,7 +159,23 @@ async fn log_memory() {
 /// The radio gets its own thread on core 1, so nothing else running can
 /// delay it (on core 0 with the codec, a TX step took up to 200ms instead of
 /// 75). It talks to the app only through RX_CHAN and TX_CHAN.
-fn spawn_radio(pins: radio::Peripherals) {
+/// The first hop channel's frequency, from the config. Nothing hops yet:
+/// the radio stays there
+fn start_frequency() -> u32 {
+    let hops = air::hop_slots(
+        config::START_SLOT.get() as u32,
+        config::HOP_SEED.get() as u64,
+        config::HOP_COUNT.get() as u32,
+    );
+    let hz = air::slot_hz(hops[0]);
+    log::info!("Channel: slot {} = {} Hz", hops[0], hz);
+    if hops.len() > 1 {
+        log::warn!("Config: hop_count {}, but nothing hops yet", hops.len());
+    }
+    hz
+}
+
+fn spawn_radio(pins: radio::Peripherals, frequency_hz: u32) {
     // The radio is created on this thread, not moved to it: created on core 0
     // and moved, it hung (src/bin/radio_timing.rs). lora-phy's futures are big.
     thread::spawn(
@@ -168,6 +184,6 @@ fn spawn_radio(pins: radio::Peripherals) {
         16384,
         Some(RADIO_PRIORITY),
         Some(Core::Core1),
-        move || block_on(async { radio::init(pins).await.await }),
+        move || block_on(async { radio::init(pins, frequency_hz).await.await }),
     );
 }

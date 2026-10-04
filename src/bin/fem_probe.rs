@@ -28,6 +28,7 @@ use esp_idf_svc::hal::gpio::{AnyIOPin, Output, PinDriver, Pull};
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::hal::task::block_on;
 use open_oswst::devices::radio;
+use open_oswst_core::{air, config};
 
 /// How long each FEM state is held during the RSSI test.
 const DWELL: Duration = Duration::from_secs(3);
@@ -144,7 +145,9 @@ fn main() {
         DWELL.as_secs()
     );
     block_on(async {
-        let radio = radio::init(radio_p).await;
+        // No config read here: the default start slot (915 MHz)
+        let hz = air::slot_hz(config::START_SLOT.get() as u32);
+        let radio = radio::init(radio_p, hz).await;
         join(radio, rssi_test(&mut fem, shorted)).await;
     });
 }
