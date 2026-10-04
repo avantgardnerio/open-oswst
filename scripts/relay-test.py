@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
 """The standard relay metric: handheld → repeater → echo station → back.
 
-Run it, wait ~5s (opening the ports reboots the boards), then do the usual
-desk test: PTT on the handheld, talk ~5s, let go, wait for the echo. Repeat
-as many times as you like before the capture ends. Every PTT gets the same
-report, so each fix can be compared against the last.
+Run it, then do the usual desk test: PTT on the handheld, talk ~5s, let go,
+wait for the echo. Repeat as many times as you like before the capture ends.
+Every PTT gets the same report, so each fix can be compared against the last.
 
-Each board's role comes from its boot line `Config: mode=...`, so no MACs or
-ports are hardcoded. Logs are kept in out/relay-test/<time>/, and can be
-re-reported later with --logs.
+Over WiFi (the default), every radio announcing _oswst._tcp streams its log
+live (GET /api/log/live), and its role comes from /api/status. The radios
+keep running: no reboot. Over USB (--serial), opening the ports reboots the
+boards: wait ~5s before the first PTT; roles come from the boot line
+`Config: mode=...`. WiFi captures get that line written first, so both read
+back the same. No MACs, IPs or ports are hardcoded. Logs are kept in
+out/relay-test/<time>/, and can be re-reported later with --logs.
+
+⚠️ Over WiFi the radios have WiFi on, which costs the audio some timing:
+compare WiFi runs with WiFi runs.
 
 Usage:
-    python3 scripts/relay-test.py               # capture 120s, then report
+    python3 scripts/relay-test.py               # capture 120s over WiFi, then report
     python3 scripts/relay-test.py 60            # capture 60s
+    python3 scripts/relay-test.py --serial      # capture over USB instead
     python3 scripts/relay-test.py --logs DIR    # report on a past capture
 
 The metrics, per PTT (txid):
@@ -27,15 +34,18 @@ The metrics, per PTT (txid):
   audio       Handheld speaker gaps, underruns, slow encodes, worst heap alloc
   IRQ stalls  Any board's `RADIO IRQ STALL` lines, printed first and in full
 
-Needs pyserial (system python3 has it).
+Needs pyserial (system python3 has it) for --serial, and avahi-browse for WiFi.
 """
 
+import json
 import os
 import re
 import statistics
+import subprocess
 import sys
 import threading
 import time
+import urllib.request
 
 import serial
 import serial.tools.list_ports
@@ -49,23 +59,70 @@ ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
 def main():
     args = sys.argv[1:]
+    serial_ports = "--serial" in args
+    args = [a for a in args if a != "--serial"]
     if args[:1] == ["--logs"]:
         log_dir = args[1]
     else:
         secs = float(args[0]) if args else 120.0
-        log_dir = capture(secs)
+        log_dir = capture_serial(secs) if serial_ports else capture_wifi(secs)
     report(load_boards(log_dir))
 
 
 # --- capture ---------------------------------------------------------------
 
 
-def capture(secs):
+def new_log_dir():
+    log_dir = os.path.join(ROOT, "out", "relay-test", time.strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(log_dir)
+    return log_dir
+
+
+def capture_wifi(secs):
+    radios = find_radios()
+    if not radios:
+        sys.exit("No radios found on WiFi (avahi-browse _oswst._tcp)")
+    log_dir = new_log_dir()
+    threads = []
+    for ip in radios:
+        status = json.load(urllib.request.urlopen(f"http://{ip}/api/status", timeout=10))
+        print(f"  {status['name']} {ip} {status['mode']} firmware {status['firmware']}")
+        threads.append(threading.Thread(target=read_live_log, args=(ip, status, log_dir, secs)))
+    print(f"Capturing {secs:.0f}s from {len(radios)} radios into {log_dir}")
+    print("PTT on the handheld now.")
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return log_dir
+
+
+def find_radios():
+    """IPv4 addresses of every radio announcing _oswst._tcp"""
+    out = subprocess.run(
+        ["avahi-browse", "-rtp", "_oswst._tcp"], capture_output=True, text=True, timeout=30
+    ).stdout
+    ips = {f[7] for line in out.splitlines() if (f := line.split(";"))[0] == "=" and f[2] == "IPv4"}
+    return sorted(ips)
+
+
+def read_live_log(ip, status, log_dir, secs):
+    """The radio's log as it's logged, for `secs`, after a `Config: mode=` line
+    like the boot one"""
+    name = status["mac"].replace(":", "") + ".log"
+    with open(os.path.join(log_dir, name), "w") as f:
+        f.write(f"I (0) relay-test: Config: mode={status['mode']}\n")
+        url = f"http://{ip}/api/log/live?secs={secs:.0f}"
+        with urllib.request.urlopen(url, timeout=secs + 30) as stream:
+            for line in stream:
+                f.write(line.decode(errors="replace").rstrip() + "\n")
+
+
+def capture_serial(secs):
     ports = [p for p in serial.tools.list_ports.comports() if p.vid == ESP_VID]
     if not ports:
         sys.exit("No ESP boards found")
-    log_dir = os.path.join(ROOT, "out", "relay-test", time.strftime("%Y%m%d-%H%M%S"))
-    os.makedirs(log_dir)
+    log_dir = new_log_dir()
     print(f"Capturing {secs:.0f}s from {len(ports)} boards into {log_dir}")
     print("Wait ~5s for the boards to reboot, then PTT on the handheld.")
     threads = [
