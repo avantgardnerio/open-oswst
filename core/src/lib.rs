@@ -2,6 +2,7 @@
 //! app, its protocol and codec, menus and logging. Hardware stays behind the
 //! interfaces in `devices`, which the firmware and the desktop implement.
 
+pub mod agnss;
 pub mod air;
 pub mod app;
 pub mod codec;

@@ -763,7 +763,9 @@ impl<P: Platform> App<P> {
                 position: Some((lat, lon)),
                 ..
             }) => write!(rows[1], "{:.5},{:.5}", lat, lon),
-            Some(fix) => write!(rows[1], "No fix, {} sats", fix.satellites),
+            // Used / in view: in view climbs while it acquires, used stays
+            // 0 until the fix (so it alone never showed progress)
+            Some(fix) => write!(rows[1], "No fix, {}/{} sats", fix.satellites, fix.in_view()),
             None => write!(rows[1], "No GPS"),
         };
         if let Some(heard) = &self.display.heard {

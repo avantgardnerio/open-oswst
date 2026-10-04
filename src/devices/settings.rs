@@ -30,6 +30,9 @@ pub struct Settings {
 pub struct WifiNetwork {
     pub ssid: String,
     pub password: String,
+    /// Where the network is (degrees; altitude in metres, optional): joined,
+    /// the GPS is told it's there (agnss.rs)
+    pub location: Option<(f64, f64, Option<f64>)>,
 }
 
 /// Read the config file. Missing means defaults; broken is logged and also
@@ -91,8 +94,22 @@ impl Settings {
             .iter()
             .filter_map(|entry| {
                 let text = |key| entry.get(key).and_then(|v| v.as_str()).map(String::from);
+                // A number, written with or without a decimal point
+                let number = |key| {
+                    let value = entry.get(key)?;
+                    value
+                        .as_float()
+                        .or_else(|| value.as_integer().map(|n| n as f64))
+                };
+                let location = number("lat")
+                    .zip(number("lon"))
+                    .map(|(lat, lon)| (lat, lon, number("alt")));
                 match (text("ssid"), text("password")) {
-                    (Some(ssid), Some(password)) => Some(WifiNetwork { ssid, password }),
+                    (Some(ssid), Some(password)) => Some(WifiNetwork {
+                        ssid,
+                        password,
+                        location,
+                    }),
                     _ => {
                         log::warn!("Config: a [[wifi]] entry needs ssid and password");
                         None

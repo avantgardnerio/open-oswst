@@ -27,6 +27,11 @@ pub fn is_set() -> bool {
     SOURCE.load(Ordering::Relaxed) != NOT_SET
 }
 
+/// Set by NTP: good to milliseconds, not just the GPS's ~0.5 s
+pub fn from_ntp() -> bool {
+    SOURCE.load(Ordering::Relaxed) == NTP
+}
+
 /// The GPS has a UTC date and time: set the clock from it, unless it's set
 /// already (from the GPS, or better, from NTP)
 pub fn set_from_gps(date: (u16, u8, u8), time: (u8, u8, u8)) {
@@ -58,7 +63,12 @@ pub fn start_ntp() -> Option<EspSntp<'static>> {
 
 /// Seconds since 1970 by the system clock
 pub fn now() -> i64 {
+    now_ms() / 1000
+}
+
+/// Milliseconds since 1970 by the system clock
+pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs() as i64)
+        .map_or(0, |since| since.as_millis() as i64)
 }

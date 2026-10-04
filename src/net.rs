@@ -32,7 +32,7 @@ use open_oswst_core::config;
 use open_oswst_core::devices::network::Network;
 
 use crate::devices::settings::{Settings, WifiNetwork};
-use crate::{clock, http, thread};
+use crate::{agnss, clock, http, thread};
 
 /// Where the WiFi is at, for the screen (Platform::network). Off until
 /// `start` finds networks configured.
@@ -63,9 +63,15 @@ pub fn start(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
         return;
     }
     set_state(Network::Searching);
-    thread::spawn(c"net", 8192, Some(PRIORITY), Some(Core::Core0), move || {
-        run(modem, networks, mac)
-    });
+    // 12KB: the assisted-GPS download runs ESP-IDF's HTTP client here (8KB
+    // had ~4.4KB free before it)
+    thread::spawn(
+        c"net",
+        12288,
+        Some(PRIORITY),
+        Some(Core::Core0),
+        move || run(modem, networks, mac),
+    );
 }
 
 fn run(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
@@ -95,15 +101,20 @@ fn run(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
     // the log costs a flash write that stalls both cores
     let mut joined = false;
     let mut searching_logged = false;
+    // Assisted GPS: when to next see if the orbits are due (agnss.rs)
+    let mut orbits_next_check = None;
     loop {
         if !wifi.is_connected().unwrap_or(false) {
             if joined {
                 log::info!("WiFi: lost the network");
             }
             set_state(Network::Searching);
-            joined = join(&mut wifi, &networks);
-            if joined {
+            let network = join(&mut wifi, &networks);
+            joined = network.is_some();
+            if let Some(network) = network {
                 searching_logged = false;
+                // Where and when (NTP), and fresh orbits, for the GPS
+                agnss::on_joined(network, &mut orbits_next_check);
             } else if !searching_logged {
                 log::info!(
                     "WiFi: none of the {} configured networks joined; still looking",
@@ -111,6 +122,9 @@ fn run(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
                 );
                 searching_logged = true;
             }
+        }
+        if joined {
+            agnss::fetch_if_due(&mut orbits_next_check);
         }
         if off_rx.recv_timeout(CHECK_EVERY).is_ok() {
             break;
@@ -131,13 +145,16 @@ fn run(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
     drop(off_tx);
 }
 
-/// Join the first configured network that's in range. False if none
-fn join(wifi: &mut BlockingWifi<EspWifi<'static>>, networks: &[WifiNetwork]) -> bool {
+/// Join the first configured network that's in range: which, if any
+fn join<'a>(
+    wifi: &mut BlockingWifi<EspWifi<'static>>,
+    networks: &'a [WifiNetwork],
+) -> Option<&'a WifiNetwork> {
     let in_range = match wifi.scan() {
         Ok(found) => found,
         Err(e) => {
             log::warn!("WiFi: scan failed: {}", e);
-            return false;
+            return None;
         }
     };
     for network in networks {
@@ -175,7 +192,7 @@ fn join(wifi: &mut BlockingWifi<EspWifi<'static>>, networks: &[WifiNetwork]) -> 
                     ssid: network.ssid.as_str().try_into().unwrap_or_default(),
                     ip: ip.map(|ip| ip.octets()).unwrap_or_default(),
                 });
-                return true;
+                return Some(network);
             }
             Err(e) => {
                 log::warn!("WiFi: joining {:?} failed: {}", network.ssid, e);
@@ -183,7 +200,7 @@ fn join(wifi: &mut BlockingWifi<EspWifi<'static>>, networks: &[WifiNetwork]) -> 
             }
         }
     }
-    false
+    None
 }
 
 /// mDNS: answer as NAME.local, and announce the HTTP API as `_oswst._tcp`.

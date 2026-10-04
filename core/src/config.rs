@@ -76,7 +76,16 @@ pub static WAKE_PREAMBLE: Setting = Setting::bool("wake_preamble", false).live()
 /// next channel (rx_hops). We still start transmissions on the start slot
 pub static SWEEP: Setting = Setting::bool("sweep", false);
 
-pub static FLAGS: &[&Setting] = &[&WAKE_PREAMBLE, &SWEEP];
+/// Assisted GPS (agnss.rs): at boot, tell the GPS our last fix and send it
+/// the kept satellite orbits; on joining WiFi, where the network is (its
+/// lat/lon in config.toml), the NTP time, and freshly downloaded orbits
+pub static AGNSS: Setting = Setting::bool("agnss", false);
+
+/// Testing only: at boot, make the GPS forget everything (cold start)
+/// before any assisted GPS, to time how long it takes to find a fix
+pub static GPS_COLD_START: Setting = Setting::bool("gps_cold_start", false);
+
+pub static FLAGS: &[&Setting] = &[&WAKE_PREAMBLE, &SWEEP, &AGNSS, &GPS_COLD_START];
 
 /// A setting that's text: up to packet::NAME_BYTES of UTF-8, read at boot
 /// (a change applies after a reboot)
