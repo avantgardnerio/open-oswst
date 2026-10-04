@@ -352,7 +352,7 @@ def render(m, capture):
 
     out = [BEGIN, f"## On the Air (SF{sf} / {bw} kHz)", ""]
     out.append(
-        f"LoRa SF{sf}, {bw} kHz, coding rate 4/{4 + cr}, explicit header, CRC on, {air.PREAMBLE_SYMBOLS}-symbol preamble "
+        f"LoRa SF{sf}, {bw} kHz, coding rate 4/{4 + cr}, explicit header, {air.PREAMBLE_SYMBOLS}-symbol preamble "
         f"(`core/src/air.rs`). One symbol is 2^{sf} / {bw} kHz = **{sym:.3f} ms**. Air times are Semtech's formula on our "
         f"constants; regenerate this section with `python3 scripts/air-diagram.py` after changing one."
     )
@@ -362,7 +362,13 @@ def render(m, capture):
     out += ["```", ""]
     out.append(f"- **sync**: 2 sync-word symbols + 2.25 start-of-frame symbols")
     out.append(
-        f"- **PHY header**: 20 bits (payload length, coding rate, CRC flag, header checksum), always sent at CR 4/8: "
+        "- **CRC**: ours (`core/src/crc.rs`, CRC-16/CCITT-FALSE), appended and checked by the radio driver, with LoRa's own "
+        "CRC off: the same 16 bits on the air. LoRa only checks its CRC if the received header says there is one, and noise "
+        "can corrupt a header into \"no CRC\" and still pass its checksum; ours is checked on every packet, so garbage never "
+        "reaches the app"
+    )
+    out.append(
+        f"- **PHY header**: 20 bits (payload length, coding rate, CRC flag (off), header checksum), always sent at CR 4/8: "
         f"{air.HEADER_BLOCK_SYMBOLS} symbols" + (f", which also carry the first {header_extra} payload bits" if header_extra else f" (at SF{sf}, nothing else fits)")
     )
     fit = "exactly" if spare < 8 else f"with {spare} bits to spare"
@@ -398,7 +404,8 @@ def render(m, capture):
     out.append(f"{voice_at:>8}   voice seq 0         {fmt(voice_sym)} sym   then one voice packet every {air.PERIOD_MS:.0f} ms ({fmt(slot_sym)} sym)")
     out.append("     ...")
     out.append(f" release   last voice packet, then EOT    {fmt(eot_sym)} sym")
-    out += ["```", "", "An echo station sends its wake packet one slot before its replay. Repeaters don't relay wake packets.", ""]
+    out += ["```", "", "An echo station sends its wake packet one slot before its replay. A repeater relays a wake packet like any other "
+            "(once per transmission), so radios that only hear the repeater can find it.", ""]
     out.append(f"### One slot with a repeater: {air.PERIOD_MS:.0f} ms = {fmt(slot_sym)} symbols")
     out.append("")
     if not m or "slack" not in m:
@@ -407,8 +414,10 @@ def render(m, capture):
         return "\n".join(out)
     rel = os.path.relpath(capture, air.ROOT)
     out.append(
-        f"Everything is on one channel today (the start slot); nothing hops yet. A repeater relays each packet as soon as it "
-        f"has it, inside the gap before the talker's next one. Repeater steps are medians of {m['relays']} relays (the "
+        f"Talkers don't hop yet (`tx_hops = 0`): every transmission stays on the start slot, channel 0. Receivers sweep "
+        f"`rx_hops` channels, and with the sweep flag a repeater relays each packet on the next of those after the one it "
+        f"heard it on (channel 1 here), then goes back to listening on channel 0. It relays as soon as it has the packet, "
+        f"inside the gap before the talker's next one. Repeater steps are medians of {m['relays']} relays (the "
         f"talker's packets and the echo station's replays) measured on the desk (`{rel}`)."
     )
     out += ["", "```", slot_diagram(m), "```", ""]

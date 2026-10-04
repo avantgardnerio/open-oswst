@@ -44,11 +44,16 @@ pub static START_SLOT: Setting = Setting::number("start_slot", 0, 206, 103).must
 /// Seeds the order of the hop channels (air::hop_slots)
 pub static HOP_SEED: Setting = Setting::number("hop_seed", 0, i32::MAX, 0).must_match();
 
-/// How many channels to hop over, the start slot first. Only 1 works yet:
-/// nothing hops
-pub static HOP_COUNT: Setting = Setting::number("hop_count", 1, 207, 1).must_match();
+/// How many channels a receiver sweeps (air::hop_slots, the start slot
+/// first). With the sweep flag, a repeater relays each packet on the next of
+/// these after the one it heard it on, then listens where it was
+pub static RX_HOPS: Setting = Setting::number("rx_hops", 1, 207, 1).must_match();
 
-pub static SETTINGS: &[&Setting] = &[&MODE, &WIFI_ON, &START_SLOT, &HOP_SEED, &HOP_COUNT];
+/// How many channels a transmitter hops over. 0: it stays on its channel.
+/// Only 0 is allowed yet: transmitters don't hop
+pub static TX_HOPS: Setting = Setting::number("tx_hops", 0, 0, 0).must_match();
+
+pub static SETTINGS: &[&Setting] = &[&MODE, &WIFI_ON, &START_SLOT, &HOP_SEED, &RX_HOPS, &TX_HOPS];
 
 // The flags
 
@@ -59,9 +64,9 @@ pub static SETTINGS: &[&Setting] = &[&MODE, &WIFI_ON, &START_SLOT, &HOP_SEED, &H
 pub static WAKE_PREAMBLE: Setting = Setting::bool("wake_preamble", false).live();
 
 /// Listen by sweeping the hop channels (hop_slots of start_slot, hop_seed,
-/// hop_count) with CAD while idle, instead of sitting on the start slot. A
-/// hit locks onto that channel until it goes quiet. Receive side only: we
-/// still send on the start slot. Nothing hops yet
+/// rx_hops) with CAD while idle, instead of sitting on the start slot. A
+/// hit locks onto that channel until it goes quiet. A repeater relays on the
+/// next channel (rx_hops). We still start transmissions on the start slot
 pub static SWEEP: Setting = Setting::bool("sweep", false);
 
 pub static FLAGS: &[&Setting] = &[&WAKE_PREAMBLE, &SWEEP];
@@ -348,8 +353,8 @@ mod tests {
             panic!("start_slot is a number");
         };
         assert_eq!(max as u32, crate::air::slots() - 1);
-        let Kind::Number { max, .. } = HOP_COUNT.kind else {
-            panic!("hop_count is a number");
+        let Kind::Number { max, .. } = RX_HOPS.kind else {
+            panic!("rx_hops is a number");
         };
         assert_eq!(max as u32, crate::air::slots());
     }

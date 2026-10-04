@@ -111,7 +111,8 @@ pub fn packet_us(preamble_symbols: u16, bytes: usize) -> u32 {
 }
 
 /// Symbols after the sync word for `bytes` of payload, with an explicit
-/// header and a CRC: 8 + ceil((8PL - 4SF + 28 + 16) / 4(SF - 2DE)) × (CR+4)
+/// header and a CRC: 8 + ceil((8PL - 4SF + 28 + 16) / 4(SF - 2DE)) × (CR+4).
+/// The CRC is ours (crc.rs) with LoRa's off: the same 16 bits on the air
 fn payload_symbols(bytes: usize) -> u32 {
     let sf = SPREADING_FACTOR as i32;
     // Low data rate optimisation: on for symbols over 16ms (SF11+ at 125k)

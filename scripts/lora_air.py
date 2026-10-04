@@ -76,7 +76,8 @@ def symbols_per_block():
 
 
 def payload_blocks(n_bytes):
-    """Payload blocks after the header block, explicit header and CRC on"""
+    """Payload blocks after the header block, explicit header, and a 16-bit
+    CRC (ours, core/src/crc.rs, with LoRa's off: the same bits on the air)"""
     bits = 8 * n_bytes - 4 * SPREADING_FACTOR + 28 + 16
     return max(0, math.ceil(bits / bits_per_block()))
 

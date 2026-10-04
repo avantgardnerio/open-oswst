@@ -15,6 +15,7 @@ use super::radio_bus::{self, RadioSpi};
 // The queues the app talks to; this driver connects them to the SX1262
 use open_oswst_core::air;
 use open_oswst_core::codec::PACKET_BYTES;
+use open_oswst_core::crc;
 pub use open_oswst_core::devices::radio::{Listen, RxPacket, TxRequest, LISTEN, RX_CHAN, TX_CHAN};
 
 type Radio = LoRa<Sx126x<RadioSpi, radio_bus::Interface, Sx1262>, embassy_time::Delay>;
@@ -136,11 +137,12 @@ pub async fn init(
         .unwrap();
 
     let tx_params = lora
-        .create_tx_packet_params(PREAMBLE_SYMBOLS, false, true, false, &mdltn)
+        // LoRa's CRC off: we send and check our own (open_oswst_core::crc)
+        .create_tx_packet_params(PREAMBLE_SYMBOLS, false, false, false, &mdltn)
         .unwrap();
 
     let rx_params = lora
-        .create_rx_packet_params(PREAMBLE_SYMBOLS, false, 255, true, false, &mdltn)
+        .create_rx_packet_params(PREAMBLE_SYMBOLS, false, 255, false, false, &mdltn)
         .unwrap();
 
     let sweep: Vec<ModulationParams> = sweep_hz
@@ -172,6 +174,7 @@ pub async fn init(
         ctx_gpio,
         dio1_gpio,
         rx_buf: [0; 255],
+        tx_buf: [0; 255],
         air: Air::Clear,
         sweep,
         state,
@@ -189,6 +192,7 @@ struct Driver {
     ctx_gpio: Option<i32>, // FEM CTX pad, read by the RX state check
     dio1_gpio: i32,        // DIO1 pad, read by the IRQ stall log
     rx_buf: [u8; 255],
+    tx_buf: [u8; 255], // a packet to send, with our CRC after it
     air: Air,
     sweep: Vec<ModulationParams>, // channels to sweep while idle; empty: don't
     state: State,
@@ -405,21 +409,31 @@ impl Driver {
             Ok(Some(IrqState::Done)) => {
                 // Locked: only a packet the app got keeps us on the channel.
                 // The app then says Sweep once it goes quiet. A header or a
-                // bad packet never reaches the app, so nothing would ever
-                // unlock us: leave those to the false alarm timer
+                // bad packet (CRC: receive) never reaches the app, so nothing
+                // would ever unlock us: leave those to the false alarm timer
                 if self.receive(header_at, irq_us).await {
                     if let State::Locked { heard, .. } = &mut self.state {
                         *heard = true;
                     }
                 }
             }
-            Ok(None) => log::warn!("RX CRC/header error"),
+            // A bad PHY header. A bad CRC is ours to find (receive)
+            Ok(None) => log::warn!("RX header error"),
             Err(e) => log::error!("IRQ state error: {:?}", e),
         }
         // Only the flags just handled: one raised since (e.g. the header,
         // right after the preamble) stays set and fires again. RX continuous
         // keeps running, so there's nothing to set up again.
         self.lora.clear_irq_flags_read().await.unwrap();
+    }
+
+    /// The hop channel we're receiving on: the one locked onto, or the start
+    /// slot (0) for a radio that doesn't sweep
+    fn listening_on(&self) -> u8 {
+        match self.state {
+            State::Locked { channel, .. } => channel as u8,
+            _ => 0,
+        }
     }
 
     /// A packet arrived: read it out and hand it to the app. False if it
@@ -437,9 +451,21 @@ impl Driver {
                 return false;
             }
         };
+        // Our CRC, not LoRa's: a header corrupted into "no CRC" still gets
+        // checked here, so garbage never reaches the app
+        let Some(packet) = crc::check(&self.rx_buf[..len as usize]) else {
+            log::warn!(
+                "RX CRC error [{}B] {}ms after header rssi={} snr={}",
+                len,
+                rx_ms,
+                status.rssi,
+                status.snr
+            );
+            return false;
+        };
         log::info!(
             "RX end [{}B] {}ms after header rssi={} snr={} at={}us",
-            len,
+            packet.len(),
             rx_ms,
             status.rssi,
             status.snr,
@@ -447,12 +473,13 @@ impl Driver {
         );
 
         let mut data = heapless::Vec::new();
-        let _ = data.extend_from_slice(&self.rx_buf[..len as usize]);
+        let _ = data.extend_from_slice(packet);
         RX_CHAN
             .send(RxPacket {
                 data,
                 rssi: status.rssi,
                 snr: status.snr,
+                channel: self.listening_on(),
             })
             .await;
         true
@@ -461,7 +488,8 @@ impl Driver {
     /// The app wants a packet sent: wait for clear air, then send it.
     async fn on_tx(&mut self, tx_req: TxRequest) {
         self.wait_for_clear_air().await;
-        self.transmit(&tx_req.data, tx_req.preamble).await;
+        self.transmit(&tx_req.data, tx_req.preamble, tx_req.channel)
+            .await;
     }
 
     /// CSMA: wait out any packet on the air, then the random jitter (if on),
@@ -547,28 +575,51 @@ impl Driver {
     /// Send one packet, then go back to listening. Each step is timed: a
     /// relay has to fit in the talker's gap, so every ms of turnaround counts.
     /// `preamble`: symbols, if not PREAMBLE_SYMBOLS.
-    async fn transmit(&mut self, data: &[u8], preamble: Option<u16>) {
+    async fn transmit(&mut self, data: &[u8], preamble: Option<u16>, channel: u8) {
+        // A sweeping radio can send on any of its channels; one that doesn't
+        // sweep has only the start slot. Off the channel we listen on, this
+        // costs one frequency command now and one going back to listening
+        let mdltn = self.sweep.get(channel as usize).unwrap_or(&self.mdltn);
+        let on = match channel {
+            0 => heapless::String::<8>::new(),
+            n => {
+                let mut on = heapless::String::new();
+                let _ = write!(on, " ch={}", n);
+                on
+            }
+        };
         let mut other_params;
         let params = match preamble {
             Some(symbols) => {
-                log::info!("TX start [{}B] preamble={}", data.len(), symbols);
+                log::info!("TX start [{}B] preamble={}{}", data.len(), symbols, on);
                 other_params = self
                     .lora
-                    .create_tx_packet_params(symbols, false, true, false, &self.mdltn)
+                    .create_tx_packet_params(symbols, false, false, false, mdltn)
                     .unwrap();
                 &mut other_params
             }
             None => {
-                log::info!("TX start [{}B]", data.len());
+                log::info!("TX start [{}B]{}", data.len(), on);
                 &mut self.tx_params
             }
         };
+        // Our CRC after the data (LoRa's is off: see receive)
+        let framed = data.len() + crc::CRC_BYTES;
+        if framed > self.tx_buf.len() {
+            log::error!(
+                "TX [{}B] too long for a packet and its CRC: dropped",
+                data.len()
+            );
+            return;
+        }
+        self.tx_buf[..data.len()].copy_from_slice(data);
+        self.tx_buf[data.len()..framed].copy_from_slice(&crc::crc16(data).to_be_bytes());
         TX_SINCE_MS.store(uptime_ms(), Ordering::Relaxed);
         let start = Instant::now();
         self.lora.enter_standby().await.unwrap();
         let standby_us = start.elapsed().as_micros();
         self.lora
-            .prepare_for_tx(&self.mdltn, params, TX_POWER_DBM, data)
+            .prepare_for_tx(mdltn, params, TX_POWER_DBM, &self.tx_buf[..framed])
             .await
             .unwrap();
         let prepared_us = start.elapsed().as_micros();

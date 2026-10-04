@@ -113,6 +113,7 @@ pub async fn replay(packets: Vec<Payload>, txid: u8, wake: bool) {
             .send(TxRequest {
                 data,
                 preamble: None,
+                channel: 0,
             })
             .await;
         seq = (seq + 1) & 0x0F;
@@ -124,6 +125,7 @@ pub async fn replay(packets: Vec<Payload>, txid: u8, wake: bool) {
         .send(TxRequest {
             data: eot,
             preamble: None,
+            channel: 0,
         })
         .await;
 }

@@ -291,7 +291,7 @@ fn channels() -> (u32, Vec<u32>) {
     let hops = air::hop_slots(
         config::START_SLOT.get() as u32,
         config::HOP_SEED.get() as u64,
-        config::HOP_COUNT.get() as u32,
+        config::RX_HOPS.get() as u32,
     );
     let start_hz = air::slot_hz(hops[0]);
     log::info!("Channel: slot {} = {} Hz", hops[0], start_hz);

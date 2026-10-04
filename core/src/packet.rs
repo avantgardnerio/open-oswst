@@ -23,6 +23,7 @@ pub fn wake(txid: u8) -> TxRequest {
     TxRequest {
         data,
         preamble: Some(air::wake_preamble_symbols()),
+        channel: 0,
     }
 }
 

@@ -25,6 +25,7 @@ use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::air;
 use crate::codec::{
     CodecRequest, CodecResponse, CODEC2_FRAME_SAMPLES, CODEC_REPLY, FRAMES_PER_PACKET,
     HEADER_BYTES, PACKET_BYTES, PAYLOAD_BYTES, STEREO_PACKET_SAMPLES,
@@ -112,6 +113,7 @@ pub async fn init<P: Platform>(
             // 3KB: on the heap, once. In the App it overflowed the main task's stack
             playback: Box::default(),
             own_txid: None,
+            relayed_wake: None,
         },
         sounds: Sounds {
             silence: vec![0i16; STEREO_PACKET_SAMPLES].into(),
@@ -159,6 +161,7 @@ struct Receiving {
     last_heard: Instant,           // their last packet, for RX_TIMEOUT
     playback: Box<PlaybackTiming>, // per received transmission, logged at its end
     own_txid: Option<u8>,          // our last transmission's, so we ignore it relayed back
+    relayed_wake: Option<u8>, // repeater: the last wake-up relayed (its txid), to relay each once
 }
 
 /// Audio built once at boot, played as-is
@@ -316,14 +319,32 @@ impl<P: Platform> App<P> {
             seq,
         } = packet::unpack([rx_pkt.data[0], rx_pkt.data[1]]);
 
-        // Only wakes up radios that are sweeping. Nothing sweeps yet
+        // Only wakes up radios that are sweeping: nothing to play. A repeater
+        // passes it on (once), so radios that only hear the repeater find
+        // the transmission on the channel it relays on
         if pkt_type == TYPE_WAKE {
             log::info!(
-                "RX wake txid={} rssi={} snr={}",
+                "RX wake txid={} rssi={} snr={} ch={}",
                 txid,
                 rx_pkt.rssi,
-                rx_pkt.snr
+                rx_pkt.snr,
+                rx_pkt.channel
             );
+            let ours = Some(txid) == self.rx.own_txid;
+            if mode::get() == Mode::Repeater && !ours && self.rx.relayed_wake != Some(txid) {
+                self.rx.relayed_wake = Some(txid);
+                let channel = relay_channel(rx_pkt.channel);
+                let mut relay = heapless::Vec::new();
+                let _ = relay.extend_from_slice(&rx_pkt.data);
+                TX_CHAN
+                    .send(TxRequest {
+                        data: relay,
+                        preamble: Some(air::wake_preamble_symbols()),
+                        channel,
+                    })
+                    .await;
+                log::info!("RELAY wake txid={} ch={}", txid, channel);
+            }
             return;
         }
 
@@ -358,15 +379,17 @@ impl<P: Platform> App<P> {
         // A repeater never plays the voice, so a tail on its own would be noise.
         if rx_pkt.data.len() == HEADER_BYTES {
             if mode::get() == Mode::Repeater {
+                let channel = relay_channel(rx_pkt.channel);
                 let mut relay = heapless::Vec::new();
                 let _ = relay.extend_from_slice(&rx_pkt.data);
                 TX_CHAN
                     .send(TxRequest {
                         data: relay,
                         preamble: None,
+                        channel,
                     })
                     .await;
-                log::info!("RELAY EOT txid={}", txid);
+                log::info!("RELAY EOT txid={} ch={}", txid, channel);
             } else {
                 send_to_speaker(&self.sounds.squelch);
             }
@@ -419,15 +442,23 @@ impl<P: Platform> App<P> {
 
         // Repeater: relay after dedup (non-duplicate voice)
         if mode::get() == Mode::Repeater {
+            let channel = relay_channel(rx_pkt.channel);
             let mut relay = heapless::Vec::new();
             let _ = relay.extend_from_slice(&rx_pkt.data);
             TX_CHAN
                 .send(TxRequest {
                     data: relay,
                     preamble: None,
+                    channel,
                 })
                 .await;
-            log::info!("RELAY [{}B] txid={} seq={}", rx_pkt.data.len(), txid, seq);
+            log::info!(
+                "RELAY [{}B] txid={} seq={} ch={}",
+                rx_pkt.data.len(),
+                txid,
+                seq,
+                channel
+            );
             self.rx.buffer.relayed(seq);
             // Drawn after the relay is queued, so it doesn't delay it
             self.draw_relay_screen(rx_pkt.rssi, rx_pkt.snr);
@@ -573,6 +604,7 @@ impl<P: Platform> App<P> {
             .send(TxRequest {
                 data: eot_data,
                 preamble: None,
+                channel: 0,
             })
             .await;
         packets
@@ -846,6 +878,17 @@ fn send_to_speaker(packet: &[i16]) {
     }
 }
 
+/// The channel a repeater relays on: the next hop channel after the one it
+/// heard the packet on (wrapping at rx_hops), so a relay never lands on the
+/// channel the packet came in on. Without the sweep flag every radio
+/// listens on the start slot only, so the relay stays where it was heard
+fn relay_channel(heard_on: u8) -> u8 {
+    if !config::SWEEP.is_on() {
+        return heard_on;
+    }
+    ((heard_on as u32 + 1) % config::RX_HOPS.get() as u32) as u8
+}
+
 /// Random 7-bit id for one transmission — the dedup key.
 fn random_txid<P: Platform>() -> u8 {
     (P::random() & 0x7F) as u8
@@ -876,6 +919,7 @@ async fn encode_and_send(codec_tx: &SyncSender<CodecRequest>, header: [u8; 2], p
             .send(TxRequest {
                 data: packet,
                 preamble: None,
+                channel: 0,
             })
             .await;
     }
