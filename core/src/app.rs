@@ -90,43 +90,37 @@ pub async fn init<P: Platform>(
         silence.copy_from_slice(&packet[HEADER_BYTES..]);
     }
 
-    let Devices {
-        mic,
-        ptt,
-        knob,
-        screen,
-        gps,
-        settings,
-    } = devices;
     let app = App::<P> {
-        ptt,
-        mic,
-        knob,
-        screen,
-        gps,
-        shown_fix: None,
-        shown_network: Network::Off,
-        last_gps_log: None,
-        // Last 3 bytes are enough to tell our boards apart, and leave room for the time
-        short_mac: heapless::String::try_from(&mac_str[mac_str.len() - 8..]).unwrap(),
-        settings,
+        devices,
         codec_tx,
-        // Pre-generate audio buffers
-        silence: vec![0i16; STEREO_PACKET_SAMPLES].into(),
-        squelch: generate_squelch(P::random),
-        style: MonoTextStyleBuilder::new()
-            .font(&FONT_6X10)
-            .text_color(BinaryColor::On)
-            .build(),
-        line_buf: heapless::String::new(),
-        rx: RxBuffer::default(),
-        last_rx_time: Instant::now(),
-        locked: false,
+        display: Display {
+            style: MonoTextStyleBuilder::new()
+                .font(&FONT_6X10)
+                .text_color(BinaryColor::On)
+                .build(),
+            line_buf: heapless::String::new(),
+            // Last 3 bytes are enough to tell our boards apart, and leave room for the time
+            short_mac: heapless::String::try_from(&mac_str[mac_str.len() - 8..]).unwrap(),
+            shown_fix: None,
+            shown_network: Network::Off,
+        },
+        rx: Receiving {
+            buffer: RxBuffer::default(),
+            last_heard: Instant::now(),
+            // 3KB: on the heap, once. In the App it overflowed the main task's stack
+            playback: Box::default(),
+            own_txid: None,
+        },
+        sounds: Sounds {
+            silence: vec![0i16; STEREO_PACKET_SAMPLES].into(),
+            squelch: generate_squelch(P::random),
+        },
         echo: Recorder::new(silence),
-        // 3KB: on the heap, once. In the App it overflowed the main task's stack
-        playback: Box::default(),
-        own_txid: None,
-        last_activity: Instant::now(),
+        locked: false,
+        logs: LogTimes {
+            last_activity: Instant::now(),
+            last_gps_log: None,
+        },
     };
 
     async move {
@@ -136,33 +130,43 @@ pub async fn init<P: Platform>(
 }
 
 struct App<P: Platform> {
-    ptt: P::Ptt,
-    mic: P::Mic,
-    knob: P::Knob,
-    screen: Screen,
-    gps: P::Gps,
-    shown_fix: Option<Fix>, // what the screen shows, to redraw when it changes
-    shown_network: Network, // likewise
-    last_gps_log: Option<(Instant, bool)>, // when, and whether it had a position
-    short_mac: heapless::String<8>, // e.g. A2:C6:2C
-    settings: Option<P::Settings>, // None if they couldn't be opened
+    devices: Devices<P>,
     codec_tx: SyncSender<CodecRequest>,
-    silence: Arc<[i16]>,
-    squelch: Arc<[i16]>,
+    display: Display,
+    rx: Receiving,
+    sounds: Sounds,
+    echo: Recorder, // only used in echo mode
+    locked: bool,   // PTT ignored; the menu still opens, so it can be unlocked
+    logs: LogTimes,
+}
+
+/// What the screen needs to draw, and what it last showed
+struct Display {
     style: MonoTextStyle<'static, BinaryColor>,
     line_buf: heapless::String<64>,
+    short_mac: heapless::String<8>, // e.g. A2:C6:2C
+    shown_fix: Option<Fix>,         // what the screen shows, to redraw when it changes
+    shown_network: Network,         // likewise
+}
 
-    // Track current transmitter for seq ordering
-    rx: RxBuffer<Arc<[i16]>>, // the talker we're hearing, in seq order
-    last_rx_time: Instant,
-
-    locked: bool, // PTT ignored; the menu still opens, so it can be unlocked
-
-    echo: Recorder,                // only used in echo mode
+/// The transmission we're hearing
+struct Receiving {
+    buffer: RxBuffer<Arc<[i16]>>,  // the talker we're hearing, in seq order
+    last_heard: Instant,           // their last packet, for RX_TIMEOUT
     playback: Box<PlaybackTiming>, // per received transmission, logged at its end
     own_txid: Option<u8>,          // our last transmission's, so we ignore it relayed back
+}
 
+/// Audio built once at boot, played as-is
+struct Sounds {
+    silence: Arc<[i16]>, // fills a missing packet
+    squelch: Arc<[i16]>, // tail after a received EOT
+}
+
+/// When logs were last due
+struct LogTimes {
     last_activity: Instant, // last packet heard or sent: gates log flushes
+    last_gps_log: Option<(Instant, bool)>, // when, and whether it had a position
 }
 
 impl<P: Platform> App<P> {
@@ -189,7 +193,7 @@ impl<P: Platform> App<P> {
     /// `housekeeping()`, run on the tick.
     async fn next_event(&mut self, ticker: &mut Ticker) -> AppEvent {
         let locked = self.locked;
-        let ptt = &mut self.ptt;
+        let ptt = &mut self.devices.ptt;
         let ptt = async {
             if locked {
                 core::future::pending::<()>().await;
@@ -200,7 +204,7 @@ impl<P: Platform> App<P> {
             RX_CHAN.receive(),
             ptt,
             SPK_REQ.receive(),
-            self.knob.next(),
+            self.devices.knob.next(),
             ticker.next(),
         )
         .await
@@ -220,11 +224,11 @@ impl<P: Platform> App<P> {
         // No squelch tail here: at the edge this fires mid-transmission, and a
         // tail in the middle of broken-up audio sounds like the talker let go.
         // Only a received EOT plays the tail.
-        if self.rx.txid().is_some() && self.last_rx_time.elapsed() > RX_TIMEOUT {
+        if self.rx.buffer.txid().is_some() && self.rx.last_heard.elapsed() > RX_TIMEOUT {
             log::info!("RX timeout, resetting txid lock");
             log_worst_alloc();
-            self.playback.log_and_reset();
-            self.rx.end();
+            self.rx.playback.log_and_reset();
+            self.rx.buffer.end();
             // A repeater's "Repeating" screen ends with the transmission
             if mode::get() == Mode::Repeater {
                 self.draw_rx_screen();
@@ -239,8 +243,10 @@ impl<P: Platform> App<P> {
         self.log_gps();
 
         // Idle: keep the clock and position on screen current
-        let receiving = self.rx.txid().is_some() || self.echo.txid().is_some();
-        if !receiving && (self.gps.latest() != self.shown_fix || P::network() != self.shown_network)
+        let receiving = self.rx.buffer.txid().is_some() || self.echo.txid().is_some();
+        if !receiving
+            && (self.devices.gps.latest() != self.display.shown_fix
+                || P::network() != self.display.shown_network)
         {
             self.draw_rx_screen();
         }
@@ -253,7 +259,7 @@ impl<P: Platform> App<P> {
         let repeater = mode::get() == Mode::Repeater;
         if !repeater
             && !receiving
-            && self.last_activity.elapsed() > LOG_FLUSH_IDLE
+            && self.logs.last_activity.elapsed() > LOG_FLUSH_IDLE
             && logger::pending()
         {
             logger::flush_chunk();
@@ -263,9 +269,9 @@ impl<P: Platform> App<P> {
     /// Log the fix every GPS_LOG_PERIOD, and straight away when a position
     /// is gained or lost. These lines tie the log to real time and place.
     fn log_gps(&mut self) {
-        let fix = self.gps.latest();
+        let fix = self.devices.gps.latest();
         let has_position = fix.is_some_and(|fix| fix.position.is_some());
-        let due = match self.last_gps_log {
+        let due = match self.logs.last_gps_log {
             None => true,
             Some((at, had_position)) => {
                 at.elapsed() >= GPS_LOG_PERIOD || had_position != has_position
@@ -276,12 +282,12 @@ impl<P: Platform> App<P> {
                 Some(fix) => log::info!("GPS {}", fix),
                 None => log::info!("GPS not responding"),
             }
-            self.last_gps_log = Some((Instant::now(), has_position));
+            self.logs.last_gps_log = Some((Instant::now(), has_position));
         }
     }
 
     async fn on_rx_packet(&mut self, rx_pkt: RxPacket) {
-        self.last_activity = Instant::now();
+        self.logs.last_activity = Instant::now();
         if rx_pkt.data.len() < HEADER_BYTES {
             log::warn!(
                 "RX [{}B] too short, rssi={} snr={}",
@@ -309,7 +315,7 @@ impl<P: Platform> App<P> {
         }
 
         // Our own transmission, relayed back by a repeater
-        if Some(txid) == self.own_txid {
+        if Some(txid) == self.rx.own_txid {
             log::info!(
                 "RX txid={} seq={} is our own, relayed back: dropping",
                 txid,
@@ -334,12 +340,12 @@ impl<P: Platform> App<P> {
                 TX_CHAN.send(TxRequest { data: relay }).await;
                 log::info!("RELAY EOT txid={}", txid);
             } else {
-                send_to_speaker(&self.squelch);
+                send_to_speaker(&self.sounds.squelch);
             }
             log::info!("RX EOT from txid={}", txid);
             log_worst_alloc();
-            self.playback.log_and_reset();
-            self.rx.end();
+            self.rx.playback.log_and_reset();
+            self.rx.buffer.end();
             if mode::get() == Mode::Repeater {
                 self.draw_rx_screen();
             }
@@ -353,12 +359,12 @@ impl<P: Platform> App<P> {
 
         let payload = &rx_pkt.data[HEADER_BYTES..];
 
-        let verdict = self.rx.check(txid, seq);
+        let verdict = self.rx.buffer.check(txid, seq);
         if let Verdict::OtherTxid { locked } = verdict {
             log::warn!("RX ignoring txid={} (locked to {})", txid, locked);
             return;
         }
-        self.last_rx_time = Instant::now();
+        self.rx.last_heard = Instant::now();
         match verdict {
             Verdict::Old(diff) => {
                 log::info!("RX seq={} old (diff={}), dropping", seq, diff);
@@ -389,7 +395,7 @@ impl<P: Platform> App<P> {
             let _ = relay.extend_from_slice(&rx_pkt.data);
             TX_CHAN.send(TxRequest { data: relay }).await;
             log::info!("RELAY [{}B] txid={} seq={}", rx_pkt.data.len(), txid, seq);
-            self.rx.relayed(seq);
+            self.rx.buffer.relayed(seq);
             // Drawn after the relay is queued, so it doesn't delay it
             self.draw_relay_screen(rx_pkt.rssi, rx_pkt.snr);
             return; // skip decode — fast turnaround
@@ -409,9 +415,11 @@ impl<P: Platform> App<P> {
         } = CODEC_REPLY.receive().await
         {
             let waited_us = asked.elapsed().as_micros() as u32;
-            self.playback.record(decode_us, waited_us, SPK_FRAMES.len());
+            self.rx
+                .playback
+                .record(decode_us, waited_us, SPK_FRAMES.len());
             // The speaker starts once two in a row are here
-            if let Some(first) = self.rx.insert(txid, seq, timed_alloc(|| pcm.into())) {
+            if let Some(first) = self.rx.buffer.insert(txid, seq, timed_alloc(|| pcm.into())) {
                 send_to_speaker(&first);
             }
         }
@@ -421,7 +429,7 @@ impl<P: Platform> App<P> {
             rx_pkt.data.len(),
             txid,
             seq,
-            self.rx.last_played(),
+            self.rx.buffer.last_played(),
             rx_pkt.rssi,
             rx_pkt.snr,
         );
@@ -458,26 +466,26 @@ impl<P: Platform> App<P> {
         self.draw_tx_screen();
         // Drop anything heard while we transmit it, as it comes: like on_ptt
         let txid = random_txid::<P>();
-        self.own_txid = Some(txid);
+        self.rx.own_txid = Some(txid);
         let replay = echo::replay(packets, txid);
         if let Either::Second(()) = select(replay, discard_rx()).await {
             unreachable!("discard_rx never returns");
         }
-        self.last_activity = Instant::now();
+        self.logs.last_activity = Instant::now();
         self.draw_rx_screen();
     }
 
     async fn on_ptt(&mut self) {
         // PTT pressed — reset RX state
-        self.rx.end();
+        self.rx.buffer.end();
 
         let txid = random_txid::<P>();
-        self.own_txid = Some(txid);
+        self.rx.own_txid = Some(txid);
         log::info!("PTT pressed — streaming (txid={})", txid);
 
         self.draw_tx_screen();
 
-        self.mic.drain(); // discard stale
+        self.devices.mic.drain(); // discard stale
 
         // Half-duplex: anything heard while we talk can't be played, so throw
         // it away as it comes. Left in the queue it fills up, and the radio
@@ -488,7 +496,7 @@ impl<P: Platform> App<P> {
         };
 
         log::info!("PTT released — {} packets sent + EOT", packets);
-        self.last_activity = Instant::now();
+        self.logs.last_activity = Instant::now();
 
         // Redraw RX screen
         self.draw_rx_screen();
@@ -499,11 +507,11 @@ impl<P: Platform> App<P> {
         // Pipelined: each pass captures packet N+1 while packet N is encoded and
         // sent, so the mic is drained continuously
         let mut seq: u8 = 0;
-        let mic = &mut self.mic;
+        let mic = &mut self.devices.mic;
         let codec_tx = &self.codec_tx;
         let mut pending: Option<([u8; 2], Box<[i16]>)> = None;
         let mut packets = 0usize;
-        while self.ptt.is_pressed() {
+        while self.devices.ptt.is_pressed() {
             let header = packet::pack(TYPE_VOICE, txid, seq);
             let (pcm, ()) = join(capture_packet(mic), async {
                 if let Some((header, pcm)) = pending.take() {
@@ -527,11 +535,11 @@ impl<P: Platform> App<P> {
     }
 
     fn on_speaker_request(&mut self) {
-        match self.rx.for_speaker() {
+        match self.rx.buffer.for_speaker() {
             Next::Audio(pcm) => send_to_speaker(&pcm),
             Next::Gap(seq) => {
                 log::info!("SPK gap at seq={}, sending silence", seq);
-                send_to_speaker(&self.silence);
+                send_to_speaker(&self.sounds.silence);
             }
             // Not receiving, nothing to send — DMA auto_clear handles silence
             Next::Idle => {}
@@ -545,7 +553,7 @@ impl<P: Platform> App<P> {
         speaker::set_volume(level);
         log::info!("Volume {}", level);
         // Mid-reception the next packet redraws within 160ms; don't flash "Listening"
-        if self.rx.txid().is_none() {
+        if self.rx.buffer.txid().is_none() {
             self.draw_rx_screen();
         }
     }
@@ -553,11 +561,11 @@ impl<P: Platform> App<P> {
     /// Menu mode is only menuing: audio and RX stop until we leave, and PTT
     /// is ignored.
     async fn run_menu(&mut self) {
-        self.rx.end();
+        self.rx.buffer.end();
         let mut menu = Menu::new();
         loop {
             self.draw_menu(&menu);
-            match self.knob.next().await {
+            match self.devices.knob.next().await {
                 Knob::Cw => menu.rotate(1),
                 Knob::Ccw => menu.rotate(-1),
                 Knob::Click => match menu.click() {
@@ -587,7 +595,7 @@ impl<P: Platform> App<P> {
 
     /// Persist a setting so it survives a reboot.
     fn save(&mut self, key: &str, value: &str) {
-        if let Some(settings) = self.settings.as_mut() {
+        if let Some(settings) = self.devices.settings.as_mut() {
             settings.set(key, value);
         }
     }
@@ -600,9 +608,9 @@ impl<P: Platform> App<P> {
     }
 
     fn draw_rx_screen(&mut self) {
-        let mut frame = self.screen.frame();
+        let mut frame = self.devices.screen.frame();
         self.draw_header(&mut frame);
-        Text::new("RX Listening", Point::new(28, 40), self.style)
+        Text::new("RX Listening", Point::new(28, 40), self.display.style)
             .draw(&mut frame)
             .unwrap();
 
@@ -613,27 +621,27 @@ impl<P: Platform> App<P> {
             Network::Searching => write!(line, "WiFi: searching"),
             Network::Joined(ssid) => write!(line, "WiFi: {}", ssid),
         };
-        Text::new(&line, Point::new(1, 51), self.style)
+        Text::new(&line, Point::new(1, 51), self.display.style)
             .draw(&mut frame)
             .unwrap();
-        self.shown_network = network;
+        self.display.shown_network = network;
 
         self.draw_status(&mut frame);
-        self.screen.show(frame);
+        self.devices.screen.show(frame);
     }
 
     /// Top two lines of every radio screen: short MAC and UTC time, then the
     /// GPS position (or why there isn't one).
     fn draw_header(&mut self, frame: &mut Frame) {
-        let fix = self.gps.latest();
-        self.shown_fix = fix;
+        let fix = self.devices.gps.latest();
+        self.display.shown_fix = fix;
 
         let mut line = heapless::String::<24>::new();
-        let _ = write!(line, "{}", self.short_mac);
+        let _ = write!(line, "{}", self.display.short_mac);
         if let Some((h, m, s)) = fix.and_then(|fix| fix.time) {
             let _ = write!(line, "   {:02}:{:02}:{:02}Z", h, m, s);
         }
-        Text::new(&line, Point::new(1, 10), self.style)
+        Text::new(&line, Point::new(1, 10), self.display.style)
             .draw(frame)
             .unwrap();
 
@@ -646,7 +654,7 @@ impl<P: Platform> App<P> {
             Some(fix) => write!(line, "No fix, {} sats", fix.satellites),
             None => write!(line, "No GPS"),
         };
-        Text::new(&line, Point::new(1, 22), self.style)
+        Text::new(&line, Point::new(1, 22), self.display.style)
             .draw(frame)
             .unwrap();
     }
@@ -662,25 +670,29 @@ impl<P: Platform> App<P> {
 
     /// A title, centred, with the last packet's RSSI and SNR under it.
     fn draw_signal_screen(&mut self, title: &str, rssi: i16, snr: i16) {
-        let mut frame = self.screen.frame();
+        let mut frame = self.devices.screen.frame();
         self.draw_header(&mut frame);
         // FONT_6X10: 6px per character on the 128px wide screen
         let x = (128 - 6 * title.len() as i32) / 2;
-        Text::new(title, Point::new(x, 36), self.style)
+        Text::new(title, Point::new(x, 36), self.display.style)
             .draw(&mut frame)
             .unwrap();
 
-        self.line_buf.clear();
+        self.display.line_buf.clear();
         let _ = core::fmt::write(
-            &mut self.line_buf,
+            &mut self.display.line_buf,
             format_args!("RSSI:{} SNR:{}", rssi, snr),
         );
-        Text::new(&self.line_buf, Point::new(0, 48), self.style)
-            .draw(&mut frame)
-            .unwrap();
+        Text::new(
+            &self.display.line_buf,
+            Point::new(0, 48),
+            self.display.style,
+        )
+        .draw(&mut frame)
+        .unwrap();
 
         self.draw_status(&mut frame);
-        self.screen.show(frame);
+        self.devices.screen.show(frame);
     }
 
     /// Bottom line of the RX screens: volume (and LOCKED when locked), and
@@ -691,7 +703,7 @@ impl<P: Platform> App<P> {
         if self.locked {
             let _ = write!(left, " LOCKED");
         }
-        Text::new(&left, Point::new(1, 62), self.style)
+        Text::new(&left, Point::new(1, 62), self.display.style)
             .draw(frame)
             .unwrap();
 
@@ -701,7 +713,7 @@ impl<P: Platform> App<P> {
             let _ = mode.push(c.to_ascii_uppercase());
         }
         let x = 128 - 6 * mode.len() as i32 - 1;
-        Text::new(&mode, Point::new(x, 62), self.style)
+        Text::new(&mode, Point::new(x, 62), self.display.style)
             .draw(frame)
             .unwrap();
     }
@@ -712,8 +724,8 @@ impl<P: Platform> App<P> {
         const ROW_H: i32 = 11;
         const VISIBLE: usize = 4;
 
-        let mut frame = self.screen.frame();
-        Text::new(menu.title(), Point::new(1, 9), self.style)
+        let mut frame = self.devices.screen.frame();
+        Text::new(menu.title(), Point::new(1, 9), self.display.style)
             .draw(&mut frame)
             .unwrap();
 
@@ -732,7 +744,7 @@ impl<P: Platform> App<P> {
                     .unwrap();
                 inverted
             } else {
-                self.style
+                self.display.style
             };
             Text::with_baseline(label, Point::new(4, y + 1), style, Baseline::Top)
                 .draw(&mut frame)
@@ -743,16 +755,16 @@ impl<P: Platform> App<P> {
                     .unwrap();
             }
         }
-        self.screen.show(frame);
+        self.devices.screen.show(frame);
     }
 
     fn draw_tx_screen(&mut self) {
-        let mut frame = self.screen.frame();
+        let mut frame = self.devices.screen.frame();
         self.draw_header(&mut frame);
-        Text::new("TX Streaming", Point::new(28, 40), self.style)
+        Text::new("TX Streaming", Point::new(28, 40), self.display.style)
             .draw(&mut frame)
             .unwrap();
-        self.screen.show(frame);
+        self.devices.screen.show(frame);
     }
 }
 
