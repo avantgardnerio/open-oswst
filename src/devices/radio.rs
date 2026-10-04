@@ -352,14 +352,20 @@ impl Driver {
         }
     }
 
-    /// Locked after a hit with nothing heard since: when it's a false alarm
+    /// Locked after a hit with nothing heard since: when it's a false alarm.
+    /// Never while a packet is arriving (a preamble or header, until its own
+    /// deadline): on a walk the timer ran out in the same 10ms as a header
+    /// and threw the packet away
     fn false_alarm_at(&self) -> Option<Instant> {
         match self.state {
             State::Locked {
                 hit_at,
                 heard: false,
                 ..
-            } => Some(hit_at + false_alarm_wait()),
+            } => {
+                let at = hit_at + false_alarm_wait();
+                Some(self.air.busy_until().map_or(at, |busy| at.max(busy)))
+            }
             _ => None,
         }
     }
