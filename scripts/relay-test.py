@@ -125,7 +125,7 @@ def load_boards(log_dir):
 
 
 def by_mode(boards, mode):
-    return next((b for b in boards if b.mode == mode), None)
+    return next((b for b in boards if b.mode.lower() == mode.lower()), None)
 
 
 def unique_in_order(seqs):
