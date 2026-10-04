@@ -32,7 +32,12 @@ use crate::mode;
 /// What the radio does with what it hears: a mode::Mode
 pub static MODE: Setting = Setting::choice("mode", &mode::NAMES, 0).live();
 
-pub static SETTINGS: &[&Setting] = &[&MODE];
+/// WiFi on at boot (when networks are configured). /api/wifi/off turns it
+/// off until a reboot, and that's never saved: with the menus gone, a reboot
+/// must always bring WiFi back, the only way left to reach the radio
+pub static WIFI_ON: Setting = Setting::bool("wifi_on", true).live().unsaved();
+
+pub static SETTINGS: &[&Setting] = &[&MODE, &WIFI_ON];
 
 // The flags
 
@@ -225,7 +230,7 @@ pub fn check(file: &impl Settings) -> Result<(), String> {
     Ok(())
 }
 
-/// e.g. "mode=echo"
+/// e.g. "mode=echo wifi_on=true"
 fn summary(settings: &[&Setting]) -> String {
     let pairs: Vec<String> = settings
         .iter()

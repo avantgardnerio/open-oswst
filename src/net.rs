@@ -11,7 +11,9 @@
 //!
 //! `POST /wifi/off` switches it off until the next reboot, for field tests:
 //! WiFi on core 0 costs the audio its timing. Nothing is saved, so a reboot
-//! always brings WiFi back (and with it, a way to reach the radio).
+//! always brings WiFi back (and with it, a way to reach the radio). The
+//! setting config::WIFI_ON says which it is; `wifi_on = false` in the file
+//! keeps WiFi off from boot.
 
 use std::sync::mpsc;
 use std::thread::sleep;
@@ -26,9 +28,10 @@ use esp_idf_svc::wifi::{AuthMethod, BlockingWifi, ClientConfiguration, Configura
 
 use std::sync::Mutex;
 
+use open_oswst_core::config;
 use open_oswst_core::devices::network::Network;
 
-use crate::devices::settings::WifiNetwork;
+use crate::devices::settings::{Settings, WifiNetwork};
 use crate::{clock, http, thread};
 
 /// Where the WiFi is at, for the screen (Platform::network). Off until
@@ -53,6 +56,10 @@ const PRIORITY: u8 = 3;
 pub fn start(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
     if networks.is_empty() {
         log::info!("WiFi: no networks in config.toml, staying off");
+        return;
+    }
+    if !config::WIFI_ON.is_on() {
+        log::info!("WiFi: wifi_on = false in config.toml, staying off");
         return;
     }
     set_state(Network::Searching);
@@ -102,6 +109,7 @@ fn run(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
         log::warn!("WiFi: stop failed: {}", e);
     }
     set_state(Network::Off);
+    config::WIFI_ON.set(0, None::<&mut Settings>);
     log::info!("WiFi: off until the next reboot (/wifi/off)");
     drop(off_tx);
 }
