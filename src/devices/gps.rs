@@ -6,7 +6,7 @@ use esp_idf_svc::hal::delay::TickType;
 use esp_idf_svc::hal::gpio::{AnyIOPin, AnyOutputPin, PinDriver};
 use esp_idf_svc::hal::uart::{config::Config, UartDriver, UART1};
 use esp_idf_svc::hal::units::Hertz;
-use open_oswst_core::devices::gps::{apply_nmea, Fix};
+use open_oswst_core::devices::gps::{apply_nmea, command, Fix};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -68,6 +68,12 @@ fn run(p: Peripherals, state: Arc<Mutex<State>>) {
     )
     .unwrap();
     log::info!("GPS powered, reading NMEA");
+    // Its firmware version comes back as TXT lines (logged below): proof
+    // that what we send reaches it
+    let _ = uart.write(&command("PCAS06,0"));
+    let powered = Instant::now();
+    let mut first_fix_logged = false;
+    let mut last_txt = String::with_capacity(96);
 
     let mut line = Vec::with_capacity(96);
     let mut buf = [0u8; 64];
@@ -79,6 +85,14 @@ fn run(p: Peripherals, state: Arc<Mutex<State>>) {
             match byte {
                 b'\n' => {
                     if let Ok(sentence) = std::str::from_utf8(&line) {
+                        // The GPS's own text (firmware version, antenna state),
+                        // once per change: it repeats ANTENNA OPEN every
+                        // second (normal for our passive patch antenna)
+                        if sentence.get(3..6) == Some("TXT") && sentence != last_txt {
+                            log::info!("GPS says: {}", sentence.trim_end());
+                            last_txt.clear();
+                            last_txt.push_str(sentence);
+                        }
                         let mut state = state.lock().unwrap();
                         if apply_nmea(&mut state.fix, sentence.trim_end()) {
                             state.updated = Some(Instant::now());
@@ -87,6 +101,13 @@ fn run(p: Peripherals, state: Arc<Mutex<State>>) {
                                 if !crate::clock::is_set() {
                                     crate::clock::set_from_gps(date, time);
                                 }
+                            }
+                            if state.fix.position.is_some() && !first_fix_logged {
+                                first_fix_logged = true;
+                                log::info!(
+                                    "GPS: first fix {} s after power-on",
+                                    powered.elapsed().as_secs()
+                                );
                             }
                         }
                     }

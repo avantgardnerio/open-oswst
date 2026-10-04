@@ -37,6 +37,7 @@ use crate::mode::{self, Mode};
 use crate::packet::{self, Header, Ident, PacketType, NAME_BYTES};
 use crate::rx_buffer::{Next, RxBuffer, Verdict};
 use crate::screen_text::{self, Activity, Heard};
+use crate::utc;
 
 /// Audio per packet: FRAMES_PER_PACKET × 40ms
 const PACKET_MS: u128 = FRAMES_PER_PACKET as u128 * 40;
@@ -108,6 +109,7 @@ pub async fn init<P: Platform>(
             heard: None,
             shown_fix: None,
             shown_network: Network::Off,
+            shown_time: (0, 0),
             shown_activity: Activity::Idle,
         },
         rx: Receiving {
@@ -157,6 +159,7 @@ struct Display {
     heard: Option<Heard>,               // the last transmission heard to its end
     shown_fix: Option<Fix>,             // what the screen shows, to redraw when it changes
     shown_network: Network,             // likewise
+    shown_time: (u8, u8),               // likewise: the clock's hh:mm
     shown_activity: Activity,           // likewise
 }
 
@@ -262,7 +265,8 @@ impl<P: Platform> App<P> {
         let receiving = self.rx.buffer.txid().is_some() || self.echo.txid().is_some();
         if !receiving
             && (self.devices.gps.latest() != self.display.shown_fix
-                || P::network() != self.display.shown_network)
+                || P::network() != self.display.shown_network
+                || utc::now_hm() != self.display.shown_time)
         {
             self.draw_screen(Activity::Idle);
         }
@@ -545,12 +549,9 @@ impl<P: Platform> App<P> {
                 ident,
                 rssi: rx_pkt.rssi,
                 relayed: rx_pkt.channel != 0,
-                at: self
-                    .devices
-                    .gps
-                    .latest()
-                    .and_then(|fix| fix.time)
-                    .map(|(h, m, _)| (h, m)),
+                // The system clock (NTP, else the GPS): it has the time
+                // without a fix, or any GPS at all
+                at: Some(utc::now_hm()),
             });
         }
         self.draw_screen(Activity::Idle);
@@ -763,7 +764,9 @@ impl<P: Platform> App<P> {
                 position: Some((lat, lon)),
                 ..
             }) => write!(rows[1], "{:.5},{:.5}", lat, lon),
-            Some(fix) => write!(rows[1], "No fix, {} sats", fix.satellites),
+            // Used / in view: in view climbs while it acquires, used stays
+            // 0 until the fix (so it alone never showed progress)
+            Some(fix) => write!(rows[1], "No fix, {}/{} sats", fix.satellites, fix.in_view()),
             None => write!(rows[1], "No GPS"),
         };
         if let Some(heard) = &self.display.heard {
@@ -775,7 +778,7 @@ impl<P: Platform> App<P> {
             speaker::volume(),
             self.locked,
             activity,
-            fix.and_then(|fix| fix.time).map(|(h, m, _)| (h, m)),
+            Some(utc::now_hm()),
             mode::get().name(),
         );
 
@@ -788,6 +791,7 @@ impl<P: Platform> App<P> {
         self.devices.screen.show(frame);
         self.display.shown_fix = fix;
         self.display.shown_network = network;
+        self.display.shown_time = utc::now_hm();
         self.display.shown_activity = activity;
     }
 

@@ -15,7 +15,18 @@ pub struct Fix {
     pub time: Option<(u8, u8, u8)>,   // UTC hh, mm, ss
     pub date: Option<(u16, u8, u8)>,  // yyyy, mm, dd
     pub position: Option<(f64, f64)>, // lat, lon in degrees; None without a fix
-    pub satellites: u8,
+    pub satellites: u8,               // used in the fix (GGA)
+    /// In view, per system (GSV): GPS, BeiDou, GLONASS. On our L76K these
+    /// are the satellites it hears: the count climbs as it acquires, while
+    /// `satellites` stays 0 until the fix
+    pub in_view: [u8; 3],
+}
+
+impl Fix {
+    /// Satellites in view, all systems
+    pub fn in_view(&self) -> u8 {
+        self.in_view.iter().sum()
+    }
 }
 
 /// `2026-09-30T20:49:00Z 40.54235,-105.08326 sats=7`, with `no-fix` for the
@@ -34,8 +45,15 @@ impl std::fmt::Display for Fix {
             Some((lat, lon)) => write!(f, " {:.5},{:.5}", lat, lon)?,
             None => write!(f, " no-fix")?,
         }
-        write!(f, " sats={}", self.satellites)
+        write!(f, " sats={}/{}", self.satellites, self.in_view())
     }
+}
+
+/// A text command for the GPS: `$<body>*<checksum>\r\n`, the checksum the
+/// XOR of the body's bytes. e.g. `PCAS06,0`: report the firmware version
+pub fn command(body: &str) -> Vec<u8> {
+    let sum = body.bytes().fold(0u8, |sum, byte| sum ^ byte);
+    format!("${}*{:02X}\r\n", body, sum).into_bytes()
 }
 
 /// Fold one NMEA sentence into `fix`. Returns whether it was one we use.
@@ -59,6 +77,17 @@ pub fn apply_nmea(fix: &mut Fix, sentence: &str) -> bool {
         // $GNGGA,time,lat,N,lon,E,quality,satellites,...
         Some("GGA") if fields.len() > 7 => {
             fix.satellites = fields[7].parse().unwrap_or(0);
+            true
+        }
+        // $GPGSV,messages,number,in view,... (one set per system)
+        Some("GSV") if fields.len() > 3 => {
+            let system = match fields[0].get(..2) {
+                Some("GP") => 0,
+                Some("BD" | "GB") => 1,
+                Some("GL") => 2,
+                _ => return false,
+            };
+            fix.in_view[system] = fields[3].parse().unwrap_or(0);
             true
         }
         _ => false,
@@ -178,12 +207,33 @@ mod tests {
             date: Some((2026, 9, 30)),
             position: Some((40.54403, -105.09197)),
             satellites: 6,
+            in_view: [9, 4, 0],
         };
         assert_eq!(
             fix.to_string(),
-            "2026-09-30T20:55:46Z 40.54403,-105.09197 sats=6"
+            "2026-09-30T20:55:46Z 40.54403,-105.09197 sats=6/13"
         );
-        assert_eq!(Fix::default().to_string(), "no-date no-time no-fix sats=0");
+        assert_eq!(
+            Fix::default().to_string(),
+            "no-date no-time no-fix sats=0/0"
+        );
+    }
+
+    #[test]
+    fn commands_carry_their_checksum() {
+        // docs/Quectel_L76K_GNSS_protocol_specification_V1.1.pdf, PCAS10
+        assert_eq!(command("PCAS10,0"), b"$PCAS10,0*1C\r\n");
+    }
+
+    #[test]
+    fn gsv_gives_satellites_in_view_per_system() {
+        let mut fix = Fix::default();
+        let gps = sentence("GPGSV,3,1,11,02,48,107,,05,30,296,,13,40,050,,15,62,215,,0");
+        assert!(apply_nmea(&mut fix, &gps));
+        let beidou = sentence("BDGSV,1,1,03,06,30,180,,09,41,220,,16,20,100,,0");
+        assert!(apply_nmea(&mut fix, &beidou));
+        assert_eq!(fix.in_view, [11, 3, 0]);
+        assert_eq!(fix.in_view(), 14);
     }
 
     #[test]

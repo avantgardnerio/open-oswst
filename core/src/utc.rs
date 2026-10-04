@@ -14,6 +14,16 @@ pub fn unix_seconds(
         + second as i64
 }
 
+/// The system clock's UTC hour and minute. The clock starts at 1970 each
+/// boot (00:00), until NTP or the GPS sets it (the firmware's clock.rs)
+pub fn now_hm() -> (u8, u8) {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() as i64);
+    let (_, _, _, hour, minute, _) = civil(seconds);
+    (hour as u8, minute as u8)
+}
+
 /// `2026-10-03T23:15:02Z`
 pub fn iso(seconds: i64) -> String {
     let (year, month, day, hour, minute, second) = civil(seconds);
