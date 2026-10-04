@@ -33,7 +33,7 @@ use crate::config;
 use crate::echo::{self, Recorder};
 use crate::menu::{Menu, Outcome, Setting};
 use crate::mode::{self, Mode};
-use crate::packet::{self, Header, TYPE_ECHO, TYPE_VOICE};
+use crate::packet::{self, Header, TYPE_ECHO, TYPE_VOICE, TYPE_WAKE};
 use crate::rx_buffer::{Next, RxBuffer, Verdict};
 
 /// Audio per packet: FRAMES_PER_PACKET × 40ms
@@ -304,6 +304,17 @@ impl<P: Platform> App<P> {
             seq,
         } = packet::unpack([rx_pkt.data[0], rx_pkt.data[1]]);
 
+        // Only wakes up radios that are sweeping. Nothing sweeps yet
+        if pkt_type == TYPE_WAKE {
+            log::info!(
+                "RX wake txid={} rssi={} snr={}",
+                txid,
+                rx_pkt.rssi,
+                rx_pkt.snr
+            );
+            return;
+        }
+
         if pkt_type != TYPE_VOICE && pkt_type != TYPE_ECHO {
             log::warn!(
                 "RX unknown pkt_type={} raw=[0x{:02X},0x{:02X}]",
@@ -337,7 +348,12 @@ impl<P: Platform> App<P> {
             if mode::get() == Mode::Repeater {
                 let mut relay = heapless::Vec::new();
                 let _ = relay.extend_from_slice(&rx_pkt.data);
-                TX_CHAN.send(TxRequest { data: relay }).await;
+                TX_CHAN
+                    .send(TxRequest {
+                        data: relay,
+                        preamble: None,
+                    })
+                    .await;
                 log::info!("RELAY EOT txid={}", txid);
             } else {
                 send_to_speaker(&self.sounds.squelch);
@@ -393,7 +409,12 @@ impl<P: Platform> App<P> {
         if mode::get() == Mode::Repeater {
             let mut relay = heapless::Vec::new();
             let _ = relay.extend_from_slice(&rx_pkt.data);
-            TX_CHAN.send(TxRequest { data: relay }).await;
+            TX_CHAN
+                .send(TxRequest {
+                    data: relay,
+                    preamble: None,
+                })
+                .await;
             log::info!("RELAY [{}B] txid={} seq={}", rx_pkt.data.len(), txid, seq);
             self.rx.buffer.relayed(seq);
             // Drawn after the relay is queued, so it doesn't delay it
@@ -467,7 +488,7 @@ impl<P: Platform> App<P> {
         // Drop anything heard while we transmit it, as it comes: like on_ptt
         let txid = random_txid::<P>();
         self.rx.own_txid = Some(txid);
-        let replay = echo::replay(packets, txid);
+        let replay = echo::replay(packets, txid, config::WAKE_PREAMBLE.is_on());
         if let Either::Second(()) = select(replay, discard_rx()).await {
             unreachable!("discard_rx never returns");
         }
@@ -511,6 +532,10 @@ impl<P: Platform> App<P> {
         let codec_tx = &self.codec_tx;
         let mut pending: Option<([u8; 2], Box<[i16]>)> = None;
         let mut packets = 0usize;
+        // Goes out while the first packet's audio is captured: no delay
+        if config::WAKE_PREAMBLE.is_on() {
+            TX_CHAN.send(packet::wake(txid)).await;
+        }
         while self.devices.ptt.is_pressed() {
             let header = packet::pack(TYPE_VOICE, txid, seq);
             let (pcm, ()) = join(capture_packet(mic), async {
@@ -530,7 +555,12 @@ impl<P: Platform> App<P> {
         // Send header-only EOT packet
         let mut eot_data = heapless::Vec::new();
         let _ = eot_data.extend_from_slice(&packet::pack(TYPE_VOICE, txid, seq));
-        TX_CHAN.send(TxRequest { data: eot_data }).await;
+        TX_CHAN
+            .send(TxRequest {
+                data: eot_data,
+                preamble: None,
+            })
+            .await;
         packets
     }
 
@@ -828,7 +858,12 @@ async fn encode_and_send(codec_tx: &SyncSender<CodecRequest>, header: [u8; 2], p
     let started = Instant::now();
     codec_tx.send(CodecRequest::encode(header, pcm)).unwrap();
     if let CodecResponse::Encoded { packet } = CODEC_REPLY.receive().await {
-        TX_CHAN.send(TxRequest { data: packet }).await;
+        TX_CHAN
+            .send(TxRequest {
+                data: packet,
+                preamble: None,
+            })
+            .await;
     }
     // Longer than a packet's capture stalls the pipeline, so the mic goes undrained
     let ms = started.elapsed().as_millis();

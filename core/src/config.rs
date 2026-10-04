@@ -41,7 +41,13 @@ pub static SETTINGS: &[&Setting] = &[&MODE, &WIFI_ON];
 
 // The flags
 
-pub static FLAGS: &[&Setting] = &[];
+/// Before each transmission we start (talking, or an echo replay), send a
+/// wake-up packet: a header with a preamble as long as a whole voice packet
+/// takes (air::wake_preamble_symbols), for radios that will sweep the hop
+/// channels to find. Sender only: whoever hears one logs it and drops it
+pub static WAKE_PREAMBLE: Setting = Setting::bool("wake_preamble", false).live();
+
+pub static FLAGS: &[&Setting] = &[&WAKE_PREAMBLE];
 
 /// One setting: its declaration and its current value
 pub struct Setting {

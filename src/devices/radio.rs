@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 // The queues the app talks to; this driver connects them to the SX1262
+use open_oswst_core::air;
 pub use open_oswst_core::devices::radio::{RxPacket, TxRequest, RX_CHAN, TX_CHAN};
 
 type Iv<'a> = GenericSx126xInterfaceVariant<PinDriver<'a, Output>, PinDriver<'a, Input>>;
@@ -32,15 +33,8 @@ pub const TX_POWER_DBM: i32 = 6;
 /// turns; not if they all relay at the same instant (QMesh-style).
 const TX_JITTER_MAX_MS: u32 = 0;
 
-/// Preamble length in symbols, TX and RX alike (every radio must agree). Was
-/// 8. The 2026-10-03 walk lost its return packets to missed detections, not
-/// corruption, with interference setting off the detector between real
-/// packets. A longer preamble gives the detector more to lock onto, and a
-/// second chance after a false alarm. 12, not 16: at 16 a packet (69.9ms)
-/// plus a repeater's relay of it overran the 160ms slot on the desk, and
-/// playback underran. 12 costs 4 symbols = 4.1ms per packet at SF7/125k
-/// (61.7 -> 65.8ms) and leaves a single repeater ~17ms of slack.
-const PREAMBLE_SYMBOLS: u16 = 12;
+/// Preamble length in symbols, TX and RX alike: why 12 is in air.rs
+const PREAMBLE_SYMBOLS: u16 = air::PREAMBLE_SYMBOLS;
 
 /// A detected preamble is only a maybe: if no valid header follows within
 /// this, it wasn't a packet (e.g. we started listening mid-packet and the
@@ -118,6 +112,7 @@ pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
     let mut lora = LoRa::new(radio, false, embassy_time::Delay).await.unwrap();
     log::info!("LoRa radio initialized");
 
+    // Must match air.rs's SPREADING_FACTOR, BANDWIDTH_KHZ and CODING_RATE
     let mdltn = lora
         .create_modulation_params(
             SpreadingFactor::_7,
@@ -264,7 +259,7 @@ impl Driver {
     /// The app wants a packet sent: wait for clear air, then send it.
     async fn on_tx(&mut self, tx_req: TxRequest) {
         self.wait_for_clear_air().await;
-        self.transmit(&tx_req.data).await;
+        self.transmit(&tx_req.data, tx_req.preamble).await;
     }
 
     /// CSMA: wait out any packet on the air, then the random jitter (if on),
@@ -349,14 +344,29 @@ impl Driver {
 
     /// Send one packet, then go back to listening. Each step is timed: a
     /// relay has to fit in the talker's gap, so every ms of turnaround counts.
-    async fn transmit(&mut self, data: &[u8]) {
-        log::info!("TX start [{}B]", data.len());
+    /// `preamble`: symbols, if not PREAMBLE_SYMBOLS.
+    async fn transmit(&mut self, data: &[u8], preamble: Option<u16>) {
+        let mut other_params;
+        let params = match preamble {
+            Some(symbols) => {
+                log::info!("TX start [{}B] preamble={}", data.len(), symbols);
+                other_params = self
+                    .lora
+                    .create_tx_packet_params(symbols, false, true, false, &self.mdltn)
+                    .unwrap();
+                &mut other_params
+            }
+            None => {
+                log::info!("TX start [{}B]", data.len());
+                &mut self.tx_params
+            }
+        };
         TX_SINCE_MS.store(uptime_ms(), Ordering::Relaxed);
         let start = Instant::now();
         self.lora.enter_standby().await.unwrap();
         let standby_us = start.elapsed().as_micros();
         self.lora
-            .prepare_for_tx(&self.mdltn, &mut self.tx_params, TX_POWER_DBM, data)
+            .prepare_for_tx(&self.mdltn, params, TX_POWER_DBM, data)
             .await
             .unwrap();
         let prepared_us = start.elapsed().as_micros();

@@ -1,11 +1,30 @@
 //! The 2-byte header on every packet: |5b type|7b txid|4b seq|.
-//! A header with no payload after it marks end of transmission (EOT).
+//! A voice or echo header with no payload after it marks end of
+//! transmission (EOT).
+
+use crate::air;
+use crate::devices::radio::TxRequest;
 
 /// Live voice from a PTT press
 pub const TYPE_VOICE: u8 = 0x00;
 /// Voice played back by an echo station. Plays like voice, but echo stations
 /// never echo it, so two of them can't bounce a transmission back and forth.
 pub const TYPE_ECHO: u8 = 0x01;
+
+/// Wake-up: sent first, header only, after a long preamble
+/// (air::wake_preamble_symbols) for a radio sweeping the hop channels to
+/// find. Carries no audio. Not an EOT.
+pub const TYPE_WAKE: u8 = 0x02;
+
+/// The wake-up packet for transmission `txid`
+pub fn wake(txid: u8) -> TxRequest {
+    let mut data = heapless::Vec::new();
+    let _ = data.extend_from_slice(&pack(TYPE_WAKE, txid, 0));
+    TxRequest {
+        data,
+        preamble: Some(air::wake_preamble_symbols()),
+    }
+}
 
 pub struct Header {
     pub pkt_type: u8,

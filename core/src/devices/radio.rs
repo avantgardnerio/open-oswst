@@ -13,6 +13,8 @@ pub struct RxPacket {
 
 pub struct TxRequest {
     pub data: heapless::Vec<u8, 255>,
+    /// A preamble other than the radio's usual, in symbols
+    pub preamble: Option<u16>,
 }
 
 // Static, ISR-safe

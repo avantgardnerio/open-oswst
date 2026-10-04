@@ -94,9 +94,13 @@ impl Recorder {
     }
 }
 
-/// Send a recording back out at the pace it was spoken, then an EOT.
-pub async fn replay(packets: Vec<Payload>, txid: u8) {
+/// Send a recording back out at the pace it was spoken, then an EOT. With
+/// `wake`, a wake-up packet goes first, in the slot before the audio.
+pub async fn replay(packets: Vec<Payload>, txid: u8, wake: bool) {
     Timer::after_millis(REPLAY_DELAY_MS).await;
+    if wake {
+        TX_CHAN.send(packet::wake(txid)).await;
+    }
 
     let mut ticker = Ticker::every(Duration::from_millis(PACKET_MS));
     let mut seq = 0u8;
@@ -105,11 +109,21 @@ pub async fn replay(packets: Vec<Payload>, txid: u8) {
         let mut data = heapless::Vec::new();
         let _ = data.extend_from_slice(&packet::pack(TYPE_ECHO, txid, seq));
         let _ = data.extend_from_slice(payload);
-        TX_CHAN.send(TxRequest { data }).await;
+        TX_CHAN
+            .send(TxRequest {
+                data,
+                preamble: None,
+            })
+            .await;
         seq = (seq + 1) & 0x0F;
     }
 
     let mut eot = heapless::Vec::new();
     let _ = eot.extend_from_slice(&packet::pack(TYPE_ECHO, txid, seq));
-    TX_CHAN.send(TxRequest { data: eot }).await;
+    TX_CHAN
+        .send(TxRequest {
+            data: eot,
+            preamble: None,
+        })
+        .await;
 }
