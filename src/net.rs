@@ -90,10 +90,27 @@ fn run(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
     // Sets the clock once a network with internet is joined (it retries)
     let ntp = clock::start_ntp();
 
+    // Logged only when it changes: away from the networks, every scan would
+    // say the same "none joined" (~every 20s on a walk), and each line in
+    // the log costs a flash write that stalls both cores
+    let mut joined = false;
+    let mut searching_logged = false;
     loop {
         if !wifi.is_connected().unwrap_or(false) {
+            if joined {
+                log::info!("WiFi: lost the network");
+            }
             set_state(Network::Searching);
-            join(&mut wifi, &networks);
+            joined = join(&mut wifi, &networks);
+            if joined {
+                searching_logged = false;
+            } else if !searching_logged {
+                log::info!(
+                    "WiFi: none of the {} configured networks joined; still looking",
+                    networks.len()
+                );
+                searching_logged = true;
+            }
         }
         if off_rx.recv_timeout(CHECK_EVERY).is_ok() {
             break;
@@ -114,13 +131,13 @@ fn run(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
     drop(off_tx);
 }
 
-/// Join the first configured network that's in range.
-fn join(wifi: &mut BlockingWifi<EspWifi<'static>>, networks: &[WifiNetwork]) {
+/// Join the first configured network that's in range. False if none
+fn join(wifi: &mut BlockingWifi<EspWifi<'static>>, networks: &[WifiNetwork]) -> bool {
     let in_range = match wifi.scan() {
         Ok(found) => found,
         Err(e) => {
             log::warn!("WiFi: scan failed: {}", e);
-            return;
+            return false;
         }
     };
     for network in networks {
@@ -157,7 +174,7 @@ fn join(wifi: &mut BlockingWifi<EspWifi<'static>>, networks: &[WifiNetwork]) {
                 set_state(Network::Joined(
                     network.ssid.as_str().try_into().unwrap_or_default(),
                 ));
-                return;
+                return true;
             }
             Err(e) => {
                 log::warn!("WiFi: joining {:?} failed: {}", network.ssid, e);
@@ -165,10 +182,7 @@ fn join(wifi: &mut BlockingWifi<EspWifi<'static>>, networks: &[WifiNetwork]) {
             }
         }
     }
-    log::info!(
-        "WiFi: none of the {} configured networks joined",
-        networks.len()
-    );
+    false
 }
 
 /// mDNS: answer as NAME.local, and announce the HTTP API as `_oswst._tcp`.

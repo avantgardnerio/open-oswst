@@ -128,9 +128,10 @@ fn main() {
     });
 }
 
-/// Log memory every 30s, to size the WiFi and HTTP stack before adding it:
-/// the heap (free now, the largest block one allocation can get, the least
-/// ever free), and each task's stack at its fullest (the least ever free).
+/// Log memory every 5 minutes: the heap (free now, the largest block one
+/// allocation can get, the least ever free), and each task's stack at its
+/// fullest (the least ever free). The least-evers only move when something
+/// new happens, so more often only fills the log
 async fn log_memory() {
     use esp_idf_svc::sys::*;
     const MAX_TASKS: usize = 24;
@@ -153,7 +154,7 @@ async fn log_memory() {
             }
             log::info!("Stack free (least ever, B):{}", line);
         }
-        embassy_time::Timer::after_secs(30).await;
+        embassy_time::Timer::after_secs(300).await;
     }
 }
 
@@ -162,7 +163,7 @@ const CPU_MAX_TASKS: usize = 24;
 
 /// How often the CPU log samples, and how many samples make a log line
 const CPU_SAMPLE_SECS: u64 = 1;
-const CPU_SAMPLES_PER_LINE: u32 = 10;
+const CPU_SAMPLES_PER_LINE: u32 = 60;
 
 /// One task's CPU time, as the CPU log follows it
 struct TaskCpu {
@@ -174,14 +175,17 @@ struct TaskCpu {
     least_pct: u32, // its idlest: for an idle task, the core's busiest
 }
 
-/// Log CPU use every 10s, like htop: each core's load and each busy task's
-/// share of a core, averaged over the 10s and in its worst 1s. The worst
+/// Log CPU use every 60s, like htop: each core's load and each busy task's
+/// share of a core, averaged over the minute and in its worst 1s. The worst
 /// second is what starves the codec; an average hides it. A core's load is
 /// 100% less its idle task's share. Tasks under 1% both ways are left out
 async fn log_cpu() {
     use esp_idf_svc::sys::*;
-    let mut tasks = heapless::Vec::<TaskCpu, CPU_MAX_TASKS>::new();
-    let mut snapshot: [TaskStatus_t; CPU_MAX_TASKS] = unsafe { core::mem::zeroed() };
+    // Both tables live across the sample timer's await, so in this future,
+    // which is on the main task's stack: ~2KB there cost it ~4.5KB of
+    // headroom (Stack free log, 2026-10-04). Allocated once, on the heap
+    let mut tasks = Box::new(heapless::Vec::<TaskCpu, CPU_MAX_TASKS>::new());
+    let mut snapshot: Box<[TaskStatus_t; CPU_MAX_TASKS]> = Box::new(unsafe { core::mem::zeroed() });
     let mut last_at = unsafe { esp_timer_get_time() };
     let mut line_us = 0u64;
     let mut samples = 0u32;

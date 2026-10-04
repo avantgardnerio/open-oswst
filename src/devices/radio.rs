@@ -45,8 +45,7 @@ const HEADER_WAIT: Duration = Duration::from_millis(35);
 /// someone else would still be on the air when this runs out.
 const PACKET_END_WAIT: Duration = Duration::from_millis(60);
 
-/// How often to log the receiver's state. Matches the GPS log, so each check
-/// lines up with a position.
+/// How often to log the receiver's state (or, sweeping, the sweep's)
 const RX_STATE_EVERY_SECS: u64 = 10;
 
 /// Sweeping: CAD for 2 symbols, detection peak 22, minimum 10. The fastest

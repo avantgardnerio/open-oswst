@@ -49,8 +49,9 @@ const HOUSEKEEPING_PERIOD: embassy_time::Duration = embassy_time::Duration::from
 const RX_TIMEOUT: Duration = Duration::from_millis(500);
 /// Air quiet this long before log lines are written to flash
 const LOG_FLUSH_IDLE: Duration = Duration::from_secs(3);
-/// How often the GPS fix goes in the log (also whenever it's gained or lost)
-const GPS_LOG_PERIOD: Duration = Duration::from_secs(10);
+/// How often the GPS fix goes in the log (also whenever it's gained or
+/// lost). Walking, 30s is ~40m: enough to place a transmission
+const GPS_LOG_PERIOD: Duration = Duration::from_secs(30);
 
 /// What woke the app up
 // Rx is ~260B bigger than the rest, but an event lives only until it's matched,
