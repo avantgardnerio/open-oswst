@@ -3,7 +3,7 @@ use crate::devices::knob::{Event as Knob, Knob as _};
 use crate::devices::mic::Mic;
 use crate::devices::network::Network;
 use crate::devices::ptt::Ptt;
-use crate::devices::radio::{RxPacket, TxRequest, RX_CHAN, TX_CHAN};
+use crate::devices::radio::{Listen, RxPacket, TxRequest, LISTEN, RX_CHAN, TX_CHAN};
 use crate::devices::screen::{Frame, Screen};
 use crate::devices::speaker::{self, MAX_VOLUME, SPK_FRAMES, SPK_REQ};
 use crate::logger;
@@ -44,7 +44,8 @@ const STEREO_FRAME_SAMPLES: usize = CODEC2_FRAME_SAMPLES * 2;
 
 /// How often `housekeeping()` runs
 const HOUSEKEEPING_PERIOD: embassy_time::Duration = embassy_time::Duration::from_millis(250);
-/// No packet from the current talker for this long: they're gone
+/// No packet from the current talker for this long: they're gone. And with
+/// nothing heard or sent for this long, the radio may sweep again
 const RX_TIMEOUT: Duration = Duration::from_millis(500);
 /// Air quiet this long before log lines are written to flash
 const LOG_FLUSH_IDLE: Duration = Duration::from_secs(3);
@@ -121,6 +122,7 @@ pub async fn init<P: Platform>(
             last_activity: Instant::now(),
             last_gps_log: None,
         },
+        swept_after: None,
     };
 
     async move {
@@ -138,6 +140,7 @@ struct App<P: Platform> {
     echo: Recorder, // only used in echo mode
     locked: bool,   // PTT ignored; the menu still opens, so it can be unlocked
     logs: LogTimes,
+    swept_after: Option<Instant>, // the quiet we last told the radio to sweep in
 }
 
 /// What the screen needs to draw, and what it last showed
@@ -238,6 +241,14 @@ impl<P: Platform> App<P> {
         // Echo mode: the talker went quiet without an EOT. Replay anyway
         if self.echo.timed_out() {
             self.replay_echo().await;
+        }
+
+        // Nothing heard or sent for a while: the radio may sweep again (if
+        // it sweeps at all). Once per quiet spell
+        let quiet_since = self.logs.last_activity;
+        if quiet_since.elapsed() > RX_TIMEOUT && self.swept_after != Some(quiet_since) {
+            LISTEN.signal(Listen::Sweep);
+            self.swept_after = Some(quiet_since);
         }
 
         self.log_gps();
@@ -483,6 +494,7 @@ impl<P: Platform> App<P> {
 
     async fn replay_echo(&mut self) {
         let packets = self.echo.take();
+        LISTEN.signal(Listen::Hold);
         log::info!("ECHO replaying {} packets", packets.len());
         self.draw_tx_screen();
         // Drop anything heard while we transmit it, as it comes: like on_ptt
@@ -499,6 +511,7 @@ impl<P: Platform> App<P> {
     async fn on_ptt(&mut self) {
         // PTT pressed — reset RX state
         self.rx.buffer.end();
+        LISTEN.signal(Listen::Hold);
 
         let txid = random_txid::<P>();
         self.rx.own_txid = Some(txid);

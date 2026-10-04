@@ -58,7 +58,13 @@ pub static SETTINGS: &[&Setting] = &[&MODE, &WIFI_ON, &START_SLOT, &HOP_SEED, &H
 /// channels to find. Sender only: whoever hears one logs it and drops it
 pub static WAKE_PREAMBLE: Setting = Setting::bool("wake_preamble", false).live();
 
-pub static FLAGS: &[&Setting] = &[&WAKE_PREAMBLE];
+/// Listen by sweeping the hop channels (hop_slots of start_slot, hop_seed,
+/// hop_count) with CAD while idle, instead of sitting on the start slot. A
+/// hit locks onto that channel until it goes quiet. Receive side only: we
+/// still send on the start slot. Nothing hops yet
+pub static SWEEP: Setting = Setting::bool("sweep", false);
+
+pub static FLAGS: &[&Setting] = &[&WAKE_PREAMBLE, &SWEEP];
 
 /// One setting: its declaration and its current value
 pub struct Setting {

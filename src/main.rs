@@ -98,7 +98,8 @@ fn main() {
         codec::run(codec_rx)
     });
 
-    spawn_radio(board.radio, start_frequency());
+    let (start_hz, sweep_hz) = channels();
+    spawn_radio(board.radio, start_hz, sweep_hz);
     // WiFi and the HTTP API, on core 0 at a low priority (only if networks
     // are configured)
     net::start(board.modem, wifi_networks, mac_str.to_string());
@@ -159,31 +160,34 @@ async fn log_memory() {
 /// The radio gets its own thread on core 1, so nothing else running can
 /// delay it (on core 0 with the codec, a TX step took up to 200ms instead of
 /// 75). It talks to the app only through RX_CHAN and TX_CHAN.
-/// The first hop channel's frequency, from the config. Nothing hops yet:
-/// the radio stays there
-fn start_frequency() -> u32 {
+/// From the config: the channel we send on (the first hop channel), and
+/// the channels to sweep while idle (none unless the sweep flag is on).
+/// Nothing hops yet: we send on the first one only
+fn channels() -> (u32, Vec<u32>) {
     let hops = air::hop_slots(
         config::START_SLOT.get() as u32,
         config::HOP_SEED.get() as u64,
         config::HOP_COUNT.get() as u32,
     );
-    let hz = air::slot_hz(hops[0]);
-    log::info!("Channel: slot {} = {} Hz", hops[0], hz);
-    if hops.len() > 1 {
-        log::warn!("Config: hop_count {}, but nothing hops yet", hops.len());
+    let start_hz = air::slot_hz(hops[0]);
+    log::info!("Channel: slot {} = {} Hz", hops[0], start_hz);
+    if !config::SWEEP.is_on() {
+        return (start_hz, Vec::new());
     }
-    hz
+    log::info!("Channel: sweeping slots {:?}", hops);
+    (start_hz, hops.into_iter().map(air::slot_hz).collect())
 }
 
-fn spawn_radio(pins: radio::Peripherals, frequency_hz: u32) {
+fn spawn_radio(pins: radio::Peripherals, frequency_hz: u32, sweep_hz: Vec<u32>) {
     // The radio is created on this thread, not moved to it: created on core 0
     // and moved, it hung (src/bin/radio_timing.rs). lora-phy's futures are big.
     thread::spawn(
         c"radio",
-        // ~9.6KB used at worst (Stack free log, 2026-10-02)
-        16384,
+        // 16KB overflowed with the sweep (CAD) path added (2026-10-03);
+        // ~9.6KB used at worst before it (Stack free log, 2026-10-02)
+        24576,
         Some(RADIO_PRIORITY),
         Some(Core::Core1),
-        move || block_on(async { radio::init(pins, frequency_hz).await.await }),
+        move || block_on(async { radio::init(pins, frequency_hz, sweep_hz).await.await }),
     );
 }

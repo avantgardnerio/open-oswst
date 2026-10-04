@@ -1,5 +1,5 @@
 use core::fmt::Write as _;
-use embassy_futures::select::{select, select3, Either, Either3};
+use embassy_futures::select::{select, select4, Either, Either4};
 use esp_idf_svc::hal::gpio::{AnyIOPin, AnyInputPin, AnyOutputPin};
 use esp_idf_svc::hal::gpio::{Input, Output, Pin, PinDriver, Pull};
 use esp_idf_svc::hal::spi::config::Config as SpiConfig;
@@ -8,7 +8,7 @@ use esp_idf_svc::hal::units::Hertz;
 use lora_phy::iv::GenericSx126xInterfaceVariant;
 use lora_phy::mod_params::*;
 use lora_phy::mod_traits::IrqState;
-use lora_phy::sx126x::{self, Sx1262, Sx126x, TcxoCtrlVoltage};
+use lora_phy::sx126x::{self, CADSymbols, Sx1262, Sx126x, TcxoCtrlVoltage};
 use lora_phy::LoRa;
 use std::future::Future;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 
 // The queues the app talks to; this driver connects them to the SX1262
 use open_oswst_core::air;
-pub use open_oswst_core::devices::radio::{RxPacket, TxRequest, RX_CHAN, TX_CHAN};
+use open_oswst_core::codec::PACKET_BYTES;
+pub use open_oswst_core::devices::radio::{Listen, RxPacket, TxRequest, LISTEN, RX_CHAN, TX_CHAN};
 
 type Iv<'a> = GenericSx126xInterfaceVariant<PinDriver<'a, Output>, PinDriver<'a, Input>>;
 type Radio<'a> =
@@ -52,6 +53,22 @@ const PACKET_END_WAIT: Duration = Duration::from_millis(60);
 /// lines up with a position.
 const RX_STATE_EVERY_SECS: u64 = 10;
 
+/// Sweeping: CAD for 2 symbols, detection peak 22, minimum 10. The fastest
+/// setting with no false alarms on the desk (src/bin/cad_test.rs)
+const CAD_SETTINGS: (CADSymbols, u8, u8) = (CADSymbols::_2, 22, 10);
+
+/// Sweeping: how long the TCXO gets to start. Every CAD ends with the chip
+/// in STDBY_RC, which stops the TCXO, so each channel waits this. lora-phy's
+/// default is 10ms; 2ms is the TCXO's datasheet maximum (KDS DSB321SDN)
+const TCXO_WAKEUP_US: u32 = 2_000;
+
+/// Sweeping: a hit with no header within this was a false alarm (or a
+/// voice packet's short preamble, caught too late to receive it): back to
+/// sweeping. A slot and a packet, so the next packet gets its chance
+fn false_alarm_wait() -> Duration {
+    Duration::from_micros((air::slot_us() + air::packet_us(PREAMBLE_SYMBOLS, PACKET_BYTES)) as u64)
+}
+
 pub struct Peripherals {
     pub spi: SPI2<'static>,
     pub sck: AnyIOPin<'static>,
@@ -66,8 +83,13 @@ pub struct Peripherals {
     pub rf_switch_tx: Option<AnyOutputPin<'static>>,
 }
 
-/// `frequency_hz`: the channel to listen and send on
-pub async fn init(p: Peripherals, frequency_hz: u32) -> impl Future<Output = ()> {
+/// `frequency_hz`: the channel to send on, and to listen on unless
+/// `sweep_hz` lists channels to sweep while idle
+pub async fn init(
+    p: Peripherals,
+    frequency_hz: u32,
+    sweep_hz: Vec<u32>,
+) -> impl Future<Output = ()> {
     let spi = SpiDeviceDriver::new_single(
         p.spi,
         p.sck,
@@ -107,9 +129,14 @@ pub async fn init(p: Peripherals, frequency_hz: u32) -> impl Future<Output = ()>
     // Keep the TCXO running between TX and RX: otherwise each TX waits ~10ms
     // for it to start, and so does listening again after it. And don't
     // rewrite settings the chip already has: each costs ~0.5ms of SPI
-    let radio = Sx126x::new(spi, iv, config)
+    let mut radio = Sx126x::new(spi, iv, config)
         .with_oscillator_kept_on()
         .with_unchanged_settings_skipped();
+    if !sweep_hz.is_empty() {
+        radio.set_tcxo_wakeup_us(TCXO_WAKEUP_US);
+        let (symbols, det_peak, det_min) = CAD_SETTINGS;
+        radio.set_cad_params(symbols, det_peak, det_min);
+    }
     let mut lora = LoRa::new(radio, false, embassy_time::Delay).await.unwrap();
     log::info!("LoRa radio initialized");
 
@@ -131,6 +158,27 @@ pub async fn init(p: Peripherals, frequency_hz: u32) -> impl Future<Output = ()>
         .create_rx_packet_params(PREAMBLE_SYMBOLS, false, 255, true, false, &mdltn)
         .unwrap();
 
+    let sweep: Vec<ModulationParams> = sweep_hz
+        .iter()
+        .map(|&hz| {
+            lora.create_modulation_params(
+                SpreadingFactor::_7,
+                Bandwidth::_125KHz,
+                CodingRate::_4_5,
+                hz,
+            )
+            .unwrap()
+        })
+        .collect();
+    let state = if sweep.is_empty() {
+        State::Fixed
+    } else {
+        State::Sweeping {
+            next: 0,
+            ready: false,
+        }
+    };
+
     let mut driver = Driver {
         lora,
         mdltn,
@@ -140,6 +188,9 @@ pub async fn init(p: Peripherals, frequency_hz: u32) -> impl Future<Output = ()>
         dio1_gpio,
         rx_buf: [0; 255],
         air: Air::Clear,
+        sweep,
+        state,
+        sweep_stats: SweepStats::default(),
     };
     async move { driver.run().await }
 }
@@ -154,6 +205,39 @@ struct Driver {
     dio1_gpio: i32,        // DIO1 pad, read by the IRQ stall log
     rx_buf: [u8; 255],
     air: Air,
+    sweep: Vec<ModulationParams>, // channels to sweep while idle; empty: don't
+    state: State,
+    sweep_stats: SweepStats,
+}
+
+/// How the radio listens. With sweep channels, the app moves it between
+/// sweeping and locked (LISTEN); a CAD hit locks it on its own, and a hit
+/// that comes to nothing (no header) unlocks it
+#[derive(Clone, Copy)]
+enum State {
+    /// RX on our one channel, always (no sweep channels)
+    Fixed,
+    /// CAD on each sweep channel in turn. `ready`: the chip is set up for
+    /// CAD (any TX or RX in between undoes that)
+    Sweeping { next: usize, ready: bool },
+    /// RX on sweep channel `channel`: a CAD hit there at `hit_at`, or the
+    /// app said Hold (channel 0, the start slot). `heard`: a header or a
+    /// packet since, or the app's Hold: then it stays until the app says Sweep
+    Locked {
+        channel: usize,
+        hit_at: Instant,
+        heard: bool,
+    },
+}
+
+/// The sweep since the last log line
+#[derive(Default)]
+struct SweepStats {
+    checks: u32,
+    check_us: u64,
+    max_check_us: u32,
+    hits: u32,
+    false_alarms: u32,
 }
 
 /// What's on the air, as far as this radio can tell
@@ -168,31 +252,144 @@ enum Air {
 
 impl Driver {
     /// Listen, and handle whichever comes first: an IRQ from the radio, a
-    /// packet to send, or the periodic RX state check.
+    /// packet to send, or the periodic RX state check. Sweeping, it checks
+    /// one channel per pass instead.
     async fn run(&mut self) {
-        self.enter_rx().await;
-        self.log_rx_state().await;
+        self.resume_listening().await;
+        self.on_rx_state_due().await;
         // A fixed deadline, not a fresh 10s timer each pass: busy RX would keep
         // resetting that one and the check would never run
         let every = embassy_time::Duration::from_secs(RX_STATE_EVERY_SECS);
         let mut next_rx_state = embassy_time::Instant::now() + every;
 
         loop {
-            match select3(
-                self.lora.wait_for_irq(),
-                TX_CHAN.receive(),
-                embassy_time::Timer::at(next_rx_state),
-            )
-            .await
-            {
-                Either3::First(irq) => self.on_irq(irq).await,
-                Either3::Second(tx_req) => self.on_tx(tx_req).await,
-                Either3::Third(()) => {
+            if let State::Sweeping { next, ready } = self.state {
+                if embassy_time::Instant::now() >= next_rx_state {
                     next_rx_state += every;
                     self.on_rx_state_due().await;
                 }
+                self.sweep_step(next, ready).await;
+                continue;
+            }
+            // Locked after a hit: the timer also wakes us for a false alarm
+            let wake = match self.false_alarm_at() {
+                Some(at) => next_rx_state.min(deadline(at)),
+                None => next_rx_state,
+            };
+            match select4(
+                self.lora.wait_for_irq(),
+                TX_CHAN.receive(),
+                LISTEN.wait(),
+                embassy_time::Timer::at(wake),
+            )
+            .await
+            {
+                Either4::First(irq) => self.on_irq(irq).await,
+                Either4::Second(tx_req) => self.on_tx(tx_req).await,
+                Either4::Third(listen) => self.on_listen(listen).await,
+                Either4::Fourth(()) => {
+                    if self.false_alarm_at().is_some_and(|at| Instant::now() >= at) {
+                        self.on_false_alarm();
+                    }
+                    if embassy_time::Instant::now() >= next_rx_state {
+                        next_rx_state += every;
+                        self.on_rx_state_due().await;
+                    }
+                }
             }
         }
+    }
+
+    /// One channel of the sweep: CAD on it, and lock on if it's busy. The
+    /// app's word on how to listen, then a packet waiting to be sent, go
+    /// first. Never inside a select: lora-phy says a CAD mustn't be cancelled
+    async fn sweep_step(&mut self, next: usize, ready: bool) {
+        if let Some(listen) = LISTEN.try_take() {
+            self.on_listen(listen).await;
+            return;
+        }
+        if let Ok(tx_req) = TX_CHAN.try_receive() {
+            self.on_tx(tx_req).await;
+            return;
+        }
+        let channel = &self.sweep[next];
+        if !ready {
+            self.lora.prepare_for_cad(channel).await.unwrap();
+        }
+        let started = Instant::now();
+        self.lora
+            .retune_for_cad(channel.frequency_in_hz)
+            .await
+            .unwrap();
+        let hit = self.lora.cad(channel).await.unwrap();
+        self.sweep_stats.record(hit, started.elapsed());
+        if !hit {
+            let next = (next + 1) % self.sweep.len();
+            self.state = State::Sweeping { next, ready: true };
+            return;
+        }
+        log::info!(
+            "SWEEP hit on channel {} ({} Hz): locked",
+            next,
+            channel.frequency_in_hz
+        );
+        self.state = State::Locked {
+            channel: next,
+            hit_at: Instant::now(),
+            heard: false,
+        };
+        self.resume_listening().await;
+    }
+
+    /// The app's word on how to listen. Without sweep channels, nothing to do
+    async fn on_listen(&mut self, listen: Listen) {
+        match (listen, self.state) {
+            (_, State::Fixed) => {}
+            (Listen::Hold, _) => {
+                log::info!("SWEEP hold: the start slot");
+                self.state = State::Locked {
+                    channel: 0,
+                    hit_at: Instant::now(),
+                    heard: true,
+                };
+                self.resume_listening().await;
+            }
+            (Listen::Sweep, State::Sweeping { .. }) => {}
+            (Listen::Sweep, State::Locked { channel, .. }) => {
+                log::info!("SWEEP unlock channel {}: quiet", channel);
+                self.air = Air::Clear;
+                self.state = State::Sweeping {
+                    next: 0,
+                    ready: false,
+                };
+            }
+        }
+    }
+
+    /// Locked after a hit with nothing heard since: when it's a false alarm
+    fn false_alarm_at(&self) -> Option<Instant> {
+        match self.state {
+            State::Locked {
+                hit_at,
+                heard: false,
+                ..
+            } => Some(hit_at + false_alarm_wait()),
+            _ => None,
+        }
+    }
+
+    /// A hit, but no header followed: back to sweeping, from the next channel
+    fn on_false_alarm(&mut self) {
+        let State::Locked { channel, .. } = self.state else {
+            return;
+        };
+        self.sweep_stats.false_alarms += 1;
+        log::info!("SWEEP unlock channel {}: no header after the hit", channel);
+        self.air = Air::Clear;
+        self.state = State::Sweeping {
+            next: (channel + 1) % self.sweep.len(),
+            ready: false,
+        };
     }
 
     /// The radio raised an IRQ while listening.
@@ -210,6 +407,14 @@ impl Driver {
         };
         let state = self.lora.get_irq_state().await;
         self.air = Air::after(&state);
+        // Locked: a header or a packet (good or bad) keeps us on the channel
+        if let (
+            State::Locked { heard, .. },
+            Ok(Some(IrqState::HeaderValid | IrqState::Done)) | Ok(None),
+        ) = (&mut self.state, &state)
+        {
+            *heard = true;
+        }
         match state {
             Ok(Some(IrqState::PreambleReceived)) => log::info!("RX preamble"),
             Ok(Some(IrqState::HeaderValid)) => log::info!("RX header"),
@@ -374,7 +579,7 @@ impl Driver {
         // SetTx → TxDone: air time plus the PA ramp (and the TCXO wake-up, if off)
         self.lora.tx().await.unwrap();
         let sent_us = start.elapsed().as_micros();
-        self.enter_rx().await;
+        self.resume_listening().await;
         let rx_us = start.elapsed().as_micros();
         log::info!(
             "TX end [{}B] {}ms: standby={}us prep={}us tx={}us back_to_rx={}us at={}us",
@@ -390,16 +595,29 @@ impl Driver {
     }
 
     /// Time for the periodic RX state log. Mid-packet the reading would be
-    /// the packet, not the noise floor, so skip it then.
+    /// the packet, not the noise floor, so skip it then. Sweeping, the chip
+    /// isn't receiving: the sweep's numbers instead.
     async fn on_rx_state_due(&mut self) {
-        if self.air.busy_until().is_none() {
+        if let State::Sweeping { .. } = self.state {
+            self.sweep_stats.log_and_reset(self.sweep.len());
+        } else if self.air.busy_until().is_none() {
             self.log_rx_state().await;
         }
     }
 
-    async fn enter_rx(&mut self) {
+    /// Back to listening after a TX or a lock: RX on our channel, or on the
+    /// one locked onto. Sweeping needs nothing now; the next CAD sets up.
+    async fn resume_listening(&mut self) {
+        let channel = match self.state {
+            State::Fixed => &self.mdltn,
+            State::Locked { channel, .. } => &self.sweep[channel],
+            State::Sweeping { next, .. } => {
+                self.state = State::Sweeping { next, ready: false };
+                return;
+            }
+        };
         self.lora
-            .prepare_for_rx(RxMode::Continuous, &self.mdltn, &self.rx_params)
+            .prepare_for_rx(RxMode::Continuous, channel, &self.rx_params)
             .await
             .unwrap();
         self.lora.start_rx().await.unwrap();
@@ -461,6 +679,33 @@ impl Driver {
             rssi,
             if seen.is_empty() { " none" } else { seen }
         );
+    }
+}
+
+impl SweepStats {
+    fn record(&mut self, hit: bool, took: Duration) {
+        let us = took.as_micros() as u32;
+        self.checks += 1;
+        self.check_us += us as u64;
+        self.max_check_us = self.max_check_us.max(us);
+        self.hits += hit as u32;
+    }
+
+    /// e.g. `SWEEP: 1370 checks, 7.3ms avg (max 8.1) = 36ms per 5 channels,
+    /// 2 hits, 0 false alarms`
+    fn log_and_reset(&mut self, channels: usize) {
+        let avg_us = self.check_us / self.checks.max(1) as u64;
+        log::info!(
+            "SWEEP: {} checks, {:.1}ms avg (max {:.1}) = {}ms per {} channels, {} hits, {} false alarms",
+            self.checks,
+            avg_us as f32 / 1000.0,
+            self.max_check_us as f32 / 1000.0,
+            avg_us * channels as u64 / 1000,
+            channels,
+            self.hits,
+            self.false_alarms
+        );
+        *self = SweepStats::default();
     }
 }
 

@@ -147,7 +147,7 @@ fn main() {
     block_on(async {
         // No config read here: the default start slot (915 MHz)
         let hz = air::slot_hz(config::START_SLOT.get() as u32);
-        let radio = radio::init(radio_p, hz).await;
+        let radio = radio::init(radio_p, hz, Vec::new()).await;
         join(radio, rssi_test(&mut fem, shorted)).await;
     });
 }

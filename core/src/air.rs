@@ -5,7 +5,7 @@
 //! The LoRa constants are the radio's setup (src/devices/radio.rs uses them
 //! or must match them). They move into the config as we go.
 
-use crate::codec::{HEADER_BYTES, PACKET_BYTES};
+use crate::codec::{FRAMES_PER_PACKET, HEADER_BYTES, PACKET_BYTES};
 
 /// LoRa spreading factor. radio.rs sets SpreadingFactor::_7: keep in step
 pub const SPREADING_FACTOR: u32 = 7;
@@ -90,6 +90,11 @@ impl SplitMix64 {
 pub fn wake_preamble_symbols() -> u16 {
     let extra = payload_symbols(PACKET_BYTES) - payload_symbols(HEADER_BYTES);
     PREAMBLE_SYMBOLS + extra as u16
+}
+
+/// One packet's audio, and so the time from one packet to the next: 160ms
+pub fn slot_us() -> u32 {
+    FRAMES_PER_PACKET as u32 * 40_000
 }
 
 /// 2^SF / bandwidth: 1024us at SF7/125k
