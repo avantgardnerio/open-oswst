@@ -11,9 +11,6 @@
 //!   GET  /api/firmware    download the app image running
 //!   POST /api/reboot
 //!   POST /api/wifi/off    WiFi off until the next reboot (net.rs)
-//!   GET  /api/log/live?secs=N   every log line as it's logged, for N
-//!                         seconds (default 120): serial over WiFi. One
-//!                         reader at a time; other requests wait meanwhile
 //!   /fs/...               the storage (/data) as a WebDAV folder, read and
 //!                         write: config.toml, log/, anything (webdav.rs)
 //!
@@ -27,7 +24,7 @@ use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::http::server::{Configuration, EspHttpConnection, EspHttpServer, Request};
 use esp_idf_svc::http::Method;
 use esp_idf_svc::io::Write;
-use open_oswst_core::{config, logger, mode};
+use open_oswst_core::{config, mode};
 
 use crate::devices::storage;
 use crate::{firmware, webdav};
@@ -58,7 +55,6 @@ pub fn start(name: &str, mac: &str, wifi_off: Sender<()>) -> Option<EspHttpServe
         .and_then(|s| s.fn_handler("/api/ota", Method::Post, ota))
         .and_then(|s| s.fn_handler("/api/firmware", Method::Get, download_firmware))
         .and_then(|s| s.fn_handler("/api/reboot", Method::Post, reboot))
-        .and_then(|s| s.fn_handler("/api/log/live", Method::Get, live_log))
         .and_then(|s| {
             s.fn_handler("/api/wifi/off", Method::Post, move |req| {
                 switch_wifi_off(req, &wifi_off)
@@ -169,36 +165,6 @@ fn download_firmware(req: Req) -> Result {
         offset += n;
     }
     Ok(())
-}
-
-/// Most a live log runs, s
-const LIVE_LOG_MAX_SECS: u64 = 600;
-
-/// Stream each log line as it's logged, for ?secs=N, or until the reader
-/// hangs up. Waits on the logger, so it costs nothing while nothing is logged.
-fn live_log(req: Req) -> Result {
-    let secs = req
-        .uri()
-        .split_once("secs=")
-        .and_then(|(_, n)| n.split('&').next()?.parse().ok())
-        .unwrap_or(120u64)
-        .min(LIVE_LOG_MAX_SECS);
-    let mut resp = req.into_response(200, None, &[("Content-Type", "text/plain")])?;
-    logger::tap_open();
-    log::info!("Live log: streaming for {}s", secs);
-    let end = std::time::Instant::now() + Duration::from_secs(secs);
-    let mut sent = Ok(());
-    while let Some(left) = end.checked_duration_since(std::time::Instant::now()) {
-        let lines = logger::tap_wait(left);
-        if !lines.is_empty() {
-            sent = resp.write_all(&lines);
-            if sent.is_err() {
-                break; // the reader hung up
-            }
-        }
-    }
-    logger::tap_close();
-    Ok(sent?)
 }
 
 fn reboot(req: Req) -> Result {

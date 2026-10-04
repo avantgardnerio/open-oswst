@@ -8,10 +8,6 @@
 //!
 //! Line format matches ESP-IDF's: `I (12345) target: message`.
 //!
-//! A live reader (GET /api/log/live) gets its own copy of each line while
-//! it's connected: the tap, a second buffer that only it empties. It never
-//! touches flash, so it's safe on a repeater, and the file log is unchanged.
-//!
 //! Files rotate the usual way: a new one per boot, `NNNN.txt`, numbered one
 //! past the newest; a file that reaches MAX_FILE_BYTES continues in the next
 //! number (its first line says so). The oldest are deleted to keep at most
@@ -24,16 +20,13 @@ use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Condvar, Mutex, OnceLock};
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
 
 /// RAM held for lines not yet written: ~13s of busy radio traffic. Was 48KB;
 /// cut to make room for WiFi (logs can be fetched over HTTP now)
 const BUFFER_BYTES: usize = 16 * 1024;
 /// Most written per `flush_chunk()`, cut at a line end
 const CHUNK_BYTES: usize = 512;
-/// RAM for the tap, while one is open: the reader takes lines as they come
-const TAP_BYTES: usize = 8 * 1024;
 /// Delete old log files until the partition is below this full
 const MAX_USED_PERCENT: usize = 80;
 /// A file this big continues in the next one: a walk (~500KB) is 2-3 files
@@ -49,8 +42,6 @@ struct Logger {
     file_level: LevelFilter,
     buffer: Mutex<Buffer>,
     file: Mutex<Option<LogFile>>,
-    tap: Mutex<Option<Buffer>>, // Some while a live reader is connected
-    tap_ready: Condvar,         // a line went into the tap
 }
 
 /// The file being written, and what rotating it needs
@@ -76,8 +67,6 @@ static LOGGER: Logger = Logger {
         dropped: 0,
     }),
     file: Mutex::new(None),
-    tap: Mutex::new(None),
-    tap_ready: Condvar::new(),
 };
 
 /// Install as the `log` backend. The console works from here on; the file
@@ -143,43 +132,6 @@ pub fn flush_chunk() -> bool {
         let _ = file.write(&chunk);
     }
     more
-}
-
-/// Start copying lines to the tap, for one live reader. A second reader
-/// takes over the first's tap.
-pub fn tap_open() {
-    *LOGGER.tap.lock().unwrap() = Some(Buffer {
-        bytes: VecDeque::with_capacity(TAP_BYTES),
-        dropped: 0,
-    });
-}
-
-/// Stop copying, and free the tap's RAM
-pub fn tap_close() {
-    *LOGGER.tap.lock().unwrap() = None;
-}
-
-/// Wait up to `timeout` for lines in the tap, then take them all, after a
-/// marker if any were dropped. Empty if none came, or no tap is open.
-pub fn tap_wait(timeout: Duration) -> Vec<u8> {
-    let tap = LOGGER.tap.lock().unwrap();
-    let (mut tap, _) = LOGGER
-        .tap_ready
-        .wait_timeout_while(tap, timeout, |tap| {
-            tap.as_ref()
-                .is_some_and(|tap| tap.bytes.is_empty() && tap.dropped == 0)
-        })
-        .unwrap();
-    let Some(tap) = tap.as_mut() else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    let dropped = std::mem::take(&mut tap.dropped);
-    if dropped > 0 {
-        out.extend(format!("-- {} lines dropped (log tap full) --\n", dropped).as_bytes());
-    }
-    out.extend(tap.bytes.drain(..));
-    out
 }
 
 impl LogFile {
@@ -273,15 +225,6 @@ impl Log for Logger {
                 buffer.bytes.extend(line.as_bytes());
             } else {
                 buffer.dropped += 1;
-            }
-            drop(buffer);
-            if let Some(tap) = self.tap.lock().unwrap().as_mut() {
-                if tap.bytes.len() + line.len() <= TAP_BYTES {
-                    tap.bytes.extend(line.as_bytes());
-                } else {
-                    tap.dropped += 1;
-                }
-                self.tap_ready.notify_one();
             }
         }
     }
