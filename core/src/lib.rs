@@ -4,6 +4,7 @@
 
 pub mod app;
 pub mod codec;
+pub mod config;
 pub mod devices;
 pub mod echo;
 pub mod fec;

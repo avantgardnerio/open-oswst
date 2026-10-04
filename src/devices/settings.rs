@@ -10,13 +10,13 @@
 //! password = "..."
 //! ```
 //!
-//! The app's settings are top-level text values (`get` / `set`). The WiFi
-//! networks are for the firmware (`wifi_networks`), tried in order.
+//! The settings and flags (`get` / `set`) are declared in core's config.rs.
+//! The WiFi networks are for the firmware (`wifi_networks`), tried in order.
 
 use std::fs;
 use std::io::ErrorKind;
 
-use open_oswst_core::mode::Mode;
+use open_oswst_core::config;
 
 use crate::devices::storage;
 
@@ -67,25 +67,24 @@ pub fn replace(text: &str) -> std::io::Result<()> {
     fs::rename(&new, &path)
 }
 
-/// Can this firmware use `text` as its config? It must parse as TOML, and a
-/// mode, if there is one, must be one we know. A file that fails is refused
-/// (webdav.rs), and the old one stays
+/// Can this firmware use `text` as its config? It must parse as TOML, and
+/// every setting in it must have a value the setting can take. A file that
+/// fails is refused (webdav.rs), and the old one stays
 pub fn check(text: &str) -> Result<(), String> {
     let table = text.parse::<toml::Table>().map_err(|e| e.to_string())?;
-    match table
-        .get("mode")
-        .map(|mode| mode.as_str().and_then(Mode::from_name))
-    {
-        Some(None) => Err("mode must be normal, repeater or echo".to_string()),
-        _ => Ok(()),
-    }
+    config::check(&Settings { table })
 }
+
+/// The [flags] table's name in the file, and in a key (`flags.x`)
+const FLAGS: &str = "flags";
+/// The WiFi networks: the firmware's, not a setting
+const WIFI: &str = "wifi";
 
 impl Settings {
     /// The WiFi networks to try, in the order listed. Malformed entries are
     /// skipped and logged.
     pub fn wifi_networks(&self) -> Vec<WifiNetwork> {
-        let Some(entries) = self.table.get("wifi").and_then(|wifi| wifi.as_array()) else {
+        let Some(entries) = self.table.get(WIFI).and_then(|wifi| wifi.as_array()) else {
             return Vec::new();
         };
         entries
@@ -113,14 +112,53 @@ impl Settings {
 
 impl open_oswst_core::devices::settings::Settings for Settings {
     fn get(&self, key: &str) -> Option<String> {
-        match self.table.get(key)? {
+        let value = match key.split_once('.') {
+            Some((FLAGS, flag)) => self.table.get(FLAGS)?.get(flag)?,
+            _ => self.table.get(key)?,
+        };
+        match value {
             toml::Value::String(text) => Some(text.clone()),
             other => Some(other.to_string()),
         }
     }
 
+    /// Saved as TOML's own type: `true`, `42`, else a string
     fn set(&mut self, key: &str, value: &str) {
-        self.table.insert(key.into(), value.into());
+        let value = if let Ok(on) = value.parse::<bool>() {
+            toml::Value::Boolean(on)
+        } else if let Ok(n) = value.parse::<i64>() {
+            toml::Value::Integer(n)
+        } else {
+            toml::Value::String(value.into())
+        };
+        match key.split_once('.') {
+            Some((FLAGS, flag)) => {
+                let flags = self
+                    .table
+                    .entry(FLAGS)
+                    .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+                if let Some(flags) = flags.as_table_mut() {
+                    flags.insert(flag.into(), value);
+                }
+            }
+            _ => {
+                self.table.insert(key.into(), value);
+            }
+        }
         self.save();
+    }
+
+    fn keys(&self) -> Vec<String> {
+        let mut keys = Vec::new();
+        for (key, value) in &self.table {
+            match (key.as_str(), value) {
+                (WIFI, _) => {}
+                (FLAGS, toml::Value::Table(flags)) => {
+                    keys.extend(flags.keys().map(|flag| format!("{}.{}", FLAGS, flag)))
+                }
+                _ => keys.push(key.clone()),
+            }
+        }
+        keys
     }
 }

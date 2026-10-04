@@ -9,7 +9,7 @@ use open_oswst::devices::{encoder, fem, gps, mic, ptt, radio, screen, settings, 
 use open_oswst::{board, firmware, net, thread};
 use open_oswst_core::devices::network::Network;
 use open_oswst_core::platform::Platform;
-use open_oswst_core::{app, codec, logger, mode};
+use open_oswst_core::{app, codec, config, logger};
 use std::path::Path;
 
 /// The radio thread's priority: above the codec's (5), so the codec can't
@@ -73,13 +73,9 @@ fn main() {
 
     // After storage: the settings are a file on it
     let settings = settings::init();
-    let mode = mode::load(Some(&settings));
-    log::info!(
-        "Config: mode={:?}, {} WiFi network(s)",
-        mode,
-        settings.wifi_networks().len()
-    );
+    config::load(Some(&settings));
     let wifi_networks = settings.wifi_networks();
+    log::info!("Config: {} WiFi network(s)", wifi_networks.len());
     let settings = Some(settings);
 
     // Get MAC for display

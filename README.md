@@ -102,10 +102,13 @@ boot log from the first line, `python3 scripts/boot-log.py <PORT>`. Never flash 
 ### Device Config
 
 Each board's settings are a text file on its storage: `/data/config.toml`. On the newest PCB rev the on-device menu (click the VOL knob)
-sets the mode and rewrites the file.
+sets the mode and rewrites the file. Every setting and flag is declared in `core/src/config.rs`; each boot logs their values
+and a 4-digit settings profile (also in `/api/status`): radios with different profiles can't hear each other.
 
 ```toml
 mode = "repeater"        # normal | repeater | echo
+
+[flags]                  # experiments, come and go (core/src/config.rs lists them)
 
 [[wifi]]                 # networks to join, tried in order
 ssid = "Starlink"

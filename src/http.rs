@@ -2,7 +2,8 @@
 //! knowing the WiFi password is the security.
 //!
 //!   GET  /api/status      name, MAC, firmware (and whether it's confirmed),
-//!                         OTA slot, mode, uptime, heap (JSON)
+//!                         OTA slot, mode, settings profile, uptime, heap
+//!                         (JSON)
 //!   POST /api/ota         install /data/firmware.bin (`espflash save-image`,
 //!                         put there over /fs/): into the spare app slot,
 //!                         checked, then reboot. It must run a minute or the
@@ -23,7 +24,7 @@ use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::http::server::{Configuration, EspHttpConnection, EspHttpServer, Request};
 use esp_idf_svc::http::Method;
 use esp_idf_svc::io::Write;
-use open_oswst_core::mode;
+use open_oswst_core::{config, mode};
 
 use crate::devices::storage;
 use crate::{firmware, webdav};
@@ -92,6 +93,7 @@ fn status(req: Req, name: &str, mac: &str) -> Result {
         firmware_state: firmware::state(),
         slot: &slot,
         mode: mode::get().name(),
+        profile: config::profile(),
         uptime_s,
         heap_free,
         heap_min,
@@ -115,6 +117,8 @@ struct Status<'a> {
     /// The app partition running: ota_0 or ota_1
     slot: &'a str,
     mode: &'static str,
+    /// Radios must have the same to hear each other (config.rs)
+    profile: String,
     uptime_s: i64,
     heap_free: u32,
     heap_min: u32,

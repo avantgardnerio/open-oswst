@@ -5,7 +5,6 @@ use crate::devices::network::Network;
 use crate::devices::ptt::Ptt;
 use crate::devices::radio::{RxPacket, TxRequest, RX_CHAN, TX_CHAN};
 use crate::devices::screen::{Frame, Screen};
-use crate::devices::settings::Settings;
 use crate::devices::speaker::{self, MAX_VOLUME, SPK_FRAMES, SPK_REQ};
 use crate::logger;
 use crate::platform::Platform;
@@ -30,6 +29,7 @@ use crate::codec::{
     CodecRequest, CodecResponse, CODEC2_FRAME_SAMPLES, CODEC_REPLY, FRAMES_PER_PACKET,
     HEADER_BYTES, PACKET_BYTES, PAYLOAD_BYTES, STEREO_PACKET_SAMPLES,
 };
+use crate::config;
 use crate::echo::{self, Recorder};
 use crate::menu::{Menu, Outcome, Setting};
 use crate::mode::{self, Mode};
@@ -585,18 +585,7 @@ impl<P: Platform> App<P> {
         log::info!("Menu: {:?} = {}", setting, value);
         match setting {
             Setting::Lock => self.locked = value != 0,
-            Setting::Mode => {
-                let mode = Mode::from_u8(value);
-                mode::set(mode);
-                self.save("mode", mode.name());
-            }
-        }
-    }
-
-    /// Persist a setting so it survives a reboot.
-    fn save(&mut self, key: &str, value: &str) {
-        if let Some(settings) = self.devices.settings.as_mut() {
-            settings.set(key, value);
+            Setting::Mode => config::MODE.set(value as i32, self.devices.settings.as_mut()),
         }
     }
 
