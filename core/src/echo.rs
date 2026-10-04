@@ -50,14 +50,15 @@ impl Recorder {
     }
 
     /// Store one packet. The first packet starts a recording; packets from
-    /// anyone else are ignored until it ends.
-    pub fn record(&mut self, txid: u8, seq: u8, payload: &[u8]) {
+    /// anyone else are ignored until it ends. False if not stored (someone
+    /// else's, or a copy already stored)
+    pub fn record(&mut self, txid: u8, seq: u8, payload: &[u8]) -> bool {
         match self.txid {
             None => {
                 self.txid = Some(txid);
                 self.next_seq = seq;
             }
-            Some(current) if current != txid => return,
+            Some(current) if current != txid => return false,
             Some(_) => {}
         }
         self.last_rx = Instant::now();
@@ -65,7 +66,7 @@ impl Recorder {
         // A backwards step is a duplicate, e.g. heard again via a repeater
         let missing = seq.wrapping_sub(self.next_seq) & 0x0F;
         if missing > 7 {
-            return;
+            return false;
         }
         for _ in 0..missing {
             self.push(self.silence);
@@ -74,6 +75,7 @@ impl Recorder {
         stored.copy_from_slice(payload);
         self.push(stored);
         self.next_seq = seq.wrapping_add(1) & 0x0F;
+        true
     }
 
     fn push(&mut self, payload: Payload) {

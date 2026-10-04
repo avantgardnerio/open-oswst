@@ -29,8 +29,10 @@ const BUFFER_BYTES: usize = 16 * 1024;
 const CHUNK_BYTES: usize = 512;
 /// Delete old log files until the partition is below this full
 const MAX_USED_PERCENT: usize = 80;
-/// A file this big continues in the next one: a walk (~500KB) is 2-3 files
-const MAX_FILE_BYTES: u64 = 256 * 1024;
+/// A file this big continues in the next one. An hour's walk logs ~500KB
+/// (2026-10-04): 1MB keeps one in a single file. MAX_USED_PERCENT still
+/// caps the total (~8 files this size on the 10MB partition)
+const MAX_FILE_BYTES: u64 = 1024 * 1024;
 /// Most log files kept
 const MAX_FILES: usize = 50;
 
@@ -328,14 +330,17 @@ mod tests {
     fn a_full_file_continues_in_the_next() {
         let dir = test_dir("rotate");
         let mut log = LogFile::start(&dir, 7, plenty_of_space).unwrap();
-        let chunk = vec![b'x'; 100 * 1024];
-        // Three chunks: 300KB, past the cap, but a file is only checked
-        // before a write, so 7 takes them all
+        // Each 2/5 of a file: three go past the cap, but a file is only
+        // checked before a write, so 7 takes them all
+        let chunk = vec![b'x'; (MAX_FILE_BYTES * 2 / 5) as usize];
         for _ in 0..3 {
             log.write(&chunk).unwrap();
         }
         assert_eq!(sorted_numbers(&dir), [7]);
-        assert_eq!(fs::metadata(log_path(&dir, 7)).unwrap().len(), 300 * 1024);
+        assert_eq!(
+            fs::metadata(log_path(&dir, 7)).unwrap().len(),
+            3 * chunk.len() as u64
+        );
         // The next write starts 8, which says where it came from
         log.write(&chunk).unwrap();
         assert_eq!(sorted_numbers(&dir), [7, 8]);

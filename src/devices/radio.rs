@@ -58,6 +58,32 @@ const CAD_SETTINGS: (CADSymbols, u8, u8) = (CADSymbols::_2, 22, 10);
 /// default is 10ms; 2ms is the TCXO's datasheet maximum (KDS DSB321SDN)
 const TCXO_WAKEUP_US: u32 = 2_000;
 
+/// Following a transmission on two channels (Follow): a repeater's relay
+/// goes on the air this long after the packet it relays ends (RX done to
+/// relay on air, desk median 2026-10-04: 8.5ms)
+const RELAY_GAP: Duration = Duration::from_micros(8_500);
+/// Following: no packet on the first channel by this long after its slot
+/// began, move on to the second anyway
+const MISSED_A: Duration = Duration::from_millis(80);
+/// Following: after a packet on the first channel, wait this long before
+/// moving to the second. A repeater's own relay request comes in ~4.7ms
+/// and goes first (switching straight away cost it 2.5ms of slack on the
+/// desk); the relay's 12-symbol preamble starts ~8.5ms after the packet
+/// and lasts ~12ms, plenty for a receiver that's moved by ~7.5ms
+const SWITCH_AFTER: Duration = Duration::from_millis(6);
+/// Following: back on the first channel this long before the next slot,
+/// relay heard or not
+const BACK_BEFORE_NEXT: Duration = Duration::from_millis(10);
+
+/// One packet's air time: every packet we send takes this (voice, wake, end)
+fn packet_air() -> Duration {
+    Duration::from_micros(air::packet_us(PREAMBLE_SYMBOLS, PACKET_BYTES) as u64)
+}
+
+fn slot() -> Duration {
+    Duration::from_micros(air::slot_us() as u64)
+}
+
 /// Sweeping: a hit with no header within this was a false alarm (or a
 /// voice packet's short preamble, caught too late to receive it): back to
 /// sweeping. A slot and a packet, so the next packet gets its chance
@@ -179,6 +205,7 @@ pub async fn init(
         sweep,
         state,
         sweep_stats: SweepStats::default(),
+        follow_stats: FollowStats::default(),
     };
     async move { driver.run().await }
 }
@@ -197,6 +224,7 @@ struct Driver {
     sweep: Vec<ModulationParams>, // channels to sweep while idle; empty: don't
     state: State,
     sweep_stats: SweepStats,
+    follow_stats: FollowStats,
 }
 
 /// How the radio listens. With sweep channels, the app moves it between
@@ -212,12 +240,41 @@ enum State {
     /// RX on sweep channel `channel`: a CAD hit there at `hit_at`, or the
     /// app said Hold (channel 0, the start slot). `heard`: a packet handed
     /// to the app since, or the app's Hold: then it stays until the app says
-    /// Sweep
+    /// Sweep. `follow`: once heard, every slot we listen on two channels
+    /// (`channel` is whichever we're on now)
     Locked {
         channel: usize,
         hit_at: Instant,
         heard: bool,
+        follow: Option<Follow>,
     },
+}
+
+/// Hearing a transmission twice a slot: each packet on channel `a` (from
+/// the talker), then its relay on `b`, the next channel (from a repeater),
+/// whichever of them we hear. Both copies of every packet: the app plays
+/// the first and drops the other (same seq), so a packet is lost only if
+/// both are. The walk of 2026-10-04 locked onto the weak direct copy while
+/// the repeater's was 40dB stronger on the next channel.
+///
+/// ```text
+/// slot start      +66        +74           +141   +150 +160
+/// [packet n on a ]  ->b      [relay n on b ]  ->a      [packet n+1 on a
+/// ```
+///
+/// Talkers send on the start slot (tx_hops 0), so a = 0, b = 1; a radio
+/// that locked on a later relay channel c follows c-1 and c, the two
+/// copies it can hear. Every packet that ends re-anchors the slot
+#[derive(Clone, Copy)]
+struct Follow {
+    a: usize,
+    b: usize,
+    /// When the copy on `a` of the current slot began (or would have)
+    slot_start: Instant,
+    got_a: bool, // this slot
+    got_b: bool,
+    /// Got the copy on `a`: when to move to `b` for the relay (SWITCH_AFTER)
+    switch_at: Option<Instant>,
 }
 
 /// The sweep since the last log line
@@ -228,6 +285,42 @@ struct SweepStats {
     max_check_us: u32,
     hits: u32,
     false_alarms: u32,
+}
+
+/// Following, since the last log line: which copies each slot brought
+#[derive(Default)]
+struct FollowStats {
+    slots: u32,
+    a_only: u32,
+    b_only: u32,
+    both: u32,
+    neither: u32,
+}
+
+impl FollowStats {
+    fn count(&mut self, follow: &Follow) {
+        self.slots += 1;
+        match (follow.got_a, follow.got_b) {
+            (true, true) => self.both += 1,
+            (true, false) => self.a_only += 1,
+            (false, true) => self.b_only += 1,
+            (false, false) => self.neither += 1,
+        }
+    }
+
+    fn log_and_reset(&mut self) {
+        if self.slots > 0 {
+            log::info!(
+                "FOLLOW: {} slots, both {}, first only {}, relay only {}, neither {}",
+                self.slots,
+                self.both,
+                self.a_only,
+                self.b_only,
+                self.neither
+            );
+        }
+        *self = FollowStats::default();
+    }
 }
 
 /// What's on the air, as far as this radio can tell
@@ -261,11 +354,15 @@ impl Driver {
                 self.sweep_step(next, ready).await;
                 continue;
             }
-            // Locked after a hit: the timer also wakes us for a false alarm
-            let wake = match self.false_alarm_at() {
-                Some(at) => next_rx_state.min(deadline(at)),
-                None => next_rx_state,
-            };
+            // Locked: the timer also wakes us for a false alarm, or to move
+            // between the two channels we follow
+            let mut wake = next_rx_state;
+            for at in [self.false_alarm_at(), self.follow_deadline()]
+                .into_iter()
+                .flatten()
+            {
+                wake = wake.min(deadline(at));
+            }
             match select4(
                 self.lora.wait_for_irq(),
                 TX_CHAN.receive(),
@@ -280,6 +377,12 @@ impl Driver {
                 Either4::Fourth(()) => {
                     if self.false_alarm_at().is_some_and(|at| Instant::now() >= at) {
                         self.on_false_alarm();
+                    }
+                    if self
+                        .follow_deadline()
+                        .is_some_and(|at| Instant::now() >= at)
+                    {
+                        self.on_follow_deadline().await;
                     }
                     if embassy_time::Instant::now() >= next_rx_state {
                         next_rx_state += every;
@@ -327,6 +430,7 @@ impl Driver {
             channel: next,
             hit_at: Instant::now(),
             heard: false,
+            follow: None,
         };
         self.resume_listening().await;
     }
@@ -341,6 +445,7 @@ impl Driver {
                     channel: 0,
                     hit_at: Instant::now(),
                     heard: true,
+                    follow: None,
                 };
                 self.resume_listening().await;
             }
@@ -403,6 +508,7 @@ impl Driver {
         };
         let state = self.lora.get_irq_state().await;
         self.air = Air::after(&state);
+        let packet_ended = matches!(state, Ok(Some(IrqState::Done)));
         match state {
             Ok(Some(IrqState::PreambleReceived)) => log::info!("RX preamble"),
             Ok(Some(IrqState::HeaderValid)) => log::info!("RX header"),
@@ -425,6 +531,133 @@ impl Driver {
         // right after the preamble) stays set and fires again. RX continuous
         // keeps running, so there's nothing to set up again.
         self.lora.clear_irq_flags_read().await.unwrap();
+        // Good or bad CRC, a packet ended now: the slot's timing is known
+        if packet_ended {
+            self.on_follow_packet().await;
+        }
+    }
+
+    /// Following, when to move channel: off the first channel once its
+    /// packet is overdue, off the second just before the next slot. Never
+    /// while a packet is arriving
+    fn follow_deadline(&self) -> Option<Instant> {
+        let State::Locked {
+            channel,
+            follow: Some(follow),
+            ..
+        } = self.state
+        else {
+            return None;
+        };
+        let at = if channel == follow.a {
+            follow.switch_at.unwrap_or(follow.slot_start + MISSED_A)
+        } else {
+            follow.slot_start + slot() - BACK_BEFORE_NEXT
+        };
+        Some(self.air.busy_until().map_or(at, |busy| at.max(busy)))
+    }
+
+    /// A packet ended on the channel we're on. Once a transmission is ours
+    /// (heard), start following it on two channels; then each packet sets
+    /// the slot's timing and sends us to the other channel
+    async fn on_follow_packet(&mut self) {
+        let State::Locked {
+            channel,
+            heard: true,
+            follow,
+            ..
+        } = self.state
+        else {
+            return;
+        };
+        let mut follow = match follow {
+            Some(follow) => follow,
+            None => {
+                // Talkers send on channel 0 (tx_hops 0), relays on 1. Locked
+                // on a later relay channel, the copies we can hear are on
+                // that one and the one before
+                let a = channel.saturating_sub(1);
+                let b = a + 1;
+                if b >= self.sweep.len() {
+                    return;
+                }
+                log::info!("FOLLOW channels {} and {}", a, b);
+                Follow {
+                    a,
+                    b,
+                    slot_start: Instant::now(),
+                    got_a: false,
+                    got_b: false,
+                    switch_at: None,
+                }
+            }
+        };
+        let now = Instant::now();
+        if channel == follow.a {
+            // Its relay comes next, on b: move there shortly (SWITCH_AFTER)
+            follow.slot_start = now.checked_sub(packet_air()).unwrap_or(now);
+            follow.got_a = true;
+            follow.switch_at = Some(now + SWITCH_AFTER);
+            self.follow_to(follow.a, follow).await;
+        } else if channel == follow.b {
+            // That was the relay: the slot is over, back to a for the next
+            let began = packet_air() + RELAY_GAP + packet_air();
+            follow.slot_start = now.checked_sub(began).unwrap_or(now);
+            follow.got_b = true;
+            self.next_slot(follow).await;
+        }
+    }
+
+    /// A deadline passed with no packet: move on to the other channel
+    async fn on_follow_deadline(&mut self) {
+        let State::Locked {
+            channel,
+            follow: Some(follow),
+            ..
+        } = self.state
+        else {
+            return;
+        };
+        if channel == follow.a {
+            self.follow_to(follow.b, follow).await;
+        } else {
+            self.next_slot(follow).await;
+        }
+    }
+
+    /// The slot is over: count what it brought, then the first channel for
+    /// the next one
+    async fn next_slot(&mut self, mut follow: Follow) {
+        self.follow_stats.count(&follow);
+        follow.slot_start += slot();
+        follow.got_a = false;
+        follow.got_b = false;
+        follow.switch_at = None;
+        self.follow_to(follow.a, follow).await;
+    }
+
+    /// Listen on `channel` now, still following (already there: nothing
+    /// to set up)
+    async fn follow_to(&mut self, channel: usize, follow: Follow) {
+        let State::Locked {
+            channel: on,
+            hit_at,
+            heard,
+            ..
+        } = self.state
+        else {
+            return;
+        };
+        self.state = State::Locked {
+            channel,
+            hit_at,
+            heard,
+            follow: Some(follow),
+        };
+        if channel != on {
+            self.air = Air::Clear;
+            self.resume_listening().await;
+        }
     }
 
     /// The hop channel we're receiving on: the one locked onto, or the start
@@ -488,6 +721,24 @@ impl Driver {
     /// The app wants a packet sent: wait for clear air, then send it.
     async fn on_tx(&mut self, tx_req: TxRequest) {
         self.wait_for_clear_air().await;
+        // Following: after our own transmission (a repeater's relay, in the
+        // window the other copy would have used), back to the first channel
+        // straight away, ready for the next slot
+        if let State::Locked {
+            follow: Some(follow),
+            channel,
+            ..
+        } = &mut self.state
+        {
+            *channel = follow.a;
+            if follow.got_a {
+                self.follow_stats.count(follow);
+                follow.slot_start += slot();
+                follow.got_a = false;
+                follow.got_b = false;
+                follow.switch_at = None;
+            }
+        }
         self.transmit(&tx_req.data, tx_req.preamble, tx_req.channel)
             .await;
     }
@@ -645,6 +896,7 @@ impl Driver {
     /// the packet, not the noise floor, so skip it then. Sweeping, the chip
     /// isn't receiving: the sweep's numbers instead.
     async fn on_rx_state_due(&mut self) {
+        self.follow_stats.log_and_reset();
         if let State::Sweeping { .. } = self.state {
             self.sweep_stats.log_and_reset(self.sweep.len());
         } else if self.air.busy_until().is_none() {

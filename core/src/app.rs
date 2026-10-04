@@ -567,7 +567,10 @@ impl<P: Platform> App<P> {
         if rx_pkt.data.len() != PACKET_BYTES {
             return;
         }
-        self.echo.record(txid, seq, &rx_pkt.data[HEADER_BYTES..]);
+        // The second copy of a packet (direct and relayed) isn't stored
+        if !self.echo.record(txid, seq, &rx_pkt.data[HEADER_BYTES..]) {
+            return;
+        }
         log::info!(
             "ECHO rec txid={} seq={} rssi={} snr={}",
             txid,
