@@ -1,11 +1,7 @@
 use core::fmt::Write as _;
 use embassy_futures::select::{select, select4, Either, Either4};
-use esp_idf_svc::hal::gpio::{AnyIOPin, AnyInputPin, AnyOutputPin};
-use esp_idf_svc::hal::gpio::{Input, Output, Pin, PinDriver, Pull};
-use esp_idf_svc::hal::spi::config::Config as SpiConfig;
-use esp_idf_svc::hal::spi::{SpiDeviceDriver, SpiDriver, SpiDriverConfig, SPI2};
-use esp_idf_svc::hal::units::Hertz;
-use lora_phy::iv::GenericSx126xInterfaceVariant;
+use esp_idf_svc::hal::gpio::{AnyIOPin, AnyInputPin, AnyOutputPin, Pin};
+use esp_idf_svc::hal::spi::SPI2;
 use lora_phy::mod_params::*;
 use lora_phy::mod_traits::IrqState;
 use lora_phy::sx126x::{self, CADSymbols, Sx1262, Sx126x, TcxoCtrlVoltage};
@@ -14,14 +10,14 @@ use std::future::Future;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
+use super::radio_bus::{self, RadioSpi};
+
 // The queues the app talks to; this driver connects them to the SX1262
 use open_oswst_core::air;
 use open_oswst_core::codec::PACKET_BYTES;
 pub use open_oswst_core::devices::radio::{Listen, RxPacket, TxRequest, LISTEN, RX_CHAN, TX_CHAN};
 
-type Iv<'a> = GenericSx126xInterfaceVariant<PinDriver<'a, Output>, PinDriver<'a, Input>>;
-type Radio<'a> =
-    LoRa<Sx126x<SpiDeviceDriver<'a, SpiDriver<'a>>, Iv<'a>, Sx1262>, embassy_time::Delay>;
+type Radio = LoRa<Sx126x<RadioSpi, radio_bus::Interface, Sx1262>, embassy_time::Delay>;
 
 /// SX1262 output power. The FEM adds ~13 dB, so this gives ~19 dBm into the
 /// Air Buddy amp (max input 20 dBm). At its max 11 dB gain that's ~30 dBm out,
@@ -90,34 +86,24 @@ pub async fn init(
     frequency_hz: u32,
     sweep_hz: Vec<u32>,
 ) -> impl Future<Output = ()> {
-    let spi = SpiDeviceDriver::new_single(
-        p.spi,
-        p.sck,
-        p.mosi,
-        Some(p.miso),
-        Some(p.nss),
-        &SpiDriverConfig::new(),
-        &SpiConfig::new().baudrate(Hertz(2_000_000)),
-    )
-    .unwrap();
-
-    let reset = PinDriver::output(p.reset).unwrap();
-    // DIO1's number too: a stall log reads its pad to see if an IRQ is pending
+    // Pin numbers first: radio_bus takes the pins. DIO1 and BUSY for the
+    // stuck-TX log, which reads their pads
     let dio1_gpio = p.dio1.pin() as i32;
     let busy_gpio = p.busy.pin() as i32;
-    let dio1 = PinDriver::input(p.dio1, Pull::Floating).unwrap();
-    let busy = PinDriver::input(p.busy, Pull::Floating).unwrap();
     watch_for_stuck_tx(dio1_gpio, busy_gpio);
 
     // Remember the CTX pin's number so the RX state check can read its pad.
-    // An output pad reads as 0 unless its input buffer is on, so turn that on.
+    // An output pad reads as 0 unless its input buffer is on, so turn that on
+    // (after radio_bus has made it an output).
     let ctx_gpio = p.rf_switch_tx.as_ref().map(|pin| pin.pin() as i32);
-    let rf_switch_tx = p.rf_switch_tx.map(|pin| PinDriver::output(pin).unwrap());
+
+    // Our own SPI bus and pin interrupts, not esp-idf-hal's: every command
+    // and pin wait there costs ~300us of CPU relaying the interrupt through
+    // the hal's reactor task, which starves the codec while sweeping
+    let (spi, iv) = radio_bus::take(p);
     if let Some(gpio) = ctx_gpio {
         unsafe { esp_idf_svc::sys::gpio_input_enable(gpio) };
     }
-
-    let iv = GenericSx126xInterfaceVariant::new(reset, dio1, busy, None, rf_switch_tx).unwrap();
 
     let config = sx126x::Config {
         chip: Sx1262,
@@ -197,7 +183,7 @@ pub async fn init(
 
 /// The radio, and what the event handlers share
 struct Driver {
-    lora: Radio<'static>,
+    lora: Radio,
     mdltn: ModulationParams,
     tx_params: PacketParams,
     rx_params: PacketParams,
@@ -221,8 +207,9 @@ enum State {
     /// CAD (any TX or RX in between undoes that)
     Sweeping { next: usize, ready: bool },
     /// RX on sweep channel `channel`: a CAD hit there at `hit_at`, or the
-    /// app said Hold (channel 0, the start slot). `heard`: a header or a
-    /// packet since, or the app's Hold: then it stays until the app says Sweep
+    /// app said Hold (channel 0, the start slot). `heard`: a packet handed
+    /// to the app since, or the app's Hold: then it stays until the app says
+    /// Sweep
     Locked {
         channel: usize,
         hit_at: Instant,
@@ -407,18 +394,20 @@ impl Driver {
         };
         let state = self.lora.get_irq_state().await;
         self.air = Air::after(&state);
-        // Locked: a header or a packet (good or bad) keeps us on the channel
-        if let (
-            State::Locked { heard, .. },
-            Ok(Some(IrqState::HeaderValid | IrqState::Done)) | Ok(None),
-        ) = (&mut self.state, &state)
-        {
-            *heard = true;
-        }
         match state {
             Ok(Some(IrqState::PreambleReceived)) => log::info!("RX preamble"),
             Ok(Some(IrqState::HeaderValid)) => log::info!("RX header"),
-            Ok(Some(IrqState::Done)) => self.receive(header_at, irq_us).await,
+            Ok(Some(IrqState::Done)) => {
+                // Locked: only a packet the app got keeps us on the channel.
+                // The app then says Sweep once it goes quiet. A header or a
+                // bad packet never reaches the app, so nothing would ever
+                // unlock us: leave those to the false alarm timer
+                if self.receive(header_at, irq_us).await {
+                    if let State::Locked { heard, .. } = &mut self.state {
+                        *heard = true;
+                    }
+                }
+            }
             Ok(None) => log::warn!("RX CRC/header error"),
             Err(e) => log::error!("IRQ state error: {:?}", e),
         }
@@ -428,8 +417,9 @@ impl Driver {
         self.lora.clear_irq_flags_read().await.unwrap();
     }
 
-    /// A packet arrived: read it out and hand it to the app.
-    async fn receive(&mut self, header_at: Option<Instant>, irq_us: i64) {
+    /// A packet arrived: read it out and hand it to the app. False if it
+    /// couldn't be read
+    async fn receive(&mut self, header_at: Option<Instant>, irq_us: i64) -> bool {
         let rx_ms = header_at.map_or(0, |at| at.elapsed().as_millis());
         let (len, status) = match self
             .lora
@@ -439,7 +429,7 @@ impl Driver {
             Ok(result) => result,
             Err(e) => {
                 log::error!("RX error [{}ms after header]: {:?}", rx_ms, e);
-                return;
+                return false;
             }
         };
         log::info!(
@@ -460,6 +450,7 @@ impl Driver {
                 snr: status.snr,
             })
             .await;
+        true
     }
 
     /// The app wants a packet sent: wait for clear air, then send it.

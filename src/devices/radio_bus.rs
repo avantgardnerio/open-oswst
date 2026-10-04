@@ -53,8 +53,14 @@ pub type Interface = GenericSx126xInterfaceVariant<PinDriver<'static, Output>, R
 pub fn take(p: radio::Peripherals) -> (RadioSpi, Interface) {
     let spi = RadioSpi::new(p.spi, p.sck, p.mosi, p.miso, p.nss);
     let reset = PinDriver::output(p.reset).unwrap();
+    // Both pins disarmed before the interrupt service goes in (RadioPin::new)
     let dio1 = RadioPin::new(p.dio1);
     let busy = RadioPin::new(p.busy);
+    // The GPIO interrupt service is shared with esp-idf-hal: install it
+    // through the hal, so neither installs it twice
+    esp_idf_svc::hal::gpio::enable_isr_service().unwrap();
+    dio1.listen();
+    busy.listen();
     let rf_switch_tx = p.rf_switch_tx.map(|pin| PinDriver::output(pin).unwrap());
     let iv = GenericSx126xInterfaceVariant::new(reset, dio1, busy, None, rf_switch_tx).unwrap();
     (spi, iv)
@@ -274,24 +280,35 @@ static PIN_WAKES: [PinWake; SOC_GPIO_PIN_COUNT as usize] = [const {
 }; SOC_GPIO_PIN_COUNT as usize];
 
 impl RadioPin {
+    /// An input with its interrupt disarmed. A software reboot (OTA, panic)
+    /// keeps the GPIO's interrupt settings and doesn't reset the SX1262: the
+    /// last image's level interrupt can still be armed, its level still
+    /// there (BUSY low, DIO1 high). Installing the interrupt service then
+    /// fires it with no handler to disarm it, forever: the interrupt
+    /// watchdog reset the repeater on every boot. So every radio pin is
+    /// disarmed before anything installs the service (`listen`)
     fn new(pin: AnyInputPin<'static>) -> Self {
         let gpio = pin.pin() as i32;
         let driver = PinDriver::input(pin, Pull::Floating).unwrap();
-        // The GPIO interrupt service is shared with esp-idf-hal: install it
-        // through the hal, so neither installs it twice
-        esp_idf_svc::hal::gpio::enable_isr_service().unwrap();
         unsafe {
             esp!(gpio_intr_disable(gpio)).unwrap();
-            esp!(gpio_isr_handler_add(
-                gpio,
-                Some(on_pin),
-                gpio as *mut core::ffi::c_void
-            ))
-            .unwrap();
+            esp!(gpio_set_intr_type(gpio, gpio_int_type_t_GPIO_INTR_DISABLE)).unwrap();
         }
         RadioPin {
             gpio,
             _driver: driver,
+        }
+    }
+
+    /// Hand the pin's interrupt to on_pin. The service must be installed
+    fn listen(&self) {
+        unsafe {
+            esp!(gpio_isr_handler_add(
+                self.gpio,
+                Some(on_pin),
+                self.gpio as *mut core::ffi::c_void
+            ))
+            .unwrap();
         }
     }
 
