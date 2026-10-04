@@ -680,12 +680,8 @@ impl<P: Platform> App<P> {
             .unwrap();
 
         let network = P::network();
-        let mut line = heapless::String::<40>::new();
-        let _ = match &network {
-            Network::Off => write!(line, "WiFi: off"),
-            Network::Searching => write!(line, "WiFi: searching"),
-            Network::Joined(ssid) => write!(line, "WiFi: {}", ssid),
-        };
+        // FONT_6X10 on the 128px wide screen: 21 characters
+        let line = network.screen_line(21);
         Text::new(&line, Point::new(1, 51), self.display.style)
             .draw(&mut frame)
             .unwrap();

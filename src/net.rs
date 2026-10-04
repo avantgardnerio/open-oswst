@@ -171,9 +171,10 @@ fn join(wifi: &mut BlockingWifi<EspWifi<'static>>, networks: &[WifiNetwork]) -> 
                     ap.signal_strength,
                     ip
                 );
-                set_state(Network::Joined(
-                    network.ssid.as_str().try_into().unwrap_or_default(),
-                ));
+                set_state(Network::Joined {
+                    ssid: network.ssid.as_str().try_into().unwrap_or_default(),
+                    ip: ip.map(|ip| ip.octets()).unwrap_or_default(),
+                });
                 return true;
             }
             Err(e) => {
