@@ -70,6 +70,7 @@ const GPS_LOG_PERIOD: Duration = Duration::from_secs(30);
 enum AppEvent {
     Rx(RxPacket),
     Ptt,
+    PttReleased,      // after a refused press: the next press counts again
     Decoded(Decoded), // a packet's audio, back from the codec
     Knob(Knob),
     Tick, // time for housekeeping()
@@ -135,6 +136,7 @@ pub async fn init<P: Platform>(
         },
         echo: Recorder::new(silence),
         locked: false,
+        ptt_refused: false,
         logs: LogTimes {
             last_activity: Instant::now(),
             last_gps_log: None,
@@ -154,8 +156,9 @@ struct App<P: Platform> {
     display: Display,
     rx: Receiving,
     sounds: Sounds,
-    echo: Recorder, // only used in echo mode
-    locked: bool,   // PTT ignored; the menu still opens, so it can be unlocked
+    echo: Recorder,    // only used in echo mode
+    locked: bool,      // PTT ignored; the menu still opens, so it can be unlocked
+    ptt_refused: bool, // a PTT press refused (someone else talking): ignored until let go
     logs: LogTimes,
     swept_after: Option<Instant>, // the quiet we last told the radio to sweep in
 }
@@ -205,6 +208,7 @@ impl<P: Platform> App<P> {
             match self.next_event(&mut ticker).await {
                 AppEvent::Rx(rx_pkt) => self.on_rx_packet(rx_pkt).await,
                 AppEvent::Ptt => self.on_ptt().await,
+                AppEvent::PttReleased => self.ptt_refused = false,
                 AppEvent::Decoded(decoded) => self.on_decoded(decoded),
                 AppEvent::Knob(Knob::Click) => self.run_menu().await,
                 AppEvent::Knob(Knob::Cw) => self.change_volume(1),
@@ -219,12 +223,20 @@ impl<P: Platform> App<P> {
     /// `housekeeping()`, run on the tick.
     async fn next_event(&mut self, ticker: &mut Ticker) -> AppEvent {
         let locked = self.locked;
+        let refused = self.ptt_refused;
         let ptt = &mut self.devices.ptt;
+        // The button reads as down for as long as it's held: after a refused
+        // press, wait for it to come up, or every pass would refuse it again
         let ptt = async {
             if locked {
                 core::future::pending::<()>().await;
             }
+            if refused {
+                ptt.released().await;
+                return AppEvent::PttReleased;
+            }
             ptt.pressed().await;
+            AppEvent::Ptt
         };
         match select5(
             RX_CHAN.receive(),
@@ -236,7 +248,7 @@ impl<P: Platform> App<P> {
         .await
         {
             Either5::First(rx_pkt) => AppEvent::Rx(rx_pkt),
-            Either5::Second(()) => AppEvent::Ptt,
+            Either5::Second(event) => event,
             Either5::Third(decoded) => AppEvent::Decoded(decoded),
             Either5::Fourth(knob) => AppEvent::Knob(knob),
             Either5::Fifth(()) => AppEvent::Tick,
@@ -783,6 +795,13 @@ impl<P: Platform> App<P> {
     }
 
     async fn on_ptt(&mut self) {
+        // Someone else is talking: we'd only talk over them. Nothing is
+        // sent, and the talker can tell: their voice carries on
+        if let Some(transmission) = &self.rx.transmission {
+            log::info!("PTT refused: txid={} is on the air", transmission.txid);
+            self.ptt_refused = true;
+            return;
+        }
         // PTT pressed — reset RX state
         self.rx.playout.reset();
         self.rx.playing_txid = None;

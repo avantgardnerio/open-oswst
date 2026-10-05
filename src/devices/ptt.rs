@@ -14,6 +14,10 @@ impl open_oswst_core::devices::ptt::Ptt for Ptt {
         let _ = self.0.wait_for_low().await;
     }
 
+    async fn released(&mut self) {
+        let _ = self.0.wait_for_high().await;
+    }
+
     fn is_pressed(&self) -> bool {
         self.0.is_low()
     }
