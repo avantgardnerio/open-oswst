@@ -24,7 +24,7 @@ The metrics, per PTT (txid):
   recorded    Talker packets the echo station recorded
   echo heard  Replay packets the handheld heard (direct or relayed)
   TX steps    standby / prep / tx / back_to_rx per role, from `TX end` lines
-  audio       Handheld speaker gaps, underruns, slow encodes, worst heap alloc
+  audio       Handheld speaker gaps, underruns, packets late for their bin, worst heap alloc
   IRQ stalls  Any board's `RADIO IRQ STALL` lines, printed first and in full
 
 Needs pyserial (system python3 has it).
@@ -296,7 +296,7 @@ def report_handheld(handheld, txid, start, after, replayed):
     steps = tx_steps(lines[start:release + 3])
     for step, values in steps.items():
         print(f"    talker {step:9} {stats(values)}")
-    slow = sum(1 for _, msg in lines[start:release + 3] if "TX encode+send took" in msg)
+    slow = sum(1 for _, msg in lines[start:release + 3] if "after its bin started" in msg)
 
     # After release: the echo's replay, under a txid that isn't ours (ours
     # still arrives for a moment, relayed back by the repeater)
@@ -319,7 +319,7 @@ def report_handheld(handheld, txid, start, after, replayed):
         f"  echo heard        {heard}/{replayed}, "
         f"{gaps} speaker gaps, {underruns} underruns"
     )
-    print(f"  talker slow encodes {slow}, worst audio heap alloc {f"{max(allocs)}us" if allocs else "n/a"}")
+    print(f"  talker late for its bin {slow}, worst audio heap alloc {f"{max(allocs)}us" if allocs else "n/a"}")
 
 
 if __name__ == "__main__":

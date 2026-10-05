@@ -729,7 +729,9 @@ impl Driver {
 
     /// The app wants a packet sent: wait for clear air, then send it.
     async fn on_tx(&mut self, tx_req: TxRequest) {
-        self.wait_for_clear_air().await;
+        if tx_req.clear_air_first {
+            self.wait_for_clear_air().await;
+        }
         // Following: after our own transmission (a repeater's relay, in the
         // window the other copy would have used), back to the first channel
         // straight away, ready for the next slot

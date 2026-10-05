@@ -31,6 +31,10 @@ pub struct TxRequest {
     /// The radio listens as before afterwards. A radio that doesn't sweep
     /// sends everything on the start slot
     pub channel: u8,
+    /// Listen before talk: wait for clear air first. A talker already on the
+    /// air sends the rest of its transmission on the beat without it: the
+    /// waits put packets up to 65 ms off the beat (walk of 2026-10-05)
+    pub clear_air_first: bool,
 }
 
 /// How the app wants the radio to listen. Only a radio that sweeps channels

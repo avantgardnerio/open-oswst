@@ -97,6 +97,13 @@ pub fn slot_us() -> u32 {
     FRAMES_PER_PACKET as u32 * 40_000
 }
 
+/// The air as a conveyor belt of bins going by, one every 80 ms (half a
+/// packet's audio): a talker sends in the even bins, and a repeater relays
+/// each packet in the odd bin after it
+pub fn bin_us() -> u32 {
+    slot_us() / 2
+}
+
 /// 2^SF / bandwidth: 1024us at SF7/125k
 pub fn symbol_us() -> u32 {
     (1 << SPREADING_FACTOR) * 1000 / BANDWIDTH_KHZ

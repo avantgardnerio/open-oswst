@@ -39,8 +39,14 @@ use crate::rx_buffer::{Next, RxBuffer, Verdict};
 use crate::screen_text::{self, Activity, Heard};
 use crate::utc;
 
-/// Audio per packet: FRAMES_PER_PACKET × 40ms
-const PACKET_MS: u128 = FRAMES_PER_PACKET as u128 * 40;
+/// Each packet's time to encode: from the end of its capture to the start of
+/// its bin. Codec2 took up to ~110 ms per packet on the walk of 2026-10-05;
+/// this leaves ~40 ms for a slow one (the "TX bins" line logs the slowest
+/// encode and the least room left). Under 160 ms, or a late send would hold
+/// up the next capture. Bin 0 (the wake-up packet) comes this long after the
+/// PTT press, so packet n's bin, 2(n + 1), starts this long after its capture
+/// ends
+const ENCODE_DEADLINE: embassy_time::Duration = embassy_time::Duration::from_millis(150);
 
 /// Stereo samples per Codec2 frame (320 mono × 2 channels)
 const STEREO_FRAME_SAMPLES: usize = CODEC2_FRAME_SAMPLES * 2;
@@ -366,6 +372,7 @@ impl<P: Platform> App<P> {
                         data: relay,
                         preamble: Some(air::wake_preamble_symbols()),
                         channel,
+                        clear_air_first: true,
                     })
                     .await;
                 log::info!("RELAY wake txid={} ch={}", txid, channel);
@@ -447,6 +454,7 @@ impl<P: Platform> App<P> {
                     data: relay,
                     preamble: None,
                     channel,
+                    clear_air_first: true,
                 })
                 .await;
             log::info!(
@@ -539,6 +547,7 @@ impl<P: Platform> App<P> {
                     data: relay,
                     preamble: None,
                     channel,
+                    clear_air_first: true,
                 })
                 .await;
             log::info!("RELAY EOT txid={} ch={}", txid, channel);
@@ -638,47 +647,77 @@ impl<P: Platform> App<P> {
     /// Send voice while PTT is held, then our end packet. Returns the
     /// packets sent.
     async fn stream(&mut self, txid: u8) -> usize {
-        // Pipelined: each pass captures packet N+1 while packet N is encoded and
-        // sent, so the mic is drained continuously
-        let mut seq: u8 = 0;
+        // Every packet goes on the air at the start of its bin, not the
+        // moment it's ready: the air is a conveyor of 80 ms bins, a talker
+        // sends in the even ones and a repeater relays in the odd ones
+        // between (air::bin_us). Codec2 takes a different time on every
+        // packet; sent as each encode finished, packets landed up to 65 ms
+        // out of their bins (walk of 2026-10-05), too far for a receiver to
+        // tell them from someone else's. The echo replay keeps time the same
+        // way. Pipelined: each pass captures packet n + 1 while packet n is
+        // encoded and waits for its bin, so the mic is drained continuously
+        let ptt_pressed_at = embassy_time::Instant::now();
+        let bin_0 = ptt_pressed_at + ENCODE_DEADLINE;
+        let bin_start =
+            |bin: u64| bin_0 + embassy_time::Duration::from_micros(air::bin_us() as u64 * bin);
+        let wake = config::WAKE_PREAMBLE.is_on();
         let mic = &mut self.devices.mic;
         let codec_tx = &self.codec_tx;
-        let mut pending: Option<([u8; 2], Box<[i16]>)> = None;
-        let mut packets = 0usize;
-        // Goes out while the first packet's audio is captured: no delay
-        if config::WAKE_PREAMBLE.is_on() {
-            TX_CHAN.send(packet::wake(txid)).await;
-        }
+        let mut seq: u8 = 0;
+        // TODO: pipeline per Codec2 frame, for latency: a packet is 4 frames
+        // of 40 ms. Encode each frame as soon as it's captured, while the
+        // next is captured, so a packet is ready one frame's encode after its
+        // capture ends, not four, and ENCODE_DEADLINE can shrink
+        let mut pending_pkt: Option<([u8; 2], Box<[i16]>)> = None;
+        let mut packets: u64 = 0;
+        let mut timing = SendTiming::default();
         while self.devices.ptt.is_pressed() {
             let header = packet::pack(PacketType::Voice, txid, seq);
+            // Voice packet n goes in bin 2(n + 1); the wake-up packet in bin
+            // 0. The first on the air (the wake-up packet, else voice packet
+            // 0) waits for clear air; after that the bins are ours
             let (pcm, ()) = join(capture_packet(mic), async {
-                if let Some((header, pcm)) = pending.take() {
-                    encode_and_send(codec_tx, header, pcm).await;
+                match pending_pkt.take() {
+                    Some((header, pcm)) => {
+                        let first_on_air = packets == 1 && !wake;
+                        let bin = bin_start(2 * packets);
+                        encode_and_send(codec_tx, header, pcm, bin, first_on_air, &mut timing)
+                            .await;
+                    }
+                    None if wake => {
+                        Timer::at(bin_start(0)).await;
+                        TX_CHAN.send(packet::wake(txid)).await;
+                    }
+                    None => {}
                 }
             })
             .await;
-            pending = Some((header, pcm));
+            pending_pkt = Some((header, pcm));
             packets += 1;
             seq = (seq + 1) & 0x0F; // wrap at 16
         }
-        if let Some((header, pcm)) = pending {
-            encode_and_send(codec_tx, header, pcm).await;
+        if let Some((header, pcm)) = pending_pkt {
+            let first_on_air = packets == 1 && !wake;
+            let bin = bin_start(2 * packets);
+            encode_and_send(codec_tx, header, pcm, bin, first_on_air, &mut timing).await;
         }
 
-        // Who we are and where we are, as the transmission ends. A slot
-        // after the last packet, like any packet: sent straight after it, it
-        // was on the air while a repeater relayed that last packet, and the
-        // repeater never heard it (relayed 1 of 16 EOTs, 3 desk runs 2026-10-04)
-        Timer::after_millis(PACKET_MS as u64).await;
+        // Who we are and where we are, as the transmission ends: in the next
+        // even bin, like any packet. Sent straight after the last packet, it
+        // was on the air while a repeater relayed that one, and the repeater
+        // never heard it (relayed 1 of 16 EOTs, 3 desk runs 2026-10-04)
+        Timer::at(bin_start(2 * (packets + 1))).await;
         let end = packet::end(PacketType::VoiceEnd, txid, seq, &self.ident());
         TX_CHAN
             .send(TxRequest {
                 data: end,
                 preamble: None,
                 channel: 0,
+                clear_air_first: false,
             })
             .await;
-        packets
+        log::info!("TX bins: {}", timing);
+        packets as usize
     }
 
     /// Us, for our end packets: our name, and where we are now
@@ -930,26 +969,87 @@ async fn capture_packet(mic: &mut impl Mic) -> Box<[i16]> {
     pcm
 }
 
-/// Encode one packet on the codec thread and queue it for the radio.
-async fn encode_and_send(codec_tx: &SyncSender<CodecRequest>, header: [u8; 2], pcm: Box<[i16]>) {
-    let started = Instant::now();
+/// Encode one packet on the codec thread, then queue it for the radio at the
+/// start of its bin (at once, if the encode ran past it).
+async fn encode_and_send(
+    codec_tx: &SyncSender<CodecRequest>,
+    header: [u8; 2],
+    pcm: Box<[i16]>,
+    bin_start: embassy_time::Instant,
+    first_on_air: bool,
+    timing: &mut SendTiming,
+) {
+    let asked = embassy_time::Instant::now();
     codec_tx.send(CodecRequest::encode(header, pcm)).unwrap();
     if let CodecResponse::Encoded { packet } = CODEC_REPLY.receive().await {
+        timing.note(asked, embassy_time::Instant::now(), bin_start);
+        // TODO: hand the radio the bin's start with the packet and let it
+        // send at that microsecond (timed TX, step 3 of #36). Waiting here, the
+        // send lands as late as the app task and the radio's queue make it
+        Timer::at(bin_start).await;
         TX_CHAN
             .send(TxRequest {
                 data: packet,
                 preamble: None,
                 channel: 0,
+                clear_air_first: first_on_air,
             })
             .await;
     }
-    // Longer than a packet's capture stalls the pipeline, so the mic goes undrained
-    let ms = started.elapsed().as_millis();
-    if ms > PACKET_MS {
-        log::warn!(
-            "TX encode+send took {}ms, longer than a {}ms packet",
-            ms,
-            PACKET_MS
-        );
+}
+
+/// How one transmission's packets made their bins, for a log line at its end
+#[derive(Default)]
+struct SendTiming {
+    packets: u32,
+    fastest_encode_us: u64,
+    slowest_encode_us: u64,
+    /// The least time any packet was ready before its bin started. Negative:
+    /// it was late, and went out when ready
+    least_room_us: i64,
+    late: u32,
+}
+
+impl SendTiming {
+    fn note(
+        &mut self,
+        asked: embassy_time::Instant,
+        encoded: embassy_time::Instant,
+        bin_start: embassy_time::Instant,
+    ) {
+        let encode_us = encoded.duration_since(asked).as_micros();
+        let room_us = bin_start.as_micros() as i64 - encoded.as_micros() as i64;
+        if self.packets == 0 {
+            self.fastest_encode_us = encode_us;
+            self.slowest_encode_us = encode_us;
+            self.least_room_us = room_us;
+        } else {
+            self.fastest_encode_us = self.fastest_encode_us.min(encode_us);
+            self.slowest_encode_us = self.slowest_encode_us.max(encode_us);
+            self.least_room_us = self.least_room_us.min(room_us);
+        }
+        if room_us < 0 {
+            self.late += 1;
+            log::warn!(
+                "TX packet ready {}ms after its bin started (encode {}ms)",
+                -room_us / 1000,
+                encode_us / 1000
+            );
+        }
+        self.packets += 1;
+    }
+}
+
+impl core::fmt::Display for SendTiming {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        write!(
+            f,
+            "{} voice packets, encode {}..{}ms, least room before a bin {}ms, late {}",
+            self.packets,
+            self.fastest_encode_us / 1000,
+            self.slowest_encode_us / 1000,
+            self.least_room_us / 1000,
+            self.late
+        )
     }
 }

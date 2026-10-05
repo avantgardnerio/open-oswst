@@ -122,6 +122,7 @@ pub async fn replay(
                 data,
                 preamble: None,
                 channel: 0,
+                clear_air_first: true,
             })
             .await;
         seq = (seq + 1) & 0x0F;
@@ -136,6 +137,7 @@ pub async fn replay(
             data: end(seq),
             preamble: None,
             channel: 0,
+            clear_air_first: true,
         })
         .await;
 }
