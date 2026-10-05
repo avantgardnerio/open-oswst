@@ -27,9 +27,12 @@ def parse_log(path):
             t0 = ts
         ms = (ts - t0).total_seconds() * 1000
 
-        if "TX start" in msg:
-            events.append((ms, dev, "tx_start"))
-        elif "TX end" in msg:
+        if "TX end" in msg:
+            # Its start isn't logged (a log line in the send's run-up costs
+            # ~1.4 ms): back from the end by its air and the way back to RX
+            m = re.search(r"tx=(\d+)us back_to_rx=(\d+)us", msg)
+            if m:
+                events.append((ms - (int(m.group(1)) + int(m.group(2))) / 1000, dev, "tx_start"))
             events.append((ms, dev, "tx_end"))
         elif "TX waiting" in msg:
             events.append((ms, dev, "tx_wait"))
@@ -39,7 +42,7 @@ def parse_log(path):
             events.append((ms, dev, "rx_end"))
         elif "RX CRC" in msg or "RX error" in msg:
             events.append((ms, dev, "rx_end"))
-    return events
+    return sorted(events)
 
 
 def build_waves(events):

@@ -11,7 +11,9 @@
 //! round a loop of repeaters), comes out as the same packet: (bin - hops) /
 //! 2. A packet that lands near the start of a bin rode the belt: it's part
 //! of this transmission, even if its CRC failed. One that lands between
-//! bins is someone else's, or noise.
+//! bins is someone else's, or noise. A packet whose timing the radio flags
+//! as skewed (`RxPacket::timing_ok`: decoded off its channel) never sets the
+//! belt's time and gets no number: its bin can't be trusted.
 //!
 //! Pure logic on µs timestamps (`RxPacket::end_us`), so it's tested here
 //! without a radio or a clock.
@@ -91,6 +93,9 @@ impl Conveyor {
 pub struct Transmission {
     pub txid: u8,
     conveyor: Conveyor,
+    /// The belt's time came from a packet whose timing we trust. False while
+    /// it's started from a skewed one: the first trusted packet sets it
+    anchored: bool,
     last_bin: i64,
     /// The last of the talker's packets taken (first_copy), if any
     last_taken: Option<i64>,
@@ -99,25 +104,46 @@ pub struct Transmission {
 
 impl Transmission {
     /// The first good packet of a transmission: `txid`'s, after `hops`
-    /// relays, ended at `end_us`. Where it landed: packet 0
-    pub fn start(txid: u8, end_us: i64, hops: u8) -> (Transmission, Landing) {
+    /// relays, ended at `end_us` (`timing_ok`: as the radio judged it). Where
+    /// it landed: packet 0, or no number if its timing is skewed
+    pub fn start(txid: u8, end_us: i64, hops: u8, timing_ok: bool) -> (Transmission, Landing) {
         let conveyor = Conveyor::start(end_us, hops);
-        let landing = conveyor.landing(end_us, Some(hops));
+        let mut landing = conveyor.landing(end_us, Some(hops));
         let mut transmission = Transmission {
             txid,
             conveyor,
+            anchored: timing_ok,
             last_bin: landing.bin,
             last_taken: None,
             tally: Tally::default(),
         };
-        transmission.tally.good(landing, hops);
+        if timing_ok {
+            transmission.tally.good(landing, hops);
+        } else {
+            transmission.tally.skewed += 1;
+            landing.packet = None;
+        }
         (transmission, landing)
     }
 
     /// A good packet of this transmission, after `hops` relays (its txid says
-    /// it's ours, so it counts even off the belt): where it landed
-    pub fn heard(&mut self, end_us: i64, hops: u8) -> Landing {
-        let landing = self.conveyor.landing(end_us, Some(hops));
+    /// it's ours, so it counts even off the belt): where it landed. With
+    /// skewed timing it keeps the transmission going but gets no number. The
+    /// first trusted packet on a belt started from a skewed one sets the
+    /// belt's time, keeping the bin it was nearest
+    pub fn heard(&mut self, end_us: i64, hops: u8, timing_ok: bool) -> Landing {
+        let mut landing = self.conveyor.landing(end_us, Some(hops));
+        if !timing_ok {
+            self.tally.skewed += 1;
+            self.last_bin = self.last_bin.max(landing.bin);
+            landing.packet = None;
+            return landing;
+        }
+        if !self.anchored {
+            self.conveyor.bin_0_us += landing.off_by_us;
+            self.anchored = true;
+            landing = self.conveyor.landing(end_us, Some(hops));
+        }
         self.last_bin = self.last_bin.max(landing.bin);
         self.tally.good(landing, hops);
         landing
@@ -125,8 +151,13 @@ impl Transmission {
 
     /// A packet whose CRC failed. Nothing in it can be trusted, so it's ours
     /// only if it rode the belt: then the transmission is still going. True
-    /// if it did
-    pub fn heard_garbled(&mut self, end_us: i64) -> bool {
+    /// if it did. With skewed timing, or on a belt whose time isn't trusted
+    /// yet, there's no telling: false
+    pub fn heard_garbled(&mut self, end_us: i64, timing_ok: bool) -> bool {
+        if !timing_ok || !self.anchored {
+            self.tally.skewed += 1;
+            return false;
+        }
         let landing = self.conveyor.landing(end_us, None);
         self.tally.garbled(landing);
         if landing.on_belt() {
@@ -175,6 +206,9 @@ pub struct Tally {
     garbled_on_belt: u32,
     /// CRC failed, between bins: ignored
     garbled_off_belt: u32,
+    /// Skewed timing (decoded off its channel), good or garbled: no number,
+    /// never sets the belt's time
+    skewed: u32,
     /// The furthest any good packet landed from its bin's start, + or -
     worst_direct_us: i64,
     worst_relayed_us: i64,
@@ -214,7 +248,8 @@ impl fmt::Display for Tally {
         write!(
             f,
             "direct {} (worst {:+.1}ms), relayed {} (worst {:+.1}ms), off the belt {}, \
-             wrong bin for its hops {}, garbled on the belt {}, garbled between bins {}",
+             wrong bin for its hops {}, garbled on the belt {}, garbled between bins {}, \
+             skewed {}",
             self.direct,
             self.worst_direct_us as f32 / 1000.0,
             self.relayed,
@@ -222,7 +257,8 @@ impl fmt::Display for Tally {
             self.off_belt,
             self.wrong_bin,
             self.garbled_on_belt,
-            self.garbled_off_belt
+            self.garbled_off_belt,
+            self.skewed
         )
     }
 }
@@ -274,9 +310,9 @@ mod tests {
 
     #[test]
     fn a_copy_round_a_loop_of_repeaters_is_still_the_same_packet() {
-        let mut transmission = Transmission::start(42, FIRST_END, 0).0;
+        let mut transmission = Transmission::start(42, FIRST_END, 0, true).0;
         assert!(transmission.first_copy(1)); // packet 1, direct, in bin 2
-        let looped = transmission.heard(ends(5, 0), 3); // packet 1, three hops on
+        let looped = transmission.heard(ends(5, 0), 3, true); // packet 1, three hops on
         assert_eq!(looped.packet, Some(1));
         assert!(!transmission.first_copy(1));
     }
@@ -292,10 +328,33 @@ mod tests {
 
     #[test]
     fn a_packet_in_the_wrong_bin_for_its_hops_has_no_number() {
-        let mut transmission = Transmission::start(42, FIRST_END, 0).0;
-        let landing = transmission.heard(ends(3, 0), 0); // direct, but in an odd bin
+        let mut transmission = Transmission::start(42, FIRST_END, 0, true).0;
+        let landing = transmission.heard(ends(3, 0), 0, true); // direct, but in an odd bin
         assert_eq!(landing.packet, None);
         assert_eq!(transmission.tally().wrong_bin, 1);
+    }
+
+    #[test]
+    fn a_skewed_packet_never_sets_the_belts_time() {
+        // The first good packet was decoded off its channel: it ended 28 ms
+        // late (walk of the desk, 2026-10-05) and gets no number
+        let (mut transmission, first) = Transmission::start(42, ends(1, 28_000), 1, false);
+        assert_eq!(first.packet, None);
+        // Garbled packets can't be placed on a belt whose time isn't trusted
+        assert!(!transmission.heard_garbled(ends(2, 0), true));
+        // The first trusted packet sets the belt's time
+        let trusted = transmission.heard(ends(2, 0), 0, true);
+        assert_eq!(
+            (trusted.bin, trusted.off_by_us, trusted.packet),
+            (2, 0, Some(1))
+        );
+        let next = transmission.heard(ends(4, 500), 0, true);
+        assert_eq!((next.packet, next.off_by_us), (Some(2), 500));
+        // A later skewed one still gets no number, and moves nothing
+        let skewed = transmission.heard(ends(6, -20_000), 0, false);
+        assert_eq!(skewed.packet, None);
+        assert_eq!(transmission.tally().skewed, 3);
+        assert_eq!(transmission.heard(ends(8, 0), 0, true).off_by_us, 0);
     }
 
     #[test]
@@ -325,16 +384,16 @@ mod tests {
 
     #[test]
     fn garbled_packets_on_the_belt_keep_a_transmission_going() {
-        let mut transmission = Transmission::start(42, FIRST_END, 0).0;
-        assert!(transmission.heard_garbled(ends(2, 3_000)));
-        assert!(!transmission.heard_garbled(ends(4, 30_000))); // between bins: noise
+        let mut transmission = Transmission::start(42, FIRST_END, 0, true).0;
+        assert!(transmission.heard_garbled(ends(2, 3_000), true));
+        assert!(!transmission.heard_garbled(ends(4, 30_000), true)); // between bins: noise
         assert_eq!(transmission.last_bin, 2);
     }
 
     #[test]
     fn good_packets_count_even_off_the_belt() {
-        let mut transmission = Transmission::start(42, FIRST_END, 0).0;
-        let landing = transmission.heard(ends(6, 25_000), 0);
+        let mut transmission = Transmission::start(42, FIRST_END, 0, true).0;
+        let landing = transmission.heard(ends(6, 25_000), 0, true);
         assert!(!landing.on_belt());
         assert_eq!(transmission.last_bin, 6);
         assert_eq!(transmission.tally().off_belt, 1);
@@ -342,15 +401,15 @@ mod tests {
 
     #[test]
     fn a_late_copy_doesnt_wind_the_belt_back() {
-        let mut transmission = Transmission::start(42, FIRST_END, 0).0;
-        transmission.heard(ends(8, 0), 0);
-        transmission.heard(ends(5, 0), 1);
+        let mut transmission = Transmission::start(42, FIRST_END, 0, true).0;
+        transmission.heard(ends(8, 0), 0, true);
+        transmission.heard(ends(5, 0), 1, true);
         assert_eq!(transmission.last_bin, 8);
     }
 
     #[test]
     fn only_the_first_copy_of_a_packet_is_taken() {
-        let mut transmission = Transmission::start(42, FIRST_END, 0).0;
+        let mut transmission = Transmission::start(42, FIRST_END, 0, true).0;
         assert!(transmission.first_copy(3));
         assert!(!transmission.first_copy(3)); // its relay
         assert!(transmission.first_copy(5)); // 4 lost
@@ -359,24 +418,24 @@ mod tests {
 
     #[test]
     fn over_after_twelve_empty_bins() {
-        let mut transmission = Transmission::start(42, FIRST_END, 0).0;
-        transmission.heard(ends(10, 0), 0);
+        let mut transmission = Transmission::start(42, FIRST_END, 0, true).0;
+        transmission.heard(ends(10, 0), 0, true);
         // A packet in bin 22 would have ended by ends(22, 0), give or take
         // the tolerance; until then bin 22 might still bring one
         assert!(!transmission.over(ends(22, TOLERANCE_US)));
         assert!(transmission.over(ends(22, TOLERANCE_US + 1)));
         // Another packet pushes the end out again
-        transmission.heard_garbled(ends(14, 0));
+        transmission.heard_garbled(ends(14, 0), true);
         assert!(!transmission.over(ends(22, TOLERANCE_US + 1)));
     }
 
     #[test]
     fn the_tally_keeps_the_worst_landing_per_path() {
-        let mut transmission = Transmission::start(42, FIRST_END, 0).0;
-        transmission.heard(ends(1, -4_000), 1);
-        transmission.heard(ends(2, 3_000), 0);
-        transmission.heard(ends(3, -6_000), 1);
-        transmission.heard(ends(4, -1_000), 0);
+        let mut transmission = Transmission::start(42, FIRST_END, 0, true).0;
+        transmission.heard(ends(1, -4_000), 1, true);
+        transmission.heard(ends(2, 3_000), 0, true);
+        transmission.heard(ends(3, -6_000), 1, true);
+        transmission.heard(ends(4, -1_000), 0, true);
         let tally = transmission.tally();
         assert_eq!((tally.direct, tally.relayed), (3, 2));
         assert_eq!(

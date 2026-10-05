@@ -285,7 +285,7 @@ def report_handheld(handheld, txid, start, after, replayed):
     steps = tx_steps(lines[start:release + 3])
     for step, values in steps.items():
         print(f"    talker {step:9} {stats(values)}")
-    slow = sum(1 for _, msg in lines[start:release + 3] if "after its bin started" in msg)
+    slow = sum(1 for _, msg in lines[start:release + 3] if "after its send time" in msg)
 
     # After release: the echo's replay, under a txid that isn't ours (ours
     # still arrives for a moment, relayed back by the repeater)

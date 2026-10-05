@@ -31,6 +31,18 @@ pub const TX_POWER_DBM: i32 = 6;
 /// turns; not if they all relay at the same instant (QMesh-style).
 const TX_JITTER_MAX_MS: u32 = 0;
 
+/// A packet whose header-to-end time is off a normal one's by more than this
+/// was decoded off its channel: its end time is skewed (normal: within ~1 ms)
+const SKEWED_AFTER_US: i64 = 3_000;
+
+/// A timed send starts getting ready (standby, then the packet and its
+/// settings into the chip: ~2.5 ms measured) this long before its send time,
+/// listening until then
+const PREPARE_US: i64 = 5_000;
+/// Less than this left before its send time when it's handed over: the
+/// packet is dropped, there isn't time to get it ready
+const PREPARE_AT_LEAST_US: i64 = 3_000;
+
 /// Preamble length in symbols, TX and RX alike: why 12 is in air.rs
 const PREAMBLE_SYMBOLS: u16 = air::PREAMBLE_SYMBOLS;
 
@@ -202,6 +214,7 @@ pub async fn init(
         rx_buf: [0; 255],
         tx_buf: [0; 255],
         air: Air::Clear,
+        header_us: None,
         sweep,
         state,
         sweep_stats: SweepStats::default(),
@@ -221,6 +234,9 @@ struct Driver {
     rx_buf: [u8; 255],
     tx_buf: [u8; 255], // a packet to send, with our CRC after it
     air: Air,
+    /// When the packet arriving now raised its header IRQ (µs, as the DIO1
+    /// interrupt noted it): its end comes a fixed time later
+    header_us: Option<i64>,
     sweep: Vec<ModulationParams>, // channels to sweep while idle; empty: don't
     state: State,
     sweep_stats: SweepStats,
@@ -517,15 +533,24 @@ impl Driver {
         let packet_ended = matches!(state, Ok(Some(IrqState::Done)));
         let mut good_packet = false;
         match state {
-            Ok(Some(IrqState::PreambleReceived)) => log::info!("RX preamble"),
-            Ok(Some(IrqState::HeaderValid)) => log::info!("RX header"),
+            Ok(Some(IrqState::PreambleReceived)) => {
+                self.header_us = None;
+                log::info!("RX preamble");
+            }
+            Ok(Some(IrqState::HeaderValid)) => {
+                self.header_us = Some(irq_us);
+                log::info!("RX header");
+            }
             Ok(Some(IrqState::Done)) => {
                 // Locked: only a good packet keeps us on the channel. The app
                 // then says Sweep once it goes quiet. A header alone, or a
                 // garbled packet, might not be ours (receive says why), and
                 // then nothing would ever unlock us: leave those to the false
                 // alarm timer
-                good_packet = self.receive(header_at, irq_us, task_late_us).await;
+                let header_us = self.header_us.take();
+                good_packet = self
+                    .receive(header_at, header_us, irq_us, task_late_us)
+                    .await;
                 if good_packet {
                     if let State::Locked { heard, .. } = &mut self.state {
                         *heard = true;
@@ -690,9 +715,12 @@ impl Driver {
     /// changes nothing: the lock holds until the app says the air is quiet
     /// `task_late_us`: how long after the interrupt the radio task got to it,
     /// None if no interrupt fired (and `irq_us` is the task's own time)
+    /// `header_us`: when its header IRQ fired, if we saw it: the time from
+    /// there to the end says whether the end time can be trusted
     async fn receive(
         &mut self,
         header_at: Option<Instant>,
+        header_us: Option<i64>,
         irq_us: i64,
         task_late_us: Option<i64>,
     ) -> bool {
@@ -713,25 +741,34 @@ impl Driver {
         // bytes are garbage, but it was on the air, and the app uses that
         // for timing
         let (packet, crc_ok) = crc::split(&self.rx_buf[..len as usize]);
+        // Decoded off its channel, a packet ends at a skewed time (in LoRa a
+        // frequency offset looks like a time offset): its header-to-end time
+        // gives it away. Without the header's time, we can't tell
+        let timing_ok = header_us.is_none_or(|header_us| {
+            let expected_us = air::after_header_us(packet.len()) as i64;
+            (irq_us - header_us - expected_us).abs() <= SKEWED_AFTER_US
+        });
         if crc_ok {
             log::info!(
-                "RX end [{}B] {}ms after header rssi={} snr={} at={}us {}",
+                "RX end [{}B] {}ms after header rssi={} snr={} at={}us {}{}",
                 packet.len(),
                 rx_ms,
                 status.rssi,
                 status.snr,
                 irq_us,
-                TaskLate(task_late_us)
+                TaskLate(task_late_us),
+                if timing_ok { "" } else { " SKEWED" }
             );
         } else {
             log::warn!(
-                "RX CRC error [{}B] {}ms after header rssi={} snr={} at={}us {}",
+                "RX CRC error [{}B] {}ms after header rssi={} snr={} at={}us {}{}",
                 len,
                 rx_ms,
                 status.rssi,
                 status.snr,
                 irq_us,
-                TaskLate(task_late_us)
+                TaskLate(task_late_us),
+                if timing_ok { "" } else { " SKEWED" }
             );
         }
 
@@ -745,6 +782,7 @@ impl Driver {
                 channel: self.listening_on(),
                 crc_ok,
                 end_us: irq_us,
+                timing_ok,
             })
             .await;
         crc_ok
@@ -773,8 +811,13 @@ impl Driver {
                 follow.switch_at = None;
             }
         }
-        self.transmit(&tx_req.data, tx_req.preamble, tx_req.channel)
-            .await;
+        self.transmit(
+            &tx_req.data,
+            tx_req.preamble,
+            tx_req.channel,
+            tx_req.send_at_us,
+        )
+        .await;
     }
 
     /// CSMA: wait out any packet on the air, then the random jitter (if on),
@@ -859,34 +902,48 @@ impl Driver {
 
     /// Send one packet, then go back to listening. Each step is timed: a
     /// relay has to fit in the talker's gap, so every ms of turnaround counts.
-    /// `preamble`: symbols, if not PREAMBLE_SYMBOLS.
-    async fn transmit(&mut self, data: &[u8], preamble: Option<u16>, channel: u8) {
+    /// `preamble`: symbols, if not PREAMBLE_SYMBOLS. `send_at_us`: when to
+    /// start (µs since boot): we keep listening until just before it, get
+    /// the packet ready, then send at that microsecond. So late it would
+    /// leave its bin, it's dropped: a packet out of its bin is worse than none
+    async fn transmit(
+        &mut self,
+        data: &[u8],
+        preamble: Option<u16>,
+        channel: u8,
+        send_at_us: Option<i64>,
+    ) {
+        // Listening right up to the moment we must start getting ready.
+        // Nothing is logged from here until the packet is on the air: a log
+        // line costs ~1.4 ms, enough to make a send miss its time
+        let mut woke_late_us = 0;
+        if let Some(at_us) = send_at_us {
+            until_us(at_us - PREPARE_US).await;
+            woke_late_us = uptime_us() - (at_us - PREPARE_US);
+            let left_us = at_us - uptime_us();
+            if left_us < PREPARE_AT_LEAST_US {
+                log::warn!(
+                    "TX [{}B] dropped: {}us before its send time, too late to get ready",
+                    data.len(),
+                    left_us
+                );
+                return;
+            }
+        }
         // A sweeping radio can send on any of its channels; one that doesn't
         // sweep has only the start slot. Off the channel we listen on, this
         // costs one frequency command now and one going back to listening
         let mdltn = self.sweep.get(channel as usize).unwrap_or(&self.mdltn);
-        let on = match channel {
-            0 => heapless::String::<8>::new(),
-            n => {
-                let mut on = heapless::String::new();
-                let _ = write!(on, " ch={}", n);
-                on
-            }
-        };
         let mut other_params;
         let params = match preamble {
             Some(symbols) => {
-                log::info!("TX start [{}B] preamble={}{}", data.len(), symbols, on);
                 other_params = self
                     .lora
                     .create_tx_packet_params(symbols, false, false, false, mdltn)
                     .unwrap();
                 &mut other_params
             }
-            None => {
-                log::info!("TX start [{}B]{}", data.len(), on);
-                &mut self.tx_params
-            }
+            None => &mut self.tx_params,
         };
         // Our CRC after the data (LoRa's is off: see receive)
         let framed = data.len() + crc::CRC_BYTES;
@@ -908,20 +965,50 @@ impl Driver {
             .await
             .unwrap();
         let prepared_us = start.elapsed().as_micros();
+        // Ready: wait for the send time itself
+        let late_us = match send_at_us {
+            Some(at_us) => {
+                until_us(at_us).await;
+                uptime_us() - at_us
+            }
+            None => 0,
+        };
+        // Past its send time by more than the guard (air::guard_us, 7.1 ms):
+        // dropped rather than sent out of its bin. Up to the guard late, it
+        // still fits inside its bin: write tight, but don't throw away what
+        // fits
+        if late_us > air::guard_us() as i64 {
+            log::warn!(
+                "TX [{}B] dropped: would start {}us after its send time, past the guard (ready in time: woke {}us late to get ready, standby={}us prep={}us; the wait for the send time woke late)",
+                data.len(),
+                late_us,
+                woke_late_us,
+                standby_us,
+                prepared_us - standby_us
+            );
+            self.resume_listening().await;
+            TX_SINCE_MS.store(0, Ordering::Relaxed);
+            return;
+        }
+        let waited_us = start.elapsed().as_micros() - prepared_us;
         // SetTx → TxDone: air time plus the PA ramp (and the TCXO wake-up, if off)
         self.lora.tx().await.unwrap();
         let sent_us = start.elapsed().as_micros();
         self.resume_listening().await;
         let rx_us = start.elapsed().as_micros();
         log::info!(
-            "TX end [{}B] {}ms: standby={}us prep={}us tx={}us back_to_rx={}us at={}us",
+            "TX end [{}B] {}ms: standby={}us prep={}us tx={}us back_to_rx={}us at={}us wait={}us late={}us{}{}",
             data.len(),
             rx_us / 1000,
             standby_us,
             prepared_us - standby_us,
-            sent_us - prepared_us,
+            sent_us - prepared_us - waited_us,
             rx_us - sent_us,
-            uptime_us()
+            uptime_us(),
+            waited_us,
+            late_us,
+            Preamble(preamble),
+            Channel(channel)
         );
         TX_SINCE_MS.store(0, Ordering::Relaxed);
     }
@@ -1071,7 +1158,7 @@ static TX_SINCE_MS: AtomicU32 = AtomicU32::new(0);
 /// A transmit takes ~70ms. Past this, it's stuck
 const TX_STUCK_MS: u32 = 200;
 
-/// The echo station's replays sometimes stop dead: a `TX start` with no `TX
+/// The echo station's replays sometimes stop dead: a transmit with no `TX
 /// end`, and the radio thread silent for 15-27s. lora-phy's tx() has no
 /// timeout: it waits for TxDone, and loops while the IRQ it sees isn't one
 /// it wants. This logs once per stuck transmit, with the pins that tell
@@ -1128,6 +1215,30 @@ fn uptime_ms() -> u32 {
 }
 
 /// Microseconds since boot. The log's own timestamp moves in 10ms ticks.
+/// For the TX log: the preamble, if not the usual one (a wake-up's)
+struct Preamble(Option<u16>);
+
+impl core::fmt::Display for Preamble {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        match self.0 {
+            Some(symbols) => write!(f, " preamble={}", symbols),
+            None => Ok(()),
+        }
+    }
+}
+
+/// For the TX log: the channel, if not the start slot
+struct Channel(u8);
+
+impl core::fmt::Display for Channel {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        match self.0 {
+            0 => Ok(()),
+            channel => write!(f, " ch={}", channel),
+        }
+    }
+}
+
 /// For the RX log: how long after the DIO1 interrupt the radio task got to
 /// it, or that no interrupt fired (DIO1 was already high)
 struct TaskLate(Option<i64>);
@@ -1139,6 +1250,12 @@ impl core::fmt::Display for TaskLate {
             None => write!(f, "no-isr"),
         }
     }
+}
+
+/// Wait until `at_us` (µs since boot); at once if it's past. embassy-time
+/// counts esp_timer's µs too, so this is the same clock
+async fn until_us(at_us: i64) {
+    embassy_time::Timer::at(embassy_time::Instant::from_micros(at_us.max(0) as u64)).await;
 }
 
 fn uptime_us() -> i64 {

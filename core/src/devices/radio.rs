@@ -21,6 +21,12 @@ pub struct RxPacket {
     /// since boot, as the DIO1 interrupt noted it (the radio task's own,
     /// later, time if no interrupt fired: DIO1 was already high)
     pub end_us: i64,
+    /// False: `end_us` can't be trusted. The time from its header to its end
+    /// wasn't a packet of its length's (air::after_header_us): it was decoded
+    /// off its channel (at point-blank range a radio hears the next channel
+    /// too), and in LoRa a frequency offset looks like a time offset. Its
+    /// bytes are as good as `crc_ok` says
+    pub timing_ok: bool,
 }
 
 pub struct TxRequest {
@@ -35,6 +41,10 @@ pub struct TxRequest {
     /// air sends the rest of its transmission on the beat without it: the
     /// waits put packets up to 65 ms off the beat (walk of 2026-10-05)
     pub clear_air_first: bool,
+    /// When to start sending, in µs since boot (esp_timer: the clock of
+    /// `RxPacket::end_us`); None: as soon as it can. Senders put each packet
+    /// in the middle of its bin (air::guard_us)
+    pub send_at_us: Option<i64>,
 }
 
 /// How the app wants the radio to listen. Only a radio that sweeps channels

@@ -53,6 +53,10 @@ const HOUSEKEEPING_PERIOD: embassy_time::Duration = embassy_time::Duration::from
 /// Nothing heard or sent for this long, with no transmission on the conveyor
 /// (whose end is the conveyor's to say: conveyor.rs): the radio may sweep again
 const RX_TIMEOUT: Duration = Duration::from_millis(500);
+/// After our own transmission, our txid counts as ours this long: its copies
+/// relayed back by repeaters arrive within a bin or two. After that it's
+/// anyone's, so a talker who draws the same txid isn't ignored
+const OWN_RELAYS_FOR: Duration = Duration::from_secs(2);
 /// Air quiet this long before log lines are written to flash
 const LOG_FLUSH_IDLE: Duration = Duration::from_secs(3);
 /// How often the GPS fix goes in the log (also whenever it's gained or
@@ -121,6 +125,8 @@ pub async fn init<P: Platform>(
             // 3KB: on the heap, once. In the App it overflowed the main task's stack
             playback: Box::default(),
             own_txid: None,
+            own_txid_until: Instant::now(),
+            last_heard_txid: None,
         },
         sounds: Sounds {
             silence: vec![0i16; PACKET_SAMPLES].into(),
@@ -172,6 +178,8 @@ struct Receiving {
     transmission: Option<Transmission>, // the transmission on its conveyor: says when it's over
     playback: Box<PlaybackTiming>, // per received transmission, logged at its end
     own_txid: Option<u8>,     // our last transmission's, so we ignore it relayed back
+    own_txid_until: Instant,  // until then: our relayed copies only come back for a moment
+    last_heard_txid: Option<u8>, // the last transmission heard: a new one of ours never takes it
 }
 
 /// Audio built once at boot, played as-is
@@ -333,7 +341,7 @@ impl<P: Platform> App<P> {
         // transmission, so that keeps going
         if !rx_pkt.crc_ok {
             if let Some(transmission) = &mut self.rx.transmission {
-                transmission.heard_garbled(rx_pkt.end_us);
+                transmission.heard_garbled(rx_pkt.end_us, rx_pkt.timing_ok);
             }
             return;
         }
@@ -368,7 +376,7 @@ impl<P: Platform> App<P> {
 
         // Where it landed on its transmission's conveyor (the first good
         // packet starts one). Not our own relayed back, nor a timing run
-        let ours = Some(txid) == self.rx.own_txid;
+        let ours = Some(txid) == self.rx.own_txid && Instant::now() < self.rx.own_txid_until;
         let landing = if ours || pkt_type == PacketType::Bench {
             None
         } else {
@@ -535,14 +543,16 @@ impl<P: Platform> App<P> {
             if transmission.txid != txid {
                 return None;
             }
-            return Some(transmission.heard(rx_pkt.end_us, hops));
+            return Some(transmission.heard(rx_pkt.end_us, hops, rx_pkt.timing_ok));
         }
         if matches!(pkt_type, PacketType::VoiceEnd | PacketType::EchoEnd) {
             return None;
         }
         // Its hops say where it is on the belt, whatever channel it was heard
         // on: at point-blank range a radio hears the next channel too
-        let (transmission, landing) = Transmission::start(txid, rx_pkt.end_us, hops);
+        let (transmission, landing) =
+            Transmission::start(txid, rx_pkt.end_us, hops, rx_pkt.timing_ok);
+        self.rx.last_heard_txid = Some(txid);
         log::info!(
             "CONVEYOR start txid={} from a packet with {} hops, on ch{}",
             txid,
@@ -701,21 +711,23 @@ impl<P: Platform> App<P> {
         // A txid of its own, never the talker's: the talker drops anything
         // with its own txid as its transmission relayed back, and would play
         // none of the replay (1 in 128, bench 2026-10-05)
-        let txid = loop {
-            let txid = random_txid::<P>();
-            if Some(txid) != talker_txid {
-                break txid;
-            }
-        };
+        let txid = self.new_txid(talker_txid);
         self.rx.own_txid = Some(txid);
         // The replay ends with the echo station's own Ident: whoever hears it
         // learns how far away the station is
         let ident = self.ident();
         let end = packet::end(PacketType::EchoEnd, txid, &ident);
-        let replay = echo::replay(packets, txid, config::WAKE_PREAMBLE.is_on(), end);
+        let replay = echo::replay(
+            packets,
+            txid,
+            config::WAKE_PREAMBLE.is_on(),
+            end,
+            P::now_us(),
+        );
         if let Either::Second(()) = select(replay, discard_rx()).await {
             unreachable!("discard_rx never returns");
         }
+        self.rx.own_txid_until = Instant::now() + OWN_RELAYS_FOR;
         self.logs.last_activity = Instant::now();
         self.draw_screen(Activity::Idle);
     }
@@ -727,7 +739,7 @@ impl<P: Platform> App<P> {
         self.rx.transmission = None;
         LISTEN.signal(Listen::Hold);
 
-        let txid = random_txid::<P>();
+        let txid = self.new_txid(None);
         self.rx.own_txid = Some(txid);
         log::info!("PTT pressed — streaming (txid={})", txid);
 
@@ -744,6 +756,7 @@ impl<P: Platform> App<P> {
         };
 
         log::info!("PTT released — {} packets sent + EOT", packets);
+        self.rx.own_txid_until = Instant::now() + OWN_RELAYS_FOR;
         self.logs.last_activity = Instant::now();
         self.draw_screen(Activity::Idle);
     }
@@ -751,19 +764,19 @@ impl<P: Platform> App<P> {
     /// Send voice while PTT is held, then our end packet. Returns the
     /// packets sent.
     async fn stream(&mut self, txid: u8) -> usize {
-        // Every packet goes on the air at the start of its bin, not the
-        // moment it's ready: the air is a conveyor of 80 ms bins, a talker
-        // sends in the even ones and a repeater relays in the odd ones
-        // between (air::bin_us). Codec2 takes a different time on every
-        // packet; sent as each encode finished, packets landed up to 65 ms
-        // out of their bins (walk of 2026-10-05), too far for a receiver to
-        // tell them from someone else's. The echo replay keeps time the same
-        // way. Pipelined: each pass captures packet n + 1 while packet n is
-        // encoded and waits for its bin, so the mic is drained continuously
-        let ptt_pressed_at = embassy_time::Instant::now();
-        let bin_0 = ptt_pressed_at + ENCODE_DEADLINE;
-        let bin_start =
-            |bin: u64| bin_0 + embassy_time::Duration::from_micros(air::bin_us() as u64 * bin);
+        // Every packet goes on the air in the middle of its bin, at a time the
+        // radio keeps to the microsecond, not the moment it's ready: the air
+        // is a conveyor of 80 ms bins, a talker sends in the even ones and a
+        // repeater relays in the odd ones between (air::bin_us). Codec2 takes
+        // a different time on every packet; sent as each encode finished,
+        // packets landed up to 65 ms out of their bins (walk of 2026-10-05),
+        // too far for a receiver to tell them from someone else's. The echo
+        // replay keeps time the same way. Pipelined: each pass captures
+        // packet n + 1 while packet n is encoded and handed to the radio
+        // with its send time, so the mic is drained continuously
+        let bin_0_us = P::now_us() + ENCODE_DEADLINE.as_micros() as i64;
+        let send_at_us =
+            |bin: u64| bin_0_us + bin as i64 * air::bin_us() as i64 + air::guard_us() as i64;
         let wake = config::WAKE_PREAMBLE.is_on();
         let mic = &mut self.devices.mic;
         let codec_tx = &self.codec_tx;
@@ -785,13 +798,22 @@ impl<P: Platform> App<P> {
                 match pending_pkt.take() {
                     Some(pcm) => {
                         let first_on_air = packets == 1 && !wake;
-                        let bin = bin_start(2 * packets);
-                        encode_and_send(codec_tx, header, pcm, bin, first_on_air, &mut timing)
-                            .await;
+                        let send_at = send_at_us(2 * packets);
+                        encode_and_send(
+                            codec_tx,
+                            header,
+                            pcm,
+                            send_at,
+                            first_on_air,
+                            &mut timing,
+                            P::now_us,
+                        )
+                        .await;
                     }
                     None if wake => {
-                        Timer::at(bin_start(0)).await;
-                        TX_CHAN.send(packet::wake(txid)).await;
+                        let mut wake = packet::wake(txid);
+                        wake.send_at_us = Some(send_at_us(0));
+                        TX_CHAN.send(wake).await;
                     }
                     None => {}
                 }
@@ -802,15 +824,23 @@ impl<P: Platform> App<P> {
         }
         if let Some(pcm) = pending_pkt {
             let first_on_air = packets == 1 && !wake;
-            let bin = bin_start(2 * packets);
-            encode_and_send(codec_tx, header, pcm, bin, first_on_air, &mut timing).await;
+            let send_at = send_at_us(2 * packets);
+            encode_and_send(
+                codec_tx,
+                header,
+                pcm,
+                send_at,
+                first_on_air,
+                &mut timing,
+                P::now_us,
+            )
+            .await;
         }
 
         // Who we are and where we are, as the transmission ends: in the next
         // even bin, like any packet. Sent straight after the last packet, it
         // was on the air while a repeater relayed that one, and the repeater
         // never heard it (relayed 1 of 16 EOTs, 3 desk runs 2026-10-04)
-        Timer::at(bin_start(2 * (packets + 1))).await;
         let end = packet::end(PacketType::VoiceEnd, txid, &self.ident());
         TX_CHAN
             .send(TxRequest {
@@ -818,10 +848,26 @@ impl<P: Platform> App<P> {
                 preamble: None,
                 channel: 0,
                 clear_air_first: false,
+                send_at_us: Some(send_at_us(2 * (packets + 1))),
             })
             .await;
+        // Back once it's on the air: until then we're still transmitting
+        let sent_us = send_at_us(2 * (packets + 1) + 1);
+        Timer::at(embassy_time::Instant::from_micros(sent_us.max(0) as u64)).await;
         log::info!("TX bins: {}", timing);
         packets as usize
+    }
+
+    /// A txid for a new transmission of ours: random, but never the last one
+    /// heard (whoever sent it still counts it as its own for a moment and
+    /// would drop ours, bench 2026-10-05), nor `also_not`
+    fn new_txid(&self, also_not: Option<u8>) -> u8 {
+        loop {
+            let txid = random_txid::<P>();
+            if Some(txid) != self.rx.last_heard_txid && Some(txid) != also_not {
+                return txid;
+            }
+        }
     }
 
     /// Us, for our end packets: our name, and where we are now
@@ -1025,8 +1071,10 @@ fn own_name(short_mac: &str) -> heapless::String<NAME_BYTES> {
 /// channel the packet came in on. Without the sweep flag every radio
 /// listens on the start slot only, so the relay stays where it was heard
 /// A repeater's relay of `rx_pkt`: the same packet with one more hop, on the
-/// next channel (`preamble`: a wake-up's long one). Which channel, or None
-/// once it has had packet::MAX_HOPS
+/// next channel (`preamble`: a wake-up's long one), in the bin after the copy
+/// it heard: it starts exactly one bin (80 ms) after that copy started, so it
+/// sits in the middle of its bin too. Its bin is its own: no waiting for
+/// clear air. Which channel, or None once it has had packet::MAX_HOPS
 async fn relay(rx_pkt: &RxPacket, preamble: Option<u16>) -> Option<u8> {
     let Some(header) = packet::relayed([rx_pkt.data[0], rx_pkt.data[1]]) else {
         log::info!("RELAY: not relayed, it has had {} hops", packet::MAX_HOPS);
@@ -1036,12 +1084,16 @@ async fn relay(rx_pkt: &RxPacket, preamble: Option<u16>) -> Option<u8> {
     let mut data = heapless::Vec::new();
     let _ = data.extend_from_slice(&header);
     let _ = data.extend_from_slice(&rx_pkt.data[HEADER_BYTES..]);
+    // A wake-up's long preamble takes the same air as a voice packet (air.rs)
+    let heard_started_us =
+        rx_pkt.end_us - air::packet_us(air::PREAMBLE_SYMBOLS, PACKET_BYTES) as i64;
     TX_CHAN
         .send(TxRequest {
             data,
             preamble,
             channel,
-            clear_air_first: true,
+            clear_air_first: false,
+            send_at_us: Some(heard_started_us + air::bin_us() as i64),
         })
         .await;
     Some(channel)
@@ -1075,57 +1127,52 @@ async fn capture_packet(mic: &mut impl Mic) -> Box<[i16]> {
     pcm
 }
 
-/// Encode one packet on the codec thread, then queue it for the radio at the
-/// start of its bin (at once, if the encode ran past it).
+/// Encode one packet on the codec thread, then hand it to the radio with its
+/// send time (`send_at_us`, on the radio's clock: `now_us`). If the encode ran
+/// past it, the radio drops it: a packet out of its bin is worse than none
 async fn encode_and_send(
     codec_tx: &SyncSender<CodecRequest>,
     header: [u8; 2],
     pcm: Box<[i16]>,
-    bin_start: embassy_time::Instant,
+    send_at_us: i64,
     first_on_air: bool,
     timing: &mut SendTiming,
+    now_us: fn() -> i64,
 ) {
-    let asked = embassy_time::Instant::now();
+    let asked_us = now_us();
     codec_tx.send(CodecRequest::encode(header, pcm)).unwrap();
-    {
-        let packet = ENCODED.receive().await;
-        timing.note(asked, embassy_time::Instant::now(), bin_start);
-        // TODO: hand the radio the bin's start with the packet and let it
-        // send at that microsecond (timed TX, step 3 of #36). Waiting here, the
-        // send lands as late as the app task and the radio's queue make it
-        Timer::at(bin_start).await;
-        TX_CHAN
-            .send(TxRequest {
-                data: packet,
-                preamble: None,
-                channel: 0,
-                clear_air_first: first_on_air,
-            })
-            .await;
-    }
+    let packet = ENCODED.receive().await;
+    timing.note(asked_us, now_us(), send_at_us);
+    TX_CHAN
+        .send(TxRequest {
+            data: packet,
+            preamble: None,
+            channel: 0,
+            clear_air_first: first_on_air,
+            send_at_us: Some(send_at_us),
+        })
+        .await;
 }
 
-/// How one transmission's packets made their bins, for a log line at its end
+/// How one transmission's packets made their send times, for a log line at
+/// its end
 #[derive(Default)]
 struct SendTiming {
     packets: u32,
-    fastest_encode_us: u64,
-    slowest_encode_us: u64,
-    /// The least time any packet was ready before its bin started. Negative:
-    /// it was late, and went out when ready
+    fastest_encode_us: i64,
+    slowest_encode_us: i64,
+    /// The least time any packet was ready before its send time. Negative:
+    /// it was late, and the radio dropped it
     least_room_us: i64,
     late: u32,
 }
 
 impl SendTiming {
-    fn note(
-        &mut self,
-        asked: embassy_time::Instant,
-        encoded: embassy_time::Instant,
-        bin_start: embassy_time::Instant,
-    ) {
-        let encode_us = encoded.duration_since(asked).as_micros();
-        let room_us = bin_start.as_micros() as i64 - encoded.as_micros() as i64;
+    /// One packet: when its encode was asked for, when it was done, and when
+    /// it was to be sent, all in µs on the radio's clock
+    fn note(&mut self, asked_us: i64, encoded_us: i64, send_at_us: i64) {
+        let encode_us = encoded_us - asked_us;
+        let room_us = send_at_us - encoded_us;
         if self.packets == 0 {
             self.fastest_encode_us = encode_us;
             self.slowest_encode_us = encode_us;
@@ -1138,7 +1185,7 @@ impl SendTiming {
         if room_us < 0 {
             self.late += 1;
             log::warn!(
-                "TX packet ready {}ms after its bin started (encode {}ms)",
+                "TX packet ready {}ms after its send time (encode {}ms): the radio drops it",
                 -room_us / 1000,
                 encode_us / 1000
             );
@@ -1151,7 +1198,7 @@ impl core::fmt::Display for SendTiming {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         write!(
             f,
-            "{} voice packets, encode {}..{}ms, least room before a bin {}ms, late {}",
+            "{} voice packets, encode {}..{}ms, least room before a send time {}ms, late {}",
             self.packets,
             self.fastest_encode_us / 1000,
             self.slowest_encode_us / 1000,

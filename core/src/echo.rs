@@ -6,9 +6,10 @@
 //! encoded silence, so dropouts are heard where they happened, and the
 //! listener gets an unbroken sequence.
 
+use crate::air;
 use crate::codec::{FRAMES_PER_PACKET, PAYLOAD_BYTES};
 use crate::devices::radio::{TxRequest, TX_CHAN};
-use embassy_time::{Duration, Ticker, Timer};
+use embassy_time::{Instant, Timer};
 
 use crate::packet::{self, PacketType};
 
@@ -86,19 +87,30 @@ impl Recorder {
     }
 }
 
-/// Send a recording back out at the pace it was spoken, then the end packet
-/// `end`. With `wake`, a wake-up packet goes first, in the slot before the
-/// audio.
-pub async fn replay(packets: Vec<Payload>, txid: u8, wake: bool, end: heapless::Vec<u8, 255>) {
-    Timer::after_millis(REPLAY_DELAY_MS).await;
+/// Send a recording back out like a talker would: each packet in the middle
+/// of its bin, at a time the radio keeps (the wake-up in bin 0, packet n in
+/// bin 2(n + 1), the end packet `end` in the next even bin). Only the first
+/// packet on the air waits for clear air. `now_us`: the time now, on the
+/// radio's clock. Returns once the end packet is on the air
+pub async fn replay(
+    packets: Vec<Payload>,
+    txid: u8,
+    wake: bool,
+    end: heapless::Vec<u8, 255>,
+    now_us: i64,
+) {
+    // A pause first, so the talker has let go of PTT
+    let bin_0_us = now_us + REPLAY_DELAY_MS as i64 * 1000;
+    let send_at_us =
+        |bin: usize| bin_0_us + bin as i64 * air::bin_us() as i64 + air::guard_us() as i64;
     if wake {
-        TX_CHAN.send(packet::wake(txid)).await;
+        let mut wake = packet::wake(txid);
+        wake.send_at_us = Some(send_at_us(0));
+        TX_CHAN.send(wake).await;
     }
 
-    let mut ticker = Ticker::every(Duration::from_millis(PACKET_MS));
     let header = packet::pack(PacketType::Echo, txid);
-    for payload in &packets {
-        ticker.next().await;
+    for (n, payload) in packets.iter().enumerate() {
         let mut data = heapless::Vec::new();
         let _ = data.extend_from_slice(&header);
         let _ = data.extend_from_slice(payload);
@@ -107,23 +119,28 @@ pub async fn replay(packets: Vec<Payload>, txid: u8, wake: bool, end: heapless::
                 data,
                 preamble: None,
                 channel: 0,
-                clear_air_first: true,
+                clear_air_first: n == 0 && !wake,
+                send_at_us: Some(send_at_us(2 * (n + 1))),
             })
             .await;
     }
 
-    // On the beat, a slot after the last packet, like any packet: sent
-    // straight after it, it was on the air while a repeater relayed that
-    // last packet, and the repeater never heard it
-    ticker.next().await;
+    // In the next even bin, like any packet: sent straight after the last
+    // packet, it was on the air while a repeater relayed that one, and the
+    // repeater never heard it
+    let end_bin = 2 * (packets.len() + 1);
     TX_CHAN
         .send(TxRequest {
             data: end,
             preamble: None,
             channel: 0,
-            clear_air_first: true,
+            clear_air_first: packets.is_empty() && !wake,
+            send_at_us: Some(send_at_us(end_bin)),
         })
         .await;
+    // Back once it's on the air: until then the app is still transmitting
+    let sent_us = send_at_us(end_bin + 1);
+    Timer::at(Instant::from_micros(sent_us.max(0) as u64)).await;
 }
 
 #[cfg(test)]

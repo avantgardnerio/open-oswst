@@ -124,8 +124,8 @@ def measure(path):
         if not msg.startswith("PTT pressed"):
             continue
         after = hand[i + 1 : i + 40]
-        wake = next((t for t, m in after if re.match(r"TX start \[\d+B\] preamble=", m)), None)
-        voice = next((t for t, m in after if m.startswith("TX start [26B]")), None)
+        wake = next((tx_started(t, m) for t, m in after if re.match(r"TX end \[\d+B\].* preamble=", m)), None)
+        voice = next((tx_started(t, m) for t, m in after if m.startswith("TX end [26B]")), None)
         if wake is not None:
             ptt["wake"].append(wake - ms)
         if voice is not None:
@@ -133,6 +133,13 @@ def measure(path):
     medians = {k: statistics.median(v) for k, v in {**steps, **ptt}.items() if v}
     medians["relays"] = len(steps["slack"])
     return medians
+
+
+def tx_started(ms, msg):
+    """When a send went on the air, from its TX end line (logged at ms):
+    before the end by its air (tx=) and the way back to listening"""
+    m = re.search(r"tx=(\d+)us back_to_rx=(\d+)us", msg)
+    return ms - (int(m.group(1)) + int(m.group(2))) / 1000
 
 
 # --- drawing ---------------------------------------------------------------

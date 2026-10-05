@@ -104,6 +104,14 @@ pub fn bin_us() -> u32 {
     slot_us() / 2
 }
 
+/// The spare air in a bin, either side of its packet: (80 - 65.8) / 2 =
+/// 7.1 ms. Senders start a packet this long after its bin starts, so it sits
+/// in the middle and a radio switching channels at the bin's edges has this
+/// much room either side
+pub fn guard_us() -> u32 {
+    (bin_us() - packet_us(PREAMBLE_SYMBOLS, PACKET_BYTES)) / 2
+}
+
 /// 2^SF / bandwidth: 1024us at SF7/125k
 pub fn symbol_us() -> u32 {
     (1 << SPREADING_FACTOR) * 1000 / BANDWIDTH_KHZ
@@ -115,6 +123,15 @@ pub fn packet_us(preamble_symbols: u16, bytes: usize) -> u32 {
     // In quarter symbols, so the 4.25 stays whole
     let quarters = preamble_symbols as u32 * 4 + 17 + payload_symbols(bytes) * 4;
     quarters * symbol_us() / 4
+}
+
+/// From a packet's header (the radio's header-valid IRQ, after the header's
+/// 8 symbols) to its end: 40.96 ms for a voice packet, 10.2 ms for a
+/// wake-up's 2 bytes. A packet whose header-to-end time is off this was
+/// decoded off its channel: in LoRa a frequency offset looks like a time
+/// offset, so its end time is skewed
+pub fn after_header_us(bytes: usize) -> u32 {
+    (payload_symbols(bytes) - 8) * symbol_us()
 }
 
 /// Symbols after the sync word for `bytes` of payload, with an explicit
@@ -169,6 +186,22 @@ mod tests {
         assert_ne!(hop_slots(200, 43, 50), hops);
         // Every slot at most
         assert_eq!(hop_slots(0, 7, 1000).len(), 207);
+    }
+
+    #[test]
+    fn a_packets_end_comes_a_fixed_time_after_its_header() {
+        assert_eq!(after_header_us(PACKET_BYTES), 40_960);
+        assert_eq!(after_header_us(HEADER_BYTES), 10_240);
+    }
+
+    #[test]
+    fn a_packet_sits_in_the_middle_of_its_bin() {
+        assert_eq!(bin_us(), 80_000);
+        assert_eq!(guard_us(), 7_104);
+        assert_eq!(
+            2 * guard_us() + packet_us(PREAMBLE_SYMBOLS, PACKET_BYTES),
+            bin_us()
+        );
     }
 
     #[test]
