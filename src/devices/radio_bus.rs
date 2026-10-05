@@ -16,7 +16,9 @@
 //!
 //! Neither interrupt is in IRAM (CONFIG_SPI_MASTER_ISR_IN_IRAM and
 //! CONFIG_GPIO_CTRL_FUNC_IN_IRAM are off): while the flash is being written
-//! they wait, so the callbacks can live in flash too.
+//! they wait, so the callbacks can live in flash too. The pin interrupt also
+//! notes when it fired (`fired_at_us`): that's a packet's end time, so a
+//! flash write delays it too.
 //!
 //! One radio only: the wake-ups are statics.
 
@@ -34,7 +36,7 @@ use esp_idf_svc::hal::gpio::{AnyIOPin, AnyInputPin, Input, Output, Pin, PinDrive
 use esp_idf_svc::hal::spi::SPI2;
 use esp_idf_svc::sys::*;
 use lora_phy::iv::GenericSx126xInterfaceVariant;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use super::radio;
 
@@ -269,12 +271,16 @@ pub struct RadioPin {
 /// Per GPIO: set by the pin's interrupt, which wakes the waiting task
 struct PinWake {
     fired: AtomicBool,
+    /// When it fired: the low 32 bits of esp_timer's µs (Xtensa has no
+    /// 64-bit atomics; `fired_at_us` rebuilds the rest)
+    fired_at_us: AtomicU32,
     waker: AtomicWaker,
 }
 
 static PIN_WAKES: [PinWake; SOC_GPIO_PIN_COUNT as usize] = [const {
     PinWake {
         fired: AtomicBool::new(false),
+        fired_at_us: AtomicU32::new(0),
         waker: AtomicWaker::new(),
     }
 }; SOC_GPIO_PIN_COUNT as usize];
@@ -353,8 +359,23 @@ unsafe extern "C" fn on_pin(arg: *mut core::ffi::c_void) {
     let gpio = arg as i32;
     gpio_intr_disable(gpio);
     let wake = &PIN_WAKES[gpio as usize];
+    wake.fired_at_us
+        .store(esp_timer_get_time() as u32, Ordering::Relaxed);
     wake.fired.store(true, Ordering::Release);
     wake.waker.wake();
+}
+
+/// When `gpio`'s interrupt ended its last wait, in µs since boot (esp_timer).
+/// None if that wait found its level already there: no interrupt, so no
+/// time. `now_us` is esp_timer's time now: the interrupt's is rebuilt from
+/// its low 32 bits, so ask within ~71 minutes of it
+pub fn fired_at_us(gpio: i32, now_us: i64) -> Option<i64> {
+    let wake = &PIN_WAKES[gpio as usize];
+    if !wake.fired.load(Ordering::Acquire) {
+        return None;
+    }
+    let since_us = (now_us as u32).wrapping_sub(wake.fired_at_us.load(Ordering::Relaxed));
+    Some(now_us - since_us as i64)
 }
 
 impl PinErrorType for RadioPin {

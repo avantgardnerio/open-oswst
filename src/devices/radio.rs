@@ -495,9 +495,15 @@ impl Driver {
 
     /// The radio raised an IRQ while listening.
     async fn on_irq(&mut self, irq: Result<(), RadioError>) {
-        // As close to the radio's IRQ as software gets: the relay metric in
-        // scripts/relay-test.py times from here
-        let irq_us = uptime_us();
+        // When the radio raised the IRQ, as the DIO1 interrupt noted it,
+        // before this task ran. If DIO1 was already high when we started
+        // waiting, no interrupt fired: then this task's own time, later. The
+        // relay metric in scripts/relay-test.py times from here
+        let task_us = uptime_us();
+        let isr_us = radio_bus::fired_at_us(self.dio1_gpio, task_us);
+        let irq_us = isr_us.unwrap_or(task_us);
+        // How long after the interrupt this task got here (measuring)
+        let task_late_us = isr_us.map(|isr_us| task_us - isr_us);
         if let Err(e) = irq {
             log::error!("IRQ error: {:?}", e);
             return;
@@ -518,7 +524,7 @@ impl Driver {
                 // header alone, or a bad packet of another length, might not
                 // be ours, and then nothing would ever unlock us: leave those
                 // to the false alarm timer
-                if self.receive(header_at, irq_us).await {
+                if self.receive(header_at, irq_us, task_late_us).await {
                     if let State::Locked { heard, .. } = &mut self.state {
                         *heard = true;
                     }
@@ -674,7 +680,14 @@ impl Driver {
     /// CRC failed. True if it keeps a lock: a good packet, or a bad one of
     /// our packets' length (the length is in LoRa's header, which has its
     /// own checksum: something of ours was in the slot)
-    async fn receive(&mut self, header_at: Option<Instant>, irq_us: i64) -> bool {
+    /// `task_late_us`: how long after the interrupt the radio task got to it,
+    /// None if no interrupt fired (and `irq_us` is the task's own time)
+    async fn receive(
+        &mut self,
+        header_at: Option<Instant>,
+        irq_us: i64,
+        task_late_us: Option<i64>,
+    ) -> bool {
         let rx_ms = header_at.map_or(0, |at| at.elapsed().as_millis());
         let (len, status) = match self
             .lora
@@ -694,21 +707,23 @@ impl Driver {
         let (packet, crc_ok) = crc::split(&self.rx_buf[..len as usize]);
         if crc_ok {
             log::info!(
-                "RX end [{}B] {}ms after header rssi={} snr={} at={}us",
+                "RX end [{}B] {}ms after header rssi={} snr={} at={}us {}",
                 packet.len(),
                 rx_ms,
                 status.rssi,
                 status.snr,
-                irq_us
+                irq_us,
+                TaskLate(task_late_us)
             );
         } else {
             log::warn!(
-                "RX CRC error [{}B] {}ms after header rssi={} snr={} at={}us",
+                "RX CRC error [{}B] {}ms after header rssi={} snr={} at={}us {}",
                 len,
                 rx_ms,
                 status.rssi,
                 status.snr,
-                irq_us
+                irq_us,
+                TaskLate(task_late_us)
             );
         }
 
@@ -1105,6 +1120,19 @@ fn uptime_ms() -> u32 {
 }
 
 /// Microseconds since boot. The log's own timestamp moves in 10ms ticks.
+/// For the RX log: how long after the DIO1 interrupt the radio task got to
+/// it, or that no interrupt fired (DIO1 was already high)
+struct TaskLate(Option<i64>);
+
+impl core::fmt::Display for TaskLate {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        match self.0 {
+            Some(late_us) => write!(f, "task+{}us", late_us),
+            None => write!(f, "no-isr"),
+        }
+    }
+}
+
 fn uptime_us() -> i64 {
     unsafe { esp_idf_svc::sys::esp_timer_get_time() }
 }
