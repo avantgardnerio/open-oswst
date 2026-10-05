@@ -30,7 +30,7 @@ use crate::codec::{
     PACKET_BYTES, PACKET_SAMPLES, PAYLOAD_BYTES,
 };
 use crate::config;
-use crate::conveyor::{Landing, Transmission};
+use crate::conveyor::{Arrival, Landing, Transmission};
 use crate::echo::{self, Recorder};
 use crate::menu::{Menu, Outcome, Setting};
 use crate::mode::{self, Mode};
@@ -552,21 +552,15 @@ impl<P: Platform> App<P> {
             if transmission.txid != txid {
                 return None;
             }
-            return Some(transmission.heard(rx_pkt.end_us, hops, rx_pkt.channel, rx_pkt.timing_ok));
+            return Some(transmission.heard(arrival(rx_pkt, hops)));
         }
         if matches!(pkt_type, PacketType::VoiceEnd | PacketType::EchoEnd) {
             return None;
         }
         // Its hops say where it is on the belt, whatever channel it was heard
         // on: at point-blank range a radio hears the next channel too
-        let (transmission, landing) = Transmission::start(
-            txid,
-            channel_count(),
-            rx_pkt.end_us,
-            hops,
-            rx_pkt.channel,
-            rx_pkt.timing_ok,
-        );
+        let (transmission, landing) =
+            Transmission::start(txid, channel_count(), arrival(rx_pkt, hops));
         self.rx.last_heard_txid = Some(txid);
         log::info!(
             "CONVEYOR start txid={} from a packet with {} hops, on ch{}",
@@ -1149,6 +1143,17 @@ async fn relay(rx_pkt: &RxPacket, preamble: Option<u16>, channel: u8) -> Option<
         })
         .await;
     Some(channel)
+}
+
+/// A good packet, for the conveyor: `hops` from its header
+fn arrival(rx_pkt: &RxPacket, hops: u8) -> Arrival {
+    Arrival {
+        end_us: rx_pkt.end_us,
+        hops,
+        channel: rx_pkt.channel,
+        rssi: rx_pkt.rssi,
+        timing_ok: rx_pkt.timing_ok,
+    }
 }
 
 /// How many hop channels a radio listens on: rx_hops if it sweeps, else

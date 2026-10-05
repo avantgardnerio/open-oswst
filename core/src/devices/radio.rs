@@ -61,7 +61,7 @@ pub enum Listen {
 }
 
 /// A schedule of channels that repeats on a clock: turns of `every_us`,
-/// from `from_us` on, turn n on `channels[n % 2]`. Just times and channels:
+/// from `from_us` on, turn n on `channels[n % 4]`. Just times and channels:
 /// the app works out which (a transmission's bins and which hops are on
 /// which channel, conveyor.rs). `from_us` may be long past: the rotation
 /// has been going round since then
@@ -72,16 +72,16 @@ pub struct Rotation {
     pub from_us: i64,
     /// How long each turn lasts, µs
     pub every_us: u32,
-    /// The channel for even turns, then odd ones: an index into the hop
+    /// The channel for each turn, round and round: an index into the hop
     /// channels, like `RxPacket::channel`
-    pub channels: [u8; 2],
+    pub channels: [u8; 4],
 }
 
 impl Rotation {
     /// The channel to be on at `at_us`
     pub fn channel_at(&self, at_us: i64) -> u8 {
         let turn = (at_us - self.from_us).div_euclid(self.every_us as i64);
-        self.channels[turn.rem_euclid(2) as usize]
+        self.channels[turn.rem_euclid(self.channels.len() as i64) as usize]
     }
 
     /// When the turn after the one at `at_us` starts
@@ -91,9 +91,11 @@ impl Rotation {
         self.from_us + (turn + 1) * every_us
     }
 
-    /// Both turns on the same channel: it never moves
+    /// Every turn on the same channel: it never moves
     pub fn stays(&self) -> bool {
-        self.channels[0] == self.channels[1]
+        self.channels
+            .iter()
+            .all(|&channel| channel == self.channels[0])
     }
 }
 
@@ -110,7 +112,7 @@ mod tests {
     const ROTATION: Rotation = Rotation {
         from_us: 1_000_000,
         every_us: 80_000,
-        channels: [3, 4],
+        channels: [3, 4, 3, 2],
     };
 
     #[test]
@@ -119,9 +121,11 @@ mod tests {
         assert_eq!(ROTATION.channel_at(1_079_999), 3);
         assert_eq!(ROTATION.channel_at(1_080_000), 4);
         assert_eq!(ROTATION.channel_at(1_160_000), 3);
+        assert_eq!(ROTATION.channel_at(1_240_000), 2);
+        assert_eq!(ROTATION.channel_at(1_320_000), 3);
         // Long after it started, and before
         assert_eq!(ROTATION.channel_at(1_000_000 + 1001 * 80_000 + 5), 4);
-        assert_eq!(ROTATION.channel_at(999_999), 4);
+        assert_eq!(ROTATION.channel_at(999_999), 2);
     }
 
     #[test]

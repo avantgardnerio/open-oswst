@@ -4,6 +4,7 @@
 
 pub mod air;
 pub mod app;
+pub mod climb;
 pub mod codec;
 pub mod config;
 pub mod conveyor;

@@ -393,9 +393,8 @@ impl Driver {
             }
             (Listen::Rotation(rotation), state) => {
                 log::info!(
-                    "LISTEN rotation: channels {} and {}, turns of {}us from {}us",
-                    rotation.channels[0],
-                    rotation.channels[1],
+                    "LISTEN rotation: channels {:?}, turns of {}us from {}us",
+                    rotation.channels,
                     rotation.every_us,
                     rotation.from_us
                 );
