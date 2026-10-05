@@ -9,7 +9,6 @@
 use crate::codec::{FRAMES_PER_PACKET, PAYLOAD_BYTES};
 use crate::devices::radio::{TxRequest, TX_CHAN};
 use embassy_time::{Duration, Ticker, Timer};
-use std::time::Instant;
 
 use crate::packet::{self, PacketType};
 
@@ -19,17 +18,16 @@ type Payload = [u8; PAYLOAD_BYTES];
 const PACKET_MS: u64 = FRAMES_PER_PACKET as u64 * 40;
 /// Recording limit: 30s of audio (~5KB)
 const MAX_PACKETS: usize = (30_000 / PACKET_MS) as usize;
-/// Talker gone quiet this long without an EOT (it was lost): replay anyway
-const TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 /// Pause before replaying, so the talker has let go of PTT
 const REPLAY_DELAY_MS: u64 = 1000;
 
 pub struct Recorder {
     txid: Option<u8>, // who we're recording; None = idle
-    next_seq: u8,
+    /// The talker's packet we expect next, counted on the conveyor
+    /// (conveyor::Landing::packet), so a gap of any length is measured right
+    next_packet: i64,
     packets: Vec<Payload>,
     silence: Payload,
-    last_rx: Instant,
 }
 
 impl Recorder {
@@ -37,10 +35,9 @@ impl Recorder {
     pub fn new(silence: Payload) -> Self {
         Recorder {
             txid: None,
-            next_seq: 0,
+            next_packet: 0,
             packets: Vec::new(),
             silence,
-            last_rx: Instant::now(),
         }
     }
 
@@ -49,32 +46,30 @@ impl Recorder {
         self.txid
     }
 
-    /// Store one packet. The first packet starts a recording; packets from
-    /// anyone else are ignored until it ends. False if not stored (someone
-    /// else's, or a copy already stored)
-    pub fn record(&mut self, txid: u8, seq: u8, payload: &[u8]) -> bool {
+    /// Store one packet: the talker's `packet`th on the conveyor. The first
+    /// packet starts a recording; packets from anyone else are ignored until
+    /// it ends. False if not stored (someone else's, or a copy already
+    /// stored, e.g. a repeater's relay of it)
+    pub fn record(&mut self, txid: u8, packet: i64, payload: &[u8]) -> bool {
         match self.txid {
             None => {
                 self.txid = Some(txid);
-                self.next_seq = seq;
+                self.next_packet = packet;
             }
             Some(current) if current != txid => return false,
             Some(_) => {}
         }
-        self.last_rx = Instant::now();
 
-        // A backwards step is a duplicate, e.g. heard again via a repeater
-        let missing = seq.wrapping_sub(self.next_seq) & 0x0F;
-        if missing > 7 {
+        if packet < self.next_packet {
             return false;
         }
-        for _ in 0..missing {
+        for _ in self.next_packet..packet {
             self.push(self.silence);
         }
         let mut stored = [0u8; PAYLOAD_BYTES];
         stored.copy_from_slice(payload);
         self.push(stored);
-        self.next_seq = seq.wrapping_add(1) & 0x0F;
+        self.next_packet = packet + 1;
         true
     }
 
@@ -82,11 +77,6 @@ impl Recorder {
         if self.packets.len() < MAX_PACKETS {
             self.packets.push(payload);
         }
-    }
-
-    /// Recording, but the talker has gone quiet without an EOT (it was lost).
-    pub fn timed_out(&self) -> bool {
-        self.txid.is_some() && self.last_rx.elapsed() > TIMEOUT
     }
 
     /// End the recording and hand it over for replay.
@@ -140,4 +130,48 @@ pub async fn replay(
             clear_air_first: true,
         })
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SILENCE: Payload = [0; PAYLOAD_BYTES];
+
+    fn voice(byte: u8) -> Payload {
+        [byte; PAYLOAD_BYTES]
+    }
+
+    #[test]
+    fn a_relay_of_a_stored_packet_isnt_stored_again() {
+        let mut recorder = Recorder::new(SILENCE);
+        assert!(recorder.record(7, 3, &voice(1)));
+        assert!(!recorder.record(7, 3, &voice(1))); // its relay
+        assert!(recorder.record(7, 4, &voice(2)));
+        assert_eq!(recorder.take(), vec![voice(1), voice(2)]);
+    }
+
+    #[test]
+    fn a_gap_of_any_length_is_filled_with_silence() {
+        // Past the 4-bit seq's wrap: 10 packets missing
+        let mut recorder = Recorder::new(SILENCE);
+        recorder.record(7, 0, &voice(1));
+        recorder.record(7, 11, &voice(2));
+        let packets = recorder.take();
+        assert_eq!(packets.len(), 12);
+        assert_eq!(
+            (packets[0], packets[5], packets[11]),
+            (voice(1), SILENCE, voice(2))
+        );
+    }
+
+    #[test]
+    fn someone_else_is_ignored_until_the_recording_ends() {
+        let mut recorder = Recorder::new(SILENCE);
+        recorder.record(7, 0, &voice(1));
+        assert!(!recorder.record(9, 1, &voice(2)));
+        recorder.take();
+        assert!(recorder.record(9, 1, &voice(2)));
+        assert_eq!(recorder.txid(), Some(9));
+    }
 }

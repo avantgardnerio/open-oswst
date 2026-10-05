@@ -36,6 +36,10 @@ impl Platform for Esp {
         unsafe { esp_idf_svc::sys::esp_random() }
     }
 
+    fn now_us() -> i64 {
+        unsafe { esp_idf_svc::sys::esp_timer_get_time() }
+    }
+
     fn network() -> Network {
         net::state()
     }

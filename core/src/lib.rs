@@ -6,6 +6,7 @@ pub mod air;
 pub mod app;
 pub mod codec;
 pub mod config;
+pub mod conveyor;
 pub mod crc;
 pub mod devices;
 pub mod echo;

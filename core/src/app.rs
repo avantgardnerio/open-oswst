@@ -31,6 +31,7 @@ use crate::codec::{
     HEADER_BYTES, PACKET_BYTES, PAYLOAD_BYTES, STEREO_PACKET_SAMPLES,
 };
 use crate::config;
+use crate::conveyor::{Landing, Path, Transmission};
 use crate::echo::{self, Recorder};
 use crate::menu::{Menu, Outcome, Setting};
 use crate::mode::{self, Mode};
@@ -53,8 +54,8 @@ const STEREO_FRAME_SAMPLES: usize = CODEC2_FRAME_SAMPLES * 2;
 
 /// How often `housekeeping()` runs
 const HOUSEKEEPING_PERIOD: embassy_time::Duration = embassy_time::Duration::from_millis(250);
-/// No packet from the current talker for this long: they're gone. And with
-/// nothing heard or sent for this long, the radio may sweep again
+/// Nothing heard or sent for this long, with no transmission on the conveyor
+/// (whose end is the conveyor's to say: conveyor.rs): the radio may sweep again
 const RX_TIMEOUT: Duration = Duration::from_millis(500);
 /// Air quiet this long before log lines are written to flash
 const LOG_FLUSH_IDLE: Duration = Duration::from_secs(3);
@@ -120,7 +121,7 @@ pub async fn init<P: Platform>(
         },
         rx: Receiving {
             buffer: RxBuffer::default(),
-            last_heard: Instant::now(),
+            transmission: None,
             // 3KB: on the heap, once. In the App it overflowed the main task's stack
             playback: Box::default(),
             own_txid: None,
@@ -171,10 +172,10 @@ struct Display {
 
 /// The transmission we're hearing
 struct Receiving {
-    buffer: RxBuffer<Arc<[i16]>>,  // the talker we're hearing, in seq order
-    last_heard: Instant,           // their last packet, for RX_TIMEOUT
+    buffer: RxBuffer<Arc<[i16]>>, // the talker we're hearing, in seq order
+    transmission: Option<Transmission>, // the transmission on its conveyor: says when it's over
     playback: Box<PlaybackTiming>, // per received transmission, logged at its end
-    own_txid: Option<u8>,          // our last transmission's, so we ignore it relayed back
+    own_txid: Option<u8>,         // our last transmission's, so we ignore it relayed back
     relayed_wake: Option<u8>, // repeater: the last wake-up relayed (its txid), to relay each once
 }
 
@@ -240,27 +241,45 @@ impl<P: Platform> App<P> {
     /// Timed jobs, checked every tick. TX and echo replay run to completion
     /// inside their handlers, so none of this ever runs while transmitting.
     async fn housekeeping(&mut self) {
-        // RX went quiet without an EOT (lost, or the talker went out of range).
-        // No squelch tail here: at the edge this fires mid-transmission, and a
+        // The transmission's conveyor has brought nothing for ~1 s and its end
+        // packet never came (lost, or the talker went out of range). No
+        // squelch tail here: at the edge this can come mid-transmission, and a
         // tail in the middle of broken-up audio sounds like the talker let go.
         // Only a received EOT plays the tail.
-        if self.rx.buffer.txid().is_some() && self.rx.last_heard.elapsed() > RX_TIMEOUT {
-            log::info!("RX timeout, resetting txid lock");
-            log_worst_alloc();
-            self.rx.playback.log_and_reset();
-            self.rx.buffer.end();
-            self.draw_screen(Activity::Idle);
+        let over = match &self.rx.transmission {
+            Some(transmission) => transmission.over(P::now_us()),
+            // Locked with nothing on the conveyor: the same good packet starts
+            // both, so it shouldn't happen, but never stay locked for good
+            None => true,
+        };
+        if over {
+            if let Some(transmission) = self.rx.transmission.take() {
+                log::info!(
+                    "CONVEYOR over without an EOT: txid={} {}",
+                    transmission.txid,
+                    transmission.tally()
+                );
+            }
+            if self.rx.buffer.txid().is_some() {
+                log::info!("RX timeout, resetting txid lock");
+                log_worst_alloc();
+                self.rx.playback.log_and_reset();
+                self.rx.buffer.end();
+                self.draw_screen(Activity::Idle);
+            }
+            // Echo mode: replay what was recorded anyway
+            if self.echo.txid().is_some() {
+                self.replay_echo().await;
+            }
         }
 
-        // Echo mode: the talker went quiet without an EOT. Replay anyway
-        if self.echo.timed_out() {
-            self.replay_echo().await;
-        }
-
-        // Nothing heard or sent for a while: the radio may sweep again (if
-        // it sweeps at all). Once per quiet spell
+        // Nothing heard or sent for a while, and no transmission going: the
+        // radio may sweep again (if it sweeps at all). Once per quiet spell
         let quiet_since = self.logs.last_activity;
-        if quiet_since.elapsed() > RX_TIMEOUT && self.swept_after != Some(quiet_since) {
+        if self.rx.transmission.is_none()
+            && quiet_since.elapsed() > RX_TIMEOUT
+            && self.swept_after != Some(quiet_since)
+        {
             LISTEN.signal(Listen::Sweep);
             self.swept_after = Some(quiet_since);
         }
@@ -317,8 +336,12 @@ impl<P: Platform> App<P> {
         // A failed CRC: the bytes are garbage, even txid and seq, so nothing
         // below may see them. It still counts as activity (above): it was on
         // the air, and the radio may have stayed locked on it, so the air
-        // isn't quiet and the Sweep waits
+        // isn't quiet and the Sweep waits. On the conveyor it was part of the
+        // transmission, so that keeps going
         if !rx_pkt.crc_ok {
+            if let Some(transmission) = &mut self.rx.transmission {
+                transmission.heard_garbled(rx_pkt.end_us);
+            }
             return;
         }
         if rx_pkt.data.len() < HEADER_BYTES {
@@ -350,6 +373,15 @@ impl<P: Platform> App<P> {
             }
         };
 
+        // Where it landed on its transmission's conveyor (the first good
+        // packet starts one). Not our own relayed back, nor a timing run
+        let ours = Some(txid) == self.rx.own_txid;
+        let landing = if ours || pkt_type == PacketType::Bench {
+            None
+        } else {
+            self.ride_conveyor(&rx_pkt, pkt_type, txid)
+        };
+
         // Only wakes up radios that are sweeping: nothing to play. A repeater
         // passes it on (once), so radios that only hear the repeater find
         // the transmission on the channel it relays on
@@ -361,7 +393,6 @@ impl<P: Platform> App<P> {
                 rx_pkt.snr,
                 rx_pkt.channel
             );
-            let ours = Some(txid) == self.rx.own_txid;
             if mode::get() == Mode::Repeater && !ours && self.rx.relayed_wake != Some(txid) {
                 self.rx.relayed_wake = Some(txid);
                 let channel = relay_channel(rx_pkt.channel);
@@ -386,7 +417,7 @@ impl<P: Platform> App<P> {
         }
 
         // Our own transmission, relayed back by a repeater
-        if Some(txid) == self.rx.own_txid {
+        if ours {
             log::info!(
                 "RX txid={} seq={} is our own, relayed back: dropping",
                 txid,
@@ -403,7 +434,7 @@ impl<P: Platform> App<P> {
         // Echo mode records live voice instead of playing it. Echoes are never
         // echoed, so they fall through and play like voice.
         if mode::get() == Mode::Echo && pkt_type == PacketType::Voice {
-            self.on_echo_packet(&rx_pkt, txid, seq).await;
+            self.on_echo_packet(&rx_pkt, txid, seq, landing).await;
             return;
         }
 
@@ -419,7 +450,6 @@ impl<P: Platform> App<P> {
             log::warn!("RX ignoring txid={} (locked to {})", txid, locked);
             return;
         }
-        self.rx.last_heard = Instant::now();
         match verdict {
             Verdict::Old(diff) => {
                 log::info!("RX seq={} old (diff={}), dropping", seq, diff);
@@ -506,6 +536,45 @@ impl<P: Platform> App<P> {
         self.show(Activity::Receiving);
     }
 
+    /// A good packet: where it landed on its transmission's conveyor, if
+    /// it's that transmission's (None for anyone else's). With no conveyor
+    /// going, it starts one, unless it's an end packet: a repeater's copy of
+    /// one comes after the direct copy has already ended the transmission
+    fn ride_conveyor(
+        &mut self,
+        rx_pkt: &RxPacket,
+        pkt_type: PacketType,
+        txid: u8,
+    ) -> Option<Landing> {
+        if let Some(transmission) = &mut self.rx.transmission {
+            if transmission.txid != txid {
+                return None;
+            }
+            return Some(transmission.heard(rx_pkt.end_us));
+        }
+        if matches!(pkt_type, PacketType::VoiceEnd | PacketType::EchoEnd) {
+            return None;
+        }
+        // Talkers send on the start slot (channel 0), repeaters relay on the
+        // next. A radio that doesn't sweep hears both on 0, and takes the
+        // first packet it hears as the talker's
+        let path = if rx_pkt.channel == 0 {
+            Path::Direct
+        } else {
+            Path::Relayed
+        };
+        let transmission = Transmission::start(txid, rx_pkt.end_us, path);
+        let landing = transmission.landing(rx_pkt.end_us);
+        log::info!(
+            "CONVEYOR start txid={} from a {:?} packet on ch{}",
+            txid,
+            path,
+            rx_pkt.channel
+        );
+        self.rx.transmission = Some(transmission);
+        Some(landing)
+    }
+
     /// The end of a transmission: who sent it and where they were. A
     /// repeater passes it on; an echo station replays what it recorded;
     /// everyone else plays the squelch tail (a repeater never plays the
@@ -557,6 +626,20 @@ impl<P: Platform> App<P> {
         log_worst_alloc();
         self.rx.playback.log_and_reset();
         self.rx.buffer.end();
+        if self
+            .rx
+            .transmission
+            .as_ref()
+            .is_some_and(|transmission| transmission.txid == txid)
+        {
+            if let Some(transmission) = self.rx.transmission.take() {
+                log::info!(
+                    "CONVEYOR ended by its EOT: txid={} {}",
+                    txid,
+                    transmission.tally()
+                );
+            }
+        }
 
         let first_copy = self.display.heard.as_ref().map(|heard| heard.txid) != Some(txid);
         if let (Some(ident), true) = (ident, first_copy) {
@@ -578,20 +661,34 @@ impl<P: Platform> App<P> {
     }
 
     /// Echo mode: record voice packets; on_end replays them once the
-    /// talker's end packet arrives. (If it's lost, housekeeping() replays on
-    /// a timeout.)
-    async fn on_echo_packet(&mut self, rx_pkt: &RxPacket, txid: u8, seq: u8) {
+    /// talker's end packet arrives. (If it's lost, housekeeping() replays
+    /// once the conveyor says the transmission is over.) `landing`: where it
+    /// landed on the conveyor, None if it's not the transmission on it
+    async fn on_echo_packet(
+        &mut self,
+        rx_pkt: &RxPacket,
+        txid: u8,
+        seq: u8,
+        landing: Option<Landing>,
+    ) {
+        let Some(landing) = landing else {
+            return;
+        };
         if rx_pkt.data.len() != PACKET_BYTES {
             return;
         }
         // The second copy of a packet (direct and relayed) isn't stored
-        if !self.echo.record(txid, seq, &rx_pkt.data[HEADER_BYTES..]) {
+        if !self
+            .echo
+            .record(txid, landing.packet(), &rx_pkt.data[HEADER_BYTES..])
+        {
             return;
         }
         log::info!(
-            "ECHO rec txid={} seq={} rssi={} snr={}",
+            "ECHO rec txid={} seq={} bin={} rssi={} snr={}",
             txid,
             seq,
+            landing.bin,
             rx_pkt.rssi,
             rx_pkt.snr
         );
@@ -621,6 +718,7 @@ impl<P: Platform> App<P> {
     async fn on_ptt(&mut self) {
         // PTT pressed — reset RX state
         self.rx.buffer.end();
+        self.rx.transmission = None;
         LISTEN.signal(Listen::Hold);
 
         let txid = random_txid::<P>();

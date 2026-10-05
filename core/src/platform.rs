@@ -14,6 +14,9 @@ pub trait Platform {
 
     fn random() -> u32;
 
+    /// µs since boot, on the radio's clock: the same as `RxPacket::end_us`
+    fn now_us() -> i64;
+
     /// The WiFi, for the screen
     fn network() -> Network;
 }
