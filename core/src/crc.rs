@@ -27,11 +27,15 @@ pub fn crc16(data: &[u8]) -> u16 {
     crc
 }
 
-/// `framed` is data then its CRC: the data, if the CRC matches
-pub fn check(framed: &[u8]) -> Option<&[u8]> {
-    let n = framed.len().checked_sub(CRC_BYTES)?;
+/// `framed` is data then its CRC: the data, and whether the CRC matches.
+/// A failed packet still really arrived, so its timing is real even though
+/// its bytes aren't. Too short to hold a CRC: no data, failed
+pub fn split(framed: &[u8]) -> (&[u8], bool) {
+    let Some(n) = framed.len().checked_sub(CRC_BYTES) else {
+        return (&[], false);
+    };
     let (data, sent) = framed.split_at(n);
-    (crc16(data).to_be_bytes() == sent).then_some(data)
+    (data, crc16(data).to_be_bytes() == sent)
 }
 
 #[cfg(test)]
@@ -45,12 +49,12 @@ mod tests {
     }
 
     #[test]
-    fn check_takes_good_and_refuses_bad() {
+    fn split_passes_good_and_flags_bad() {
         let mut framed = b"voice".to_vec();
         framed.extend_from_slice(&crc16(b"voice").to_be_bytes());
-        assert_eq!(check(&framed), Some(&b"voice"[..]));
+        assert_eq!(split(&framed), (&b"voice"[..], true));
         framed[1] ^= 0x01;
-        assert_eq!(check(&framed), None);
-        assert_eq!(check(&[0x12]), None); // shorter than a CRC
+        assert_eq!(split(&framed), (&b"vnice"[..], false)); // bytes kept, flagged
+        assert_eq!(split(&[0x12]), (&[][..], false)); // shorter than a CRC
     }
 }

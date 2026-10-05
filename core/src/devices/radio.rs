@@ -13,6 +13,14 @@ pub struct RxPacket {
     /// Where it was heard: an index into the hop channels (air::hop_slots),
     /// 0 = the start slot. Always 0 for a radio that doesn't sweep
     pub channel: u8,
+    /// False: our CRC didn't match, so `data` can't be trusted (not even
+    /// its txid or seq). A packet was still on the air at `end_us`, so its
+    /// timing is real
+    pub crc_ok: bool,
+    /// When the packet ended on the air: the radio's RX-done IRQ, in µs
+    /// since boot. For now it's read when the radio task wakes for the IRQ,
+    /// so it can run late by however long the task took to be scheduled
+    pub end_us: i64,
 }
 
 pub struct TxRequest {

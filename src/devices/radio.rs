@@ -513,10 +513,11 @@ impl Driver {
             Ok(Some(IrqState::PreambleReceived)) => log::info!("RX preamble"),
             Ok(Some(IrqState::HeaderValid)) => log::info!("RX header"),
             Ok(Some(IrqState::Done)) => {
-                // Locked: only a packet the app got keeps us on the channel.
-                // The app then says Sweep once it goes quiet. A header or a
-                // bad packet (CRC: receive) never reaches the app, so nothing
-                // would ever unlock us: leave those to the false alarm timer
+                // Locked: a packet of ours keeps us on the channel (receive
+                // says which). The app then says Sweep once it goes quiet. A
+                // header alone, or a bad packet of another length, might not
+                // be ours, and then nothing would ever unlock us: leave those
+                // to the false alarm timer
                 if self.receive(header_at, irq_us).await {
                     if let State::Locked { heard, .. } = &mut self.state {
                         *heard = true;
@@ -669,8 +670,10 @@ impl Driver {
         }
     }
 
-    /// A packet arrived: read it out and hand it to the app. False if it
-    /// couldn't be read
+    /// A packet arrived: read it out and hand it to the app, flagged if its
+    /// CRC failed. True if it keeps a lock: a good packet, or a bad one of
+    /// our packets' length (the length is in LoRa's header, which has its
+    /// own checksum: something of ours was in the slot)
     async fn receive(&mut self, header_at: Option<Instant>, irq_us: i64) -> bool {
         let rx_ms = header_at.map_or(0, |at| at.elapsed().as_millis());
         let (len, status) = match self
@@ -685,25 +688,29 @@ impl Driver {
             }
         };
         // Our CRC, not LoRa's: a header corrupted into "no CRC" still gets
-        // checked here, so garbage never reaches the app
-        let Some(packet) = crc::check(&self.rx_buf[..len as usize]) else {
+        // checked here. A failed packet goes to the app too, flagged: its
+        // bytes are garbage, but it was on the air, and the app uses that
+        // for timing
+        let (packet, crc_ok) = crc::split(&self.rx_buf[..len as usize]);
+        if crc_ok {
+            log::info!(
+                "RX end [{}B] {}ms after header rssi={} snr={} at={}us",
+                packet.len(),
+                rx_ms,
+                status.rssi,
+                status.snr,
+                irq_us
+            );
+        } else {
             log::warn!(
-                "RX CRC error [{}B] {}ms after header rssi={} snr={}",
+                "RX CRC error [{}B] {}ms after header rssi={} snr={} at={}us",
                 len,
                 rx_ms,
                 status.rssi,
-                status.snr
+                status.snr,
+                irq_us
             );
-            return false;
-        };
-        log::info!(
-            "RX end [{}B] {}ms after header rssi={} snr={} at={}us",
-            packet.len(),
-            rx_ms,
-            status.rssi,
-            status.snr,
-            irq_us
-        );
+        }
 
         let mut data = heapless::Vec::new();
         let _ = data.extend_from_slice(packet);
@@ -713,9 +720,11 @@ impl Driver {
                 rssi: status.rssi,
                 snr: status.snr,
                 channel: self.listening_on(),
+                crc_ok,
+                end_us: irq_us,
             })
             .await;
-        true
+        crc_ok || packet.len() == PACKET_BYTES
     }
 
     /// The app wants a packet sent: wait for clear air, then send it.

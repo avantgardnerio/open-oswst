@@ -308,6 +308,13 @@ impl<P: Platform> App<P> {
 
     async fn on_rx_packet(&mut self, rx_pkt: RxPacket) {
         self.logs.last_activity = Instant::now();
+        // A failed CRC: the bytes are garbage, even txid and seq, so nothing
+        // below may see them. It still counts as activity (above): it was on
+        // the air, and the radio may have stayed locked on it, so the air
+        // isn't quiet and the Sweep waits
+        if !rx_pkt.crc_ok {
+            return;
+        }
         if rx_pkt.data.len() < HEADER_BYTES {
             log::warn!(
                 "RX [{}B] too short, rssi={} snr={}",
