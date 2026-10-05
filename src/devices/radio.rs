@@ -39,8 +39,8 @@ const SKEWED_AFTER_US: i64 = 3_000;
 /// settings into the chip: ~2.5 ms measured) this long before its send time,
 /// listening until then
 const PREPARE_US: i64 = 5_000;
-/// Less than this left before its send time when it's handed over: the
-/// packet is dropped, there isn't time to get it ready
+/// Getting a packet ready takes ~2.4 ms: with less than this left before the
+/// latest it may start (its send time plus the guard), it's dropped
 const PREPARE_AT_LEAST_US: i64 = 3_000;
 
 /// Preamble length in symbols, TX and RX alike: why 12 is in air.rs
@@ -920,12 +920,16 @@ impl Driver {
         if let Some(at_us) = send_at_us {
             until_us(at_us - PREPARE_US).await;
             woke_late_us = uptime_us() - (at_us - PREPARE_US);
-            let left_us = at_us - uptime_us();
+            // Up to the guard late it still fits its bin, so the latest it may
+            // start is its send time plus the guard. The wait above can wake a
+            // few ms late (the radio task gets the CPU late now and then)
+            let left_us = at_us + air::guard_us() as i64 - uptime_us();
             if left_us < PREPARE_AT_LEAST_US {
                 log::warn!(
-                    "TX [{}B] dropped: {}us before its send time, too late to get ready",
+                    "TX [{}B] dropped: {}us before the latest it may start, too late to get ready (woke {}us late)",
                     data.len(),
-                    left_us
+                    left_us,
+                    woke_late_us
                 );
                 return;
             }
