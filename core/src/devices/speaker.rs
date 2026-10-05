@@ -6,16 +6,18 @@ use embassy_sync::channel::Channel;
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 
-/// Audio for the speaker, played in order, back to back: stereo interleaved
-/// (L, R, L, R…), any whole number of 40 ms frames (640 samples each). The
+/// Audio for the speaker, played in order, back to back: mono (the I2S
+/// sends each sample on both channels), any whole number of 40 ms frames
+/// (320 samples each). The
 /// app sends whole decoded packets (160 ms), the bringup bins single frames.
 /// When it runs dry the speaker just stops (the DMA plays silence) and starts
 /// again with the next audio: the I2S clock sets the pace, nobody schedules
-/// it. Small, so a backlog can't eat the heap: 4 packets is ~20 KB
+/// it. Small, so a backlog can't eat the heap: 4 packets is ~10 KB
 pub static SPK_AUDIO: Channel<CriticalSectionRawMutex, Arc<[i16]>, 4> = Channel::new();
 
-/// Samples in one 40 ms stereo frame: what the speaker hands the DMA at a time
-pub const FRAME_SAMPLES: usize = 640;
+/// Samples in one 40 ms frame (8 kHz mono): what the speaker hands the DMA at
+/// a time
+pub const FRAME_SAMPLES: usize = 320;
 
 /// Volume levels 0 (mute) ..= MAX_VOLUME (full scale), 3dB apart.
 pub const MAX_VOLUME: u8 = 10;

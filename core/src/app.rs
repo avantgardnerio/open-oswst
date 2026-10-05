@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use crate::air;
 use crate::codec::{
     CodecRequest, Decoded, CODEC2_FRAME_SAMPLES, DECODED, ENCODED, FRAMES_PER_PACKET, HEADER_BYTES,
-    PACKET_BYTES, PAYLOAD_BYTES, STEREO_PACKET_SAMPLES,
+    PACKET_BYTES, PACKET_SAMPLES, PAYLOAD_BYTES,
 };
 use crate::config;
 use crate::conveyor::{Landing, Path, Transmission};
@@ -124,7 +124,7 @@ pub async fn init<P: Platform>(
             relayed_wake: None,
         },
         sounds: Sounds {
-            silence: vec![0i16; STEREO_PACKET_SAMPLES].into(),
+            silence: vec![0i16; PACKET_SAMPLES].into(),
             squelch: generate_squelch(P::random),
         },
         echo: Recorder::new(silence),
@@ -976,16 +976,13 @@ impl<P: Platform> App<P> {
 
 /// Generate 160ms squelch tail (white noise with fade-out), packet-sized.
 fn generate_squelch(random: fn() -> u32) -> Arc<[i16]> {
-    const MONO_SAMPLES: usize = FRAMES_PER_PACKET * CODEC2_FRAME_SAMPLES; // 1280
     const AMPLITUDE: i32 = 8000;
-    let mut buf = vec![0i16; STEREO_PACKET_SAMPLES].into_boxed_slice();
-    for i in 0..MONO_SAMPLES {
-        let fade = (MONO_SAMPLES - i) as i32 * AMPLITUDE / MONO_SAMPLES as i32;
-        let noise = ((random() % (2 * fade as u32 + 1)) as i32 - fade) as i16;
-        buf[i * 2] = noise;
-        buf[i * 2 + 1] = noise;
-    }
-    buf.into()
+    (0..PACKET_SAMPLES)
+        .map(|i| {
+            let fade = (PACKET_SAMPLES - i) as i32 * AMPLITUDE / PACKET_SAMPLES as i32;
+            ((random() % (2 * fade as u32 + 1)) as i32 - fade) as i16
+        })
+        .collect()
 }
 
 /// One thing from the playout onto the speaker's queue. Full (the speaker is

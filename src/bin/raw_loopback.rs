@@ -66,9 +66,7 @@ fn main() {
                 log::info!("Playing raw...");
                 show_status(&screen, style, "PLAYING");
                 for chunk in rec_buf[..rec_len].chunks(FRAME_SAMPLES) {
-                    // Mono → stereo interleave
-                    let stereo: Arc<[i16]> = chunk.iter().flat_map(|&s| [s, s]).collect();
-                    SPK_AUDIO.send(stereo).await;
+                    SPK_AUDIO.send(Arc::from(chunk)).await;
                 }
 
                 log::info!("Playback done");

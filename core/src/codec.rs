@@ -17,8 +17,8 @@ pub const HEADER_BYTES: usize = 2;
 pub const PAYLOAD_BYTES: usize = CODEC2_FRAME_BYTES * FRAMES_PER_PACKET; // 24
 pub const PACKET_BYTES: usize = HEADER_BYTES + PAYLOAD_BYTES; // 26
 
-/// Stereo-interleaved samples for one decoded packet (4 frames × 320 samples × 2 channels)
-pub const STEREO_PACKET_SAMPLES: usize = FRAMES_PER_PACKET * CODEC2_FRAME_SAMPLES * 2;
+/// Samples in one decoded packet, 8 kHz mono: 4 frames × 320 = 1280 (160 ms)
+pub const PACKET_SAMPLES: usize = FRAMES_PER_PACKET * CODEC2_FRAME_SAMPLES;
 
 pub enum CodecRequest {
     Encode {
@@ -56,8 +56,8 @@ pub struct Decoded {
     pub txid: u8,
     /// Which of the talker's packets (from the request)
     pub packet: i64,
-    /// Stereo, ready to play: 2560 samples (4 frames × 320 × 2 channels).
-    /// Built as an Arc in place, so it goes to the speaker without a copy
+    /// Mono, ready to play: 1280 samples (4 frames × 320). Decoded straight
+    /// into its Arc, so it goes to the speaker without a copy
     pub pcm: Arc<[i16]>,
     /// The codec thread's own time on it
     pub decode_us: u32,
@@ -79,8 +79,6 @@ pub fn run(rx: Receiver<CodecRequest>) {
     log::info!("Codec2 encoder initialized (thread)");
     let mut decoder = Box::new(Codec2::new(Codec2Mode::MODE_1200));
     log::info!("Codec2 decoder initialized (thread)");
-
-    let mut decode_buf = vec![0i16; CODEC2_FRAME_SAMPLES].into_boxed_slice();
 
     log::info!("Codec thread ready");
 
@@ -110,18 +108,14 @@ pub fn run(rx: Receiver<CodecRequest>) {
                 // Collected straight into its Arc: one allocation, no copy.
                 // TODO: take it from a pool allocated at boot instead, so the
                 // audio path never touches the heap
-                let mut pcm: Arc<[i16]> =
-                    std::iter::repeat_n(0i16, STEREO_PACKET_SAMPLES).collect();
-                let stereo = Arc::get_mut(&mut pcm).expect("not shared yet");
+                let mut pcm: Arc<[i16]> = std::iter::repeat_n(0i16, PACKET_SAMPLES).collect();
+                let samples = Arc::get_mut(&mut pcm).expect("not shared yet");
 
-                for i in 0..FRAMES_PER_PACKET {
-                    let coded = &payload[i * CODEC2_FRAME_BYTES..(i + 1) * CODEC2_FRAME_BYTES];
-                    decoder.decode(&mut decode_buf, coded);
-                    let offset = i * CODEC2_FRAME_SAMPLES * 2;
-                    for (j, &sample) in decode_buf.iter().enumerate() {
-                        stereo[offset + j * 2] = sample;
-                        stereo[offset + j * 2 + 1] = sample;
-                    }
+                for (frame, coded) in samples
+                    .chunks_mut(CODEC2_FRAME_SAMPLES)
+                    .zip(payload.chunks(CODEC2_FRAME_BYTES))
+                {
+                    decoder.decode(frame, coded);
                 }
 
                 let decoded = Decoded {

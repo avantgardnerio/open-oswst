@@ -100,8 +100,8 @@ fn main() {
                 let enc_ms = t0.elapsed().as_millis();
 
                 // --- Decode (all before playback, so codec time can't starve the
-                // speaker). Output is stereo L=R; keep the left channel, back over
-                // the recording, to avoid a second 160KB buffer ---
+                // speaker), back over the recording, to avoid a second 160KB
+                // buffer ---
                 let t0 = std::time::Instant::now();
                 for (p, payload) in payloads[..num_packets].iter().enumerate() {
                     codec_tx
@@ -109,10 +109,7 @@ fn main() {
                         .unwrap();
                     {
                         let pcm = DECODED.receive().await.pcm;
-                        let mono = &mut rec_buf[p * PACKET_SAMPLES..(p + 1) * PACKET_SAMPLES];
-                        for (dst, lr) in mono.iter_mut().zip(pcm.chunks(2)) {
-                            *dst = lr[0];
-                        }
+                        rec_buf[p * PACKET_SAMPLES..(p + 1) * PACKET_SAMPLES].copy_from_slice(&pcm);
                     }
                 }
                 let dec_ms = t0.elapsed().as_millis();
@@ -128,9 +125,7 @@ fn main() {
                 log::info!("Playing...");
                 show_status(&screen, style, "PLAYING");
                 for chunk in rec_buf[..num_packets * PACKET_SAMPLES].chunks(FRAME_SAMPLES) {
-                    // Mono → stereo interleave
-                    let stereo: Arc<[i16]> = chunk.iter().flat_map(|&s| [s, s]).collect();
-                    SPK_AUDIO.send(stereo).await;
+                    SPK_AUDIO.send(Arc::from(chunk)).await;
                 }
 
                 log::info!("Playback done");

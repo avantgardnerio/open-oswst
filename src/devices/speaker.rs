@@ -3,7 +3,7 @@ use std::future::Future;
 use esp_idf_svc::hal::gpio::AnyIOPin;
 use esp_idf_svc::hal::i2s::config::{
     Config as I2sChannelConfig, DataBitWidth, SlotMode, StdClkConfig, StdConfig, StdGpioConfig,
-    StdSlotConfig,
+    StdSlotConfig, StdSlotMask,
 };
 use esp_idf_svc::hal::i2s::{I2sDriver, I2sTx, I2S0};
 
@@ -33,7 +33,12 @@ pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
     let std_config = StdConfig::new(
         i2s_chan_cfg,
         StdClkConfig::from_sample_rate_hz(8000),
-        StdSlotConfig::philips_slot_default(DataBitWidth::Bits16, SlotMode::Stereo),
+        // Mono, sent on both slots: the I2S hardware repeats each sample on
+        // left and right, so our buffers hold mono, half the memory. Not the
+        // default mono mask (Left only), which sends zeros on the right: the
+        // MAX98357A plays (L + R) / 2, and it came out 6 dB quiet
+        StdSlotConfig::philips_slot_default(DataBitWidth::Bits16, SlotMode::Mono)
+            .slot_mode_mask(SlotMode::Mono, StdSlotMask::Both),
         StdGpioConfig::default(),
     );
     let mut i2s_tx = I2sDriver::<I2sTx>::new_std_tx(
@@ -45,7 +50,7 @@ pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
         p.spk_ws,
     )
     .unwrap();
-    log::info!("I2S TX configured (8kHz stereo 16-bit Philips, 2 DMA bufs)");
+    log::info!("I2S TX configured (8kHz mono on both slots, 16-bit Philips, 2 DMA bufs)");
 
     async move {
         i2s_tx.tx_enable().unwrap();
