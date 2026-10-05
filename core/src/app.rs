@@ -700,12 +700,21 @@ impl<P: Platform> App<P> {
     }
 
     async fn replay_echo(&mut self) {
+        let talker_txid = self.echo.txid();
         let packets = self.echo.take();
         LISTEN.signal(Listen::Hold);
         log::info!("ECHO replaying {} packets", packets.len());
         self.draw_screen(Activity::Transmitting);
-        // Drop anything heard while we transmit it, as it comes: like on_ptt
-        let txid = random_txid::<P>();
+        // Drop anything heard while we transmit it, as it comes: like on_ptt.
+        // A txid of its own, never the talker's: the talker drops anything
+        // with its own txid as its transmission relayed back, and would play
+        // none of the replay (1 in 128, bench 2026-10-05)
+        let txid = loop {
+            let txid = random_txid::<P>();
+            if Some(txid) != talker_txid {
+                break txid;
+            }
+        };
         self.rx.own_txid = Some(txid);
         // The replay ends with the echo station's own Ident: whoever hears it
         // learns how far away the station is

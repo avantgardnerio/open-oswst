@@ -515,16 +515,18 @@ impl Driver {
         let state = self.lora.get_irq_state().await;
         self.air = Air::after(&state);
         let packet_ended = matches!(state, Ok(Some(IrqState::Done)));
+        let mut good_packet = false;
         match state {
             Ok(Some(IrqState::PreambleReceived)) => log::info!("RX preamble"),
             Ok(Some(IrqState::HeaderValid)) => log::info!("RX header"),
             Ok(Some(IrqState::Done)) => {
-                // Locked: a packet of ours keeps us on the channel (receive
-                // says which). The app then says Sweep once it goes quiet. A
-                // header alone, or a bad packet of another length, might not
-                // be ours, and then nothing would ever unlock us: leave those
-                // to the false alarm timer
-                if self.receive(header_at, irq_us, task_late_us).await {
+                // Locked: only a good packet keeps us on the channel. The app
+                // then says Sweep once it goes quiet. A header alone, or a
+                // garbled packet, might not be ours (receive says why), and
+                // then nothing would ever unlock us: leave those to the false
+                // alarm timer
+                good_packet = self.receive(header_at, irq_us, task_late_us).await;
+                if good_packet {
                     if let State::Locked { heard, .. } = &mut self.state {
                         *heard = true;
                     }
@@ -540,7 +542,7 @@ impl Driver {
         self.lora.clear_irq_flags_read().await.unwrap();
         // Good or bad CRC, a packet ended now: the slot's timing is known
         if packet_ended {
-            self.on_follow_packet().await;
+            self.on_follow_packet(good_packet).await;
         }
     }
 
@@ -565,9 +567,11 @@ impl Driver {
     }
 
     /// A packet ended on the channel we're on. Once a transmission is ours
-    /// (heard), start following it on two channels; then each packet sets
-    /// the slot's timing and sends us to the other channel
-    async fn on_follow_packet(&mut self) {
+    /// (heard), a good packet starts following it on two channels; then each
+    /// packet, good or garbled, sets the slot's timing and sends us to the
+    /// other channel. A garbled packet never starts a follow (receive says
+    /// why), not even while the app holds us on the start slot
+    async fn on_follow_packet(&mut self, good: bool) {
         let State::Locked {
             channel,
             heard: true,
@@ -579,6 +583,7 @@ impl Driver {
         };
         let mut follow = match follow {
             Some(follow) => follow,
+            None if !good => return,
             None => {
                 // Talkers send on channel 0 (tx_hops 0), relays on 1. Locked
                 // on a later relay channel, the copies we can hear are on
@@ -677,9 +682,12 @@ impl Driver {
     }
 
     /// A packet arrived: read it out and hand it to the app, flagged if its
-    /// CRC failed. True if it keeps a lock: a good packet, or a bad one of
-    /// our packets' length (the length is in LoRa's header, which has its
-    /// own checksum: something of ours was in the slot)
+    /// CRC failed. True only for a good packet: only a good packet starts
+    /// following a transmission. A garbled one never does: at point-blank
+    /// range a repeater's relay on the next channel arrived garbled but of
+    /// our length, and a follow anchored on it listened to the wrong channel
+    /// all transmission (bench 2026-10-05). Once following, a garbled packet
+    /// changes nothing: the lock holds until the app says the air is quiet
     /// `task_late_us`: how long after the interrupt the radio task got to it,
     /// None if no interrupt fired (and `irq_us` is the task's own time)
     async fn receive(
@@ -739,7 +747,7 @@ impl Driver {
                 end_us: irq_us,
             })
             .await;
-        crc_ok || packet.len() == PACKET_BYTES
+        crc_ok
     }
 
     /// The app wants a packet sent: wait for clear air, then send it.
