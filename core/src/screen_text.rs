@@ -12,7 +12,7 @@
 
 use core::fmt::Write as _;
 
-use crate::devices::gps::distance_m;
+use crate::devices::gps::{bearing_deg, compass_point, distance_m};
 use crate::packet::Ident;
 
 pub const WIDTH: usize = 21;
@@ -74,10 +74,11 @@ pub fn us(name: &str, short_mac: &str) -> Row {
     spread(name, short_mac)
 }
 
-/// Rows 3 and 4: who we last heard, how far away (if both of us had a
-/// fix), then when, how strong, and through how many repeaters
+/// Rows 3 and 4: who we last heard, how far away and which way (if both of
+/// us had a fix), then when, how strong, and through how many repeaters
 pub fn heard(heard: &Heard, our_position: Option<(f64, f64)>) -> (Row, Row) {
-    let mut far = heapless::String::<8>::new();
+    // "10.5km NNW" at the widest: 10 of the row's 21, leaving the name 10
+    let mut far = heapless::String::<12>::new();
     if let (Some(theirs), Some(ours)) = (heard.ident.position, our_position) {
         let m = distance_m(theirs, ours);
         let _ = match m {
@@ -85,6 +86,7 @@ pub fn heard(heard: &Heard, our_position: Option<(f64, f64)>) -> (Row, Row) {
             m if m < 10_000.0 => write!(far, "{:.2}km", m / 1000.0),
             m => write!(far, "{:.1}km", m / 1000.0),
         };
+        let _ = write!(far, " {}", compass_point(bearing_deg(ours, theirs)));
     }
     let first = spread(&heard.ident.name, &far);
 
@@ -170,15 +172,21 @@ mod tests {
         let home = (40.543_9, -105.091_85);
         let far_end = (40.545_389, -105.107_722);
         let (first, second) = heard(&bob(Some(far_end), 1), Some(home));
-        assert_eq!(first, "Bob            1.35km");
+        assert_eq!(first, "Bob          1.35km W");
         assert_eq!(second, "14:11Z -87dBm 1 hop");
         let (first, second) = heard(&bob(Some((40.544_8, -105.091_85)), 0), Some(home));
-        assert_eq!(first, "Bob              100m");
+        assert_eq!(first, "Bob            100m N");
         assert_eq!(second, "14:11Z -87dBm 0 hops");
         // The widest it gets still fits
         let mut weak = bob(None, 2);
         weak.rssi = -120;
         assert_eq!(heard(&weak, None).1, "14:11Z -120dBm 2 hops");
+        // The widest it gets still fits: a long name is cut short
+        let mut far_away = bob(Some((0.088, -0.037)), 0);
+        far_away.ident.name = "Longest-Name".try_into().unwrap();
+        let (first, _) = heard(&far_away, Some((0.0, 0.0)));
+        assert_eq!(first, "Longest-Na 10.6km NNW");
+        assert_eq!(first.chars().count(), WIDTH);
         // Either side without a fix: no distance
         assert_eq!(heard(&bob(None, 0), Some(home)).0, "Bob");
     }

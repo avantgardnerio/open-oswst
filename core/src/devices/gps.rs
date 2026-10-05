@@ -150,6 +150,27 @@ pub fn distance_m(a: (f64, f64), b: (f64, f64)) -> f64 {
     2.0 * EARTH_RADIUS_M * h.sqrt().asin()
 }
 
+/// The direction from `from` to `to` (lat, lon in degrees), in degrees
+/// clockwise from true north, 0 to 360: the great-circle initial bearing,
+/// the way you'd set off
+pub fn bearing_deg(from: (f64, f64), to: (f64, f64)) -> f64 {
+    let (lat1, lon1) = (from.0.to_radians(), from.1.to_radians());
+    let (lat2, lon2) = (to.0.to_radians(), to.1.to_radians());
+    let east = (lon2 - lon1).sin() * lat2.cos();
+    let north = lat1.cos() * lat2.sin() - lat1.sin() * lat2.cos() * (lon2 - lon1).cos();
+    east.atan2(north).to_degrees().rem_euclid(360.0)
+}
+
+/// A bearing as the nearest of the compass's 16 points: N, NNE, NE, ENE...
+pub fn compass_point(bearing_deg: f64) -> &'static str {
+    const POINTS: [&str; 16] = [
+        "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW",
+        "NW", "NNW",
+    ];
+    let point = (bearing_deg.rem_euclid(360.0) / 22.5).round() as usize % POINTS.len();
+    POINTS[point]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,5 +265,31 @@ mod tests {
         let d = distance_m((40.545_389, -105.107_722), (40.543_9, -105.091_85));
         assert!((d - 1_350.0).abs() < 30.0, "{}", d);
         assert_eq!(distance_m((40.5, -105.1), (40.5, -105.1)), 0.0);
+    }
+
+    #[test]
+    fn bearings_point_the_right_way() {
+        let here = (0.0, 0.0);
+        let near = |bearing: f64, expected: f64| (bearing - expected).abs() < 0.01;
+        assert!(near(bearing_deg(here, (0.01, 0.0)), 0.0));
+        assert!(near(bearing_deg(here, (0.0, 0.01)), 90.0));
+        assert!(near(bearing_deg(here, (-0.01, 0.0)), 180.0));
+        assert!(near(bearing_deg(here, (0.0, -0.01)), 270.0));
+        assert!(near(bearing_deg(here, (0.01, 0.01)), 45.0));
+        // Across the date line: a short hop east, not most of the way round
+        assert!(near(bearing_deg((0.0, 179.99), (0.0, -179.99)), 90.0));
+    }
+
+    #[test]
+    fn compass_points_are_the_nearest_of_sixteen() {
+        assert_eq!(compass_point(0.0), "N");
+        assert_eq!(compass_point(11.0), "N");
+        assert_eq!(compass_point(12.0), "NNE");
+        assert_eq!(compass_point(45.0), "NE");
+        assert_eq!(compass_point(90.0), "E");
+        assert_eq!(compass_point(202.5), "SSW");
+        assert_eq!(compass_point(337.5), "NNW");
+        assert_eq!(compass_point(349.0), "N"); // rounds round to north
+        assert_eq!(compass_point(360.0), "N");
     }
 }
