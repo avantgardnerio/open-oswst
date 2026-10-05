@@ -397,7 +397,13 @@ impl<P: Platform> App<P> {
                 rx_pkt.channel
             );
             if mode::get() == Mode::Repeater && self.take_first_copy(landing) {
-                if let Some(channel) = relay(&rx_pkt, Some(air::wake_preamble_symbols())).await {
+                if let Some(channel) = relay(
+                    &rx_pkt,
+                    Some(air::wake_preamble_symbols()),
+                    self.relay_channel(&rx_pkt, hops),
+                )
+                .await
+                {
                     log::info!("RELAY wake txid={} hops={} ch={}", txid, hops + 1, channel);
                 }
             }
@@ -466,7 +472,7 @@ impl<P: Platform> App<P> {
 
         // Repeater: relay the first copy of each packet
         if mode::get() == Mode::Repeater {
-            if let Some(channel) = relay(&rx_pkt, None).await {
+            if let Some(channel) = relay(&rx_pkt, None, self.relay_channel(&rx_pkt, hops)).await {
                 log::info!(
                     "RELAY [{}B] txid={} packet={} hops={} ch={}",
                     rx_pkt.data.len(),
@@ -543,15 +549,21 @@ impl<P: Platform> App<P> {
             if transmission.txid != txid {
                 return None;
             }
-            return Some(transmission.heard(rx_pkt.end_us, hops, rx_pkt.timing_ok));
+            return Some(transmission.heard(rx_pkt.end_us, hops, rx_pkt.channel, rx_pkt.timing_ok));
         }
         if matches!(pkt_type, PacketType::VoiceEnd | PacketType::EchoEnd) {
             return None;
         }
         // Its hops say where it is on the belt, whatever channel it was heard
         // on: at point-blank range a radio hears the next channel too
-        let (transmission, landing) =
-            Transmission::start(txid, rx_pkt.end_us, hops, rx_pkt.timing_ok);
+        let (transmission, landing) = Transmission::start(
+            txid,
+            channel_count(),
+            rx_pkt.end_us,
+            hops,
+            rx_pkt.channel,
+            rx_pkt.timing_ok,
+        );
         self.rx.last_heard_txid = Some(txid);
         log::info!(
             "CONVEYOR start txid={} from a packet with {} hops, on ch{}",
@@ -561,6 +573,21 @@ impl<P: Platform> App<P> {
         );
         self.rx.transmission = Some(transmission);
         Some(landing)
+    }
+
+    /// The channel a repeater relays a packet on: its next hop's, from the
+    /// transmission's base channel. Before a trusted packet has told us
+    /// that, the channel after the one it was heard on. A relay never lands
+    /// on the channel the packet came in on. Without the sweep flag there's
+    /// one channel, so the relay stays where it was heard
+    fn relay_channel(&self, rx_pkt: &RxPacket, hops: u8) -> u8 {
+        let next_hop = hops.saturating_add(1);
+        let from_base = self
+            .rx
+            .transmission
+            .as_ref()
+            .and_then(|transmission| transmission.channel_of(next_hop));
+        from_base.unwrap_or(((rx_pkt.channel as u32 + 1) % channel_count() as u32) as u8)
     }
 
     /// Is `landing` the first copy of its packet on the conveyor? Then it's
@@ -620,7 +647,7 @@ impl<P: Platform> App<P> {
             // copy (another repeater's, or one round a loop) finds no
             // conveyor and isn't relayed again
             if self.take_first_copy(landing) {
-                if let Some(channel) = relay(rx_pkt, None).await {
+                if let Some(channel) = relay(rx_pkt, None, self.relay_channel(rx_pkt, hops)).await {
                     log::info!("RELAY EOT txid={} hops={} ch={}", txid, hops + 1, channel);
                 }
             }
@@ -656,7 +683,7 @@ impl<P: Platform> App<P> {
                 txid,
                 ident,
                 rssi: rx_pkt.rssi,
-                relayed: rx_pkt.channel != 0,
+                hops,
                 // The system clock (NTP, else the GPS): it has the time
                 // without a fix, or any GPS at all
                 at: Some(utc::now_hm()),
@@ -1066,21 +1093,17 @@ fn own_name(short_mac: &str) -> heapless::String<NAME_BYTES> {
     }
 }
 
-/// The channel a repeater relays on: the next hop channel after the one it
-/// heard the packet on (wrapping at rx_hops), so a relay never lands on the
-/// channel the packet came in on. Without the sweep flag every radio
-/// listens on the start slot only, so the relay stays where it was heard
 /// A repeater's relay of `rx_pkt`: the same packet with one more hop, on the
 /// next channel (`preamble`: a wake-up's long one), in the bin after the copy
 /// it heard: it starts exactly one bin (80 ms) after that copy started, so it
 /// sits in the middle of its bin too. Its bin is its own: no waiting for
-/// clear air. Which channel, or None once it has had packet::MAX_HOPS
-async fn relay(rx_pkt: &RxPacket, preamble: Option<u16>) -> Option<u8> {
+/// clear air. `channel`: the channel its next hop is on. Which channel, or
+/// None once it has had packet::MAX_HOPS
+async fn relay(rx_pkt: &RxPacket, preamble: Option<u16>, channel: u8) -> Option<u8> {
     let Some(header) = packet::relayed([rx_pkt.data[0], rx_pkt.data[1]]) else {
         log::info!("RELAY: not relayed, it has had {} hops", packet::MAX_HOPS);
         return None;
     };
-    let channel = relay_channel(rx_pkt.channel);
     let mut data = heapless::Vec::new();
     let _ = data.extend_from_slice(&header);
     let _ = data.extend_from_slice(&rx_pkt.data[HEADER_BYTES..]);
@@ -1099,11 +1122,13 @@ async fn relay(rx_pkt: &RxPacket, preamble: Option<u16>) -> Option<u8> {
     Some(channel)
 }
 
-fn relay_channel(heard_on: u8) -> u8 {
+/// How many hop channels a radio listens on: rx_hops if it sweeps, else
+/// just the start slot
+fn channel_count() -> u8 {
     if !config::SWEEP.is_on() {
-        return heard_on;
+        return 1;
     }
-    ((heard_on as u32 + 1) % config::RX_HOPS.get() as u32) as u8
+    config::RX_HOPS.get() as u8
 }
 
 /// Random 7-bit id for one transmission — the dedup key.

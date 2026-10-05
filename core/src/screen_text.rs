@@ -46,9 +46,9 @@ pub struct Heard {
     pub txid: u8,
     pub ident: Ident,
     pub rssi: i16,
-    /// Through a repeater: it came in on another channel than the start
-    /// slot, where talkers send (tx_hops = 0). Its RSSI is the repeater's
-    pub relayed: bool,
+    /// Repeaters it came through (its header's hop count): 0 straight from
+    /// the talker. Its RSSI is the last repeater's
+    pub hops: u8,
     /// UTC hh:mm when it ended, if we knew the time
     pub at: Option<(u8, u8)>,
 }
@@ -75,7 +75,7 @@ pub fn us(name: &str, short_mac: &str) -> Row {
 }
 
 /// Rows 3 and 4: who we last heard, how far away (if both of us had a
-/// fix), then when, how strong, and whether through a repeater
+/// fix), then when, how strong, and through how many repeaters
 pub fn heard(heard: &Heard, our_position: Option<(f64, f64)>) -> (Row, Row) {
     let mut far = heapless::String::<8>::new();
     if let (Some(theirs), Some(ours)) = (heard.ident.position, our_position) {
@@ -94,9 +94,8 @@ pub fn heard(heard: &Heard, our_position: Option<(f64, f64)>) -> (Row, Row) {
         None => write!(second, "--:--Z"),
     };
     let _ = write!(second, " {}dBm", heard.rssi);
-    if heard.relayed {
-        let _ = write!(second, " via rpt");
-    }
+    let plural = if heard.hops == 1 { "" } else { "s" };
+    let _ = write!(second, " {} hop{}", heard.hops, plural);
     (first, second)
 }
 
@@ -129,7 +128,7 @@ pub fn status(
 mod tests {
     use super::*;
 
-    fn bob(position: Option<(f64, f64)>, relayed: bool) -> Heard {
+    fn bob(position: Option<(f64, f64)>, hops: u8) -> Heard {
         Heard {
             txid: 1,
             ident: Ident {
@@ -137,7 +136,7 @@ mod tests {
                 position,
             },
             rssi: -87,
-            relayed,
+            hops,
             at: Some((14, 11)),
         }
     }
@@ -170,13 +169,17 @@ mod tests {
     fn heard_shows_who_how_far_and_how() {
         let home = (40.543_9, -105.091_85);
         let far_end = (40.545_389, -105.107_722);
-        let (first, second) = heard(&bob(Some(far_end), true), Some(home));
+        let (first, second) = heard(&bob(Some(far_end), 1), Some(home));
         assert_eq!(first, "Bob            1.35km");
-        assert_eq!(second, "14:11Z -87dBm via rpt");
-        let (first, second) = heard(&bob(Some((40.544_8, -105.091_85)), false), Some(home));
+        assert_eq!(second, "14:11Z -87dBm 1 hop");
+        let (first, second) = heard(&bob(Some((40.544_8, -105.091_85)), 0), Some(home));
         assert_eq!(first, "Bob              100m");
-        assert_eq!(second, "14:11Z -87dBm");
+        assert_eq!(second, "14:11Z -87dBm 0 hops");
+        // The widest it gets still fits
+        let mut weak = bob(None, 2);
+        weak.rssi = -120;
+        assert_eq!(heard(&weak, None).1, "14:11Z -120dBm 2 hops");
         // Either side without a fix: no distance
-        assert_eq!(heard(&bob(None, false), Some(home)).0, "Bob");
+        assert_eq!(heard(&bob(None, 0), Some(home)).0, "Bob");
     }
 }
