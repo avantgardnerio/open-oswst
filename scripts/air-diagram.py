@@ -292,8 +292,8 @@ def slot_diagram(m):
     for k in range(col(0), col(air_end)):
         r[k] = "="
     r[col(0)], r[col(air_end)] = "[", "]"
-    put(r, col(0) + 4, " voice seq n ")
-    put(r, col(period), "[== seq n+1")
+    put(r, col(0) + 4, " voice packet n ")
+    put(r, col(period), "[== packet n+1")
     rows.append(r)
     r = blank()
     put(r, 0, "repeater")
@@ -307,7 +307,7 @@ def slot_diagram(m):
     for k in range(col(on_air) + 1, col(tx_done)):
         r[k] = "="
     r[col(tx_done)] = "]"
-    put(r, col(on_air) + 6, " relay of seq n ")
+    put(r, col(on_air) + 6, " relay of packet n ")
     for k in range(col(tx_done) + 2, col(period)):
         r[k] = "."
     r[col(tx_done) + 1] = "b"
@@ -379,7 +379,7 @@ def render(m, capture):
     )
     out += ["", f"The {pb} bytes:", "", "```", bytes_box(), "", "our header, 16 bits, big-endian (core/src/packet.rs):", header_box(),
             "       type: 0 voice, 1 echo replay, 2 wake, 3 voice end, 4 echo end (core/src/packet.rs PacketType)",
-            "       txid: random per transmission (the dedup key); seq: wraps at 16", "```", ""]
+            "       txid: random per transmission; hops: repeaters this copy came through, 0 from the talker; spare: 0", "```", ""]
     out += [f"### Wake packet: {hb} bytes, {fmt(air.packet_symbols(hb, wake))} symbols, {air.packet_ms(hb, wake):.1f} ms", ""]
     out.append(
         f"Sent once, first, so radios sweeping the hop channels can find the transmission. The preamble takes up the air the "
@@ -414,7 +414,7 @@ def render(m, capture):
     wake_at = f"+{m['wake']:.0f} ms" if m and "wake" in m else "first"
     voice_at = f"~{m['voice']:.0f} ms" if m and "voice" in m else "then"
     out.append(f"{wake_at:>8}   wake packet         {fmt(air.packet_symbols(hb, wake))} sym   (sent while the first {air.PERIOD_MS:.0f} ms of audio is captured)")
-    out.append(f"{voice_at:>8}   voice seq 0         {fmt(voice_sym)} sym   then one voice packet every {air.PERIOD_MS:.0f} ms ({fmt(slot_sym)} sym)")
+    out.append(f"{voice_at:>8}   voice packet 0      {fmt(voice_sym)} sym   then one voice packet every {air.PERIOD_MS:.0f} ms ({fmt(slot_sym)} sym)")
     out.append("     ...")
     out.append(f" release   last voice packet, then EOT    {fmt(voice_sym)} sym  (who and where)")
     out += ["```", "", "An echo station sends its wake packet one slot before its replay. A repeater relays a wake packet like any other "
@@ -444,7 +444,7 @@ def render(m, capture):
     out += ["| Step (repeater) | Median | Symbols | |", "|---|---|---|---|"]
     for name, ms, note in rows:
         out.append(f"| {name} | {ms:.1f} ms | {ms / sym:.1f} | {note} |")
-    out.append(f"| **slack before seq n+1** | **{m['slack']:.1f} ms** | **{m['slack'] / sym:.1f}** | "
+    out.append(f"| **slack before packet n+1** | **{m['slack']:.1f} ms** | **{m['slack'] / sym:.1f}** | "
                f"a relay ending later than this deafens the repeater to the next packet |")
     used_ms = air.PERIOD_MS - m["slack"]
     out += ["", f"Each repeater uses ~{used_ms:.0f} of the {air.PERIOD_MS:.0f} ms. A second repeater in the chain can't fit the "

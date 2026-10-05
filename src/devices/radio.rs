@@ -253,7 +253,7 @@ enum State {
 /// Hearing a transmission twice a slot: each packet on channel `a` (from
 /// the talker), then its relay on `b`, the next channel (from a repeater),
 /// whichever of them we hear. Both copies of every packet: the app plays
-/// the first and drops the other (same seq), so a packet is lost only if
+/// the first and drops the other (the same packet), so a packet is lost only if
 /// both are. The walk of 2026-10-04 locked onto the weak direct copy while
 /// the repeater's was 40dB stronger on the next channel.
 ///

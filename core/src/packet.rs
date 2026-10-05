@@ -1,4 +1,9 @@
-//! The 2-byte header on every packet: |5b type|7b txid|4b seq|.
+//! The 2-byte header on every packet: |5b type|7b txid|3b hops|1b spare|.
+//! `hops`: how many repeaters relayed this copy, 0 from the talker. Hop h of
+//! a transmission's packet n goes on the air in conveyor bin 2n + h
+//! (conveyor.rs), so every copy of a packet, however it came, is the same
+//! packet: copies that loop back through repeaters are duplicates. The spare
+//! bit is sent 0 and ignored.
 //! A transmission ends with an end packet (EOT): who sent it and where they
 //! were (`Ident`), the same 26 bytes as a voice packet, so it takes the
 //! same air and fits a repeater's slot like one.
@@ -66,11 +71,11 @@ pub struct Ident {
     pub position: Option<(f64, f64)>, // lat, lon in degrees
 }
 
-/// The end packet for transmission `txid`, after its last packet `seq`:
-/// header, latitude, longitude, then the name, zero-padded to 26 bytes
-pub fn end(end_type: PacketType, txid: u8, seq: u8, ident: &Ident) -> heapless::Vec<u8, 255> {
+/// The end packet for transmission `txid`: header, latitude, longitude, then
+/// the name, zero-padded to 26 bytes
+pub fn end(end_type: PacketType, txid: u8, ident: &Ident) -> heapless::Vec<u8, 255> {
     let mut data = heapless::Vec::new();
-    let _ = data.extend_from_slice(&pack(end_type, txid, seq));
+    let _ = data.extend_from_slice(&pack(end_type, txid));
     let (lat, lon) = match ident.position {
         Some((lat, lon)) => (to_steps(lat, 90.0), to_steps(lon, 180.0)),
         None => (NO_FIX, 0),
@@ -121,7 +126,7 @@ fn from_24_bits(bytes: &[u8]) -> i32 {
 /// The wake-up packet for transmission `txid`
 pub fn wake(txid: u8) -> TxRequest {
     let mut data = heapless::Vec::new();
-    let _ = data.extend_from_slice(&pack(PacketType::Wake, txid, 0));
+    let _ = data.extend_from_slice(&pack(PacketType::Wake, txid));
     TxRequest {
         data,
         preamble: Some(air::wake_preamble_symbols()),
@@ -130,15 +135,21 @@ pub fn wake(txid: u8) -> TxRequest {
     }
 }
 
+/// The most relays a copy can have had: 3 bits. Only a backstop: a copy
+/// that loops back through repeaters is a duplicate long before this
+pub const MAX_HOPS: u8 = 7;
+
 pub struct Header {
     /// The type, or the 5 bits if they name no type we know (garbage)
     pub pkt_type: Result<PacketType, u8>,
     pub txid: u8, // random per transmission: the dedup key
-    pub seq: u8,  // wraps at 16
+    /// Repeaters this copy came through: 0 = straight from the talker
+    pub hops: u8,
 }
 
-pub fn pack(pkt_type: PacketType, txid: u8, seq: u8) -> [u8; 2] {
-    ((pkt_type as u16) << 11 | (txid as u16) << 4 | seq as u16).to_be_bytes()
+/// A header straight from the talker: no hops yet
+pub fn pack(pkt_type: PacketType, txid: u8) -> [u8; 2] {
+    ((pkt_type as u16) << 11 | (txid as u16) << 4).to_be_bytes()
 }
 
 pub fn unpack(bytes: [u8; 2]) -> Header {
@@ -146,8 +157,20 @@ pub fn unpack(bytes: [u8; 2]) -> Header {
     Header {
         pkt_type: PacketType::try_from((header >> 11) as u8),
         txid: ((header >> 4) & 0x7F) as u8,
-        seq: (header & 0x0F) as u8,
+        hops: ((header >> 1) & 0x07) as u8,
     }
+}
+
+/// The header a repeater sends its relay of a copy with: one more hop. None
+/// once the copy has had MAX_HOPS
+pub fn relayed(bytes: [u8; 2]) -> Option<[u8; 2]> {
+    let header = u16::from_be_bytes(bytes);
+    let hops = ((header >> 1) & 0x07) as u8;
+    if hops >= MAX_HOPS {
+        return None;
+    }
+    let bumped = (header & !0x000E) | ((hops as u16 + 1) << 1);
+    Some(bumped.to_be_bytes())
 }
 
 #[cfg(test)]
@@ -164,12 +187,12 @@ mod tests {
     #[test]
     fn an_end_packet_is_a_voice_packets_size_and_reads_back() {
         let sent = ident("Cornelious", Some((40.543_901, -105.091_852)));
-        let data = end(PacketType::VoiceEnd, 42, 7, &sent);
+        let data = end(PacketType::VoiceEnd, 42, &sent);
         assert_eq!(data.len(), PACKET_BYTES);
         let header = unpack([data[0], data[1]]);
         assert_eq!(
-            (header.pkt_type, header.txid, header.seq),
-            (Ok(PacketType::VoiceEnd), 42, 7)
+            (header.pkt_type, header.txid, header.hops),
+            (Ok(PacketType::VoiceEnd), 42, 0)
         );
         let got = read_end(&data).unwrap();
         assert_eq!(got.name, "Cornelious");
@@ -182,19 +205,14 @@ mod tests {
     #[test]
     fn no_fix_and_the_extremes() {
         assert_eq!(
-            read_end(&end(PacketType::EchoEnd, 1, 0, &ident("x", None)))
+            read_end(&end(PacketType::EchoEnd, 1, &ident("x", None)))
                 .unwrap()
                 .position,
             None
         );
         for (lat, lon) in [(90.0, 180.0), (-90.0, -180.0), (0.0, 0.0)] {
-            let got = read_end(&end(
-                PacketType::VoiceEnd,
-                1,
-                0,
-                &ident("x", Some((lat, lon))),
-            ))
-            .unwrap();
+            let got =
+                read_end(&end(PacketType::VoiceEnd, 1, &ident("x", Some((lat, lon))))).unwrap();
             let (got_lat, got_lon) = got.position.unwrap();
             assert!((got_lat - lat).abs() < 1.1e-5 && (got_lon - lon).abs() < 2.2e-5);
         }
@@ -205,12 +223,12 @@ mod tests {
         let long = "eighteen-byte-name";
         assert_eq!(long.len(), NAME_BYTES);
         assert_eq!(
-            read_end(&end(PacketType::VoiceEnd, 1, 0, &ident(long, None)))
+            read_end(&end(PacketType::VoiceEnd, 1, &ident(long, None)))
                 .unwrap()
                 .name,
             long
         );
-        let mut data = end(PacketType::VoiceEnd, 1, 0, &ident("ok", None));
+        let mut data = end(PacketType::VoiceEnd, 1, &ident("ok", None));
         data[HEADER_BYTES + POSITION_BYTES] = 0xFF; // not UTF-8
         assert_eq!(read_end(&data), None);
         assert_eq!(read_end(&data[..HEADER_BYTES]), None);
@@ -221,8 +239,32 @@ mod tests {
         use PacketType::*;
         for t in [Voice, Echo, Wake, VoiceEnd, EchoEnd, Bench] {
             assert_eq!(PacketType::try_from(t as u8), Ok(t));
-            assert_eq!(unpack(pack(t, 99, 5)).pkt_type, Ok(t));
+            assert_eq!(unpack(pack(t, 99)).pkt_type, Ok(t));
         }
         assert_eq!(PacketType::try_from(0x15), Err(0x15));
+    }
+
+    #[test]
+    fn each_relay_adds_a_hop_up_to_the_most() {
+        let mut header = pack(PacketType::Voice, 99);
+        for hops in 1..=MAX_HOPS {
+            header = relayed(header).unwrap();
+            let got = unpack(header);
+            assert_eq!(
+                (got.pkt_type, got.txid, got.hops),
+                (Ok(PacketType::Voice), 99, hops)
+            );
+        }
+        assert_eq!(relayed(header), None);
+    }
+
+    #[test]
+    fn the_spare_bit_is_ignored() {
+        let [high, low] = pack(PacketType::Echo, 127);
+        let got = unpack([high, low | 1]);
+        assert_eq!(
+            (got.pkt_type, got.txid, got.hops),
+            (Ok(PacketType::Echo), 127, 0)
+        );
     }
 }

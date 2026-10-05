@@ -1,14 +1,17 @@
 //! A transmission's timing, as a conveyor belt of bins going by, one every
-//! 80 ms (air::bin_us). The talker sends in the even bins, and a repeater
-//! relays each packet in the odd bin after it.
+//! 80 ms (air::bin_us). The talker sends packet n in bin 2n, a repeater
+//! relays it in the bin after, the next repeater in the bin after that: hop
+//! h of packet n is in bin 2n + h. Every packet says its hops (packet.rs).
 //!
 //! The belt starts from the first good packet heard, whichever it is: from
-//! when that packet ended, back to when its bin started. Every later bin is
-//! counted from that one moment, never from the last packet, so the small
-//! errors in each packet's timestamp don't add up. A packet that lands near
-//! the start of a bin rode the belt: it's part of this transmission, even
-//! if its CRC failed. One that lands between bins is someone else's, or
-//! noise.
+//! when that packet ended, back to when its bin started, and from its hops,
+//! back to bin 0. Every later bin is counted from that one moment, never
+//! from the last packet, so the small errors in each packet's timestamp
+//! don't add up. Every copy of a packet, however many hops it took (even
+//! round a loop of repeaters), comes out as the same packet: (bin - hops) /
+//! 2. A packet that lands near the start of a bin rode the belt: it's part
+//! of this transmission, even if its CRC failed. One that lands between
+//! bins is someone else's, or noise.
 //!
 //! Pure logic on µs timestamps (`RxPacket::end_us`), so it's tested here
 //! without a radio or a clock.
@@ -18,82 +21,62 @@ use crate::codec::PACKET_BYTES;
 use core::fmt;
 
 /// How far from its bin's start a packet may land and still be on the belt.
-/// Wide for now: packet times are read when the radio task wakes, not in its
-/// interrupt, and a repeater starts its relay ~4 ms before its bin
+/// Wide for now: a repeater starts its relay ~4 ms before its bin
 const TOLERANCE_US: i64 = 10_000;
 
 /// Empty bins in a row that end a transmission whose end packet we missed:
 /// 12, ~1 s: six of the talker's bins and their relays
 const EMPTY_BINS_TO_END: i64 = 12;
 
-/// Which copy of a packet: the talker's own, or a repeater's relay of it
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Path {
-    /// From the talker, in an even bin
-    Direct,
-    /// A repeater's relay, in the odd bin after the talker's
-    Relayed,
-}
-
 /// Where a packet landed on the belt
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Landing {
-    /// The nearest bin, counted from bin 0 (where the belt started)
+    /// The nearest bin, counted from bin 0 (the talker's bin of the packet
+    /// the belt started from)
     pub bin: i64,
     /// How far from that bin's start the packet started: + late, - early
     pub off_by_us: i64,
+    /// Which of the talker's packets it is: (bin - hops) / 2. None if its
+    /// bin and hops don't fit (a good packet in the wrong bin for its hops),
+    /// or for a garbled packet, whose hops can't be trusted
+    pub packet: Option<i64>,
 }
 
 impl Landing {
-    /// Even bins are the talker's, odd ones a repeater's
-    pub fn path(&self) -> Path {
-        if self.bin.rem_euclid(2) == 0 {
-            Path::Direct
-        } else {
-            Path::Relayed
-        }
-    }
-
     /// Close enough to its bin's start to be part of this transmission
     pub fn on_belt(&self) -> bool {
         self.off_by_us.abs() <= TOLERANCE_US
-    }
-
-    /// Which of the talker's packets this is, counted from the belt's start:
-    /// a packet and its relay (bins 2n and 2n + 1) are both packet n
-    pub fn packet(&self) -> i64 {
-        self.bin.div_euclid(2)
     }
 }
 
 pub struct Conveyor {
     /// When bin 0 started, in µs since boot: the talker's bin of the first
-    /// good packet heard (the one before it, if that packet was a relay)
+    /// good packet heard
     bin_0_us: i64,
 }
 
 impl Conveyor {
     /// Start the belt from the first good packet heard, which ended at
-    /// `end_us`. A direct packet is in bin 0; a relayed one in bin 1, after
-    /// its talker's bin 0
-    pub fn start(end_us: i64, path: Path) -> Conveyor {
-        let bin = match path {
-            Path::Direct => 0,
-            Path::Relayed => 1,
-        };
+    /// `end_us` after `hops` relays: it's in bin `hops`
+    pub fn start(end_us: i64, hops: u8) -> Conveyor {
         Conveyor {
-            bin_0_us: end_us - packet_air_us() - bin * bin_us(),
+            bin_0_us: end_us - packet_air_us() - hops as i64 * bin_us(),
         }
     }
 
-    /// Where a packet that ended at `end_us` landed: the nearest bin, and how
-    /// far from that bin's start it started
-    pub fn landing(&self, end_us: i64) -> Landing {
+    /// Where a packet that ended at `end_us` landed: the nearest bin, how far
+    /// from that bin's start it started, and, given its `hops`, which packet
+    pub fn landing(&self, end_us: i64, hops: Option<u8>) -> Landing {
         let since_bin_0_us = end_us - packet_air_us() - self.bin_0_us;
         let bin = div_round(since_bin_0_us, bin_us());
+        let packet = hops.and_then(|hops| {
+            let talkers_bin = bin - hops as i64;
+            (talkers_bin.rem_euclid(2) == 0).then_some(talkers_bin / 2)
+        });
         Landing {
             bin,
             off_by_us: since_bin_0_us - bin * bin_us(),
+            packet,
         }
     }
 
@@ -115,10 +98,11 @@ pub struct Transmission {
 }
 
 impl Transmission {
-    /// The first good packet of a transmission: `txid`'s, ended at `end_us`
-    pub fn start(txid: u8, end_us: i64, path: Path) -> Transmission {
-        let conveyor = Conveyor::start(end_us, path);
-        let landing = conveyor.landing(end_us);
+    /// The first good packet of a transmission: `txid`'s, after `hops`
+    /// relays, ended at `end_us`. Where it landed: packet 0
+    pub fn start(txid: u8, end_us: i64, hops: u8) -> (Transmission, Landing) {
+        let conveyor = Conveyor::start(end_us, hops);
+        let landing = conveyor.landing(end_us, Some(hops));
         let mut transmission = Transmission {
             txid,
             conveyor,
@@ -126,21 +110,16 @@ impl Transmission {
             last_taken: None,
             tally: Tally::default(),
         };
-        transmission.tally.good(landing);
-        transmission
+        transmission.tally.good(landing, hops);
+        (transmission, landing)
     }
 
-    /// Where a packet that ended at `end_us` landed, without counting it
-    pub fn landing(&self, end_us: i64) -> Landing {
-        self.conveyor.landing(end_us)
-    }
-
-    /// A good packet of this transmission (its txid says it's ours, so it
-    /// counts even off the belt): where it landed
-    pub fn heard(&mut self, end_us: i64) -> Landing {
-        let landing = self.conveyor.landing(end_us);
+    /// A good packet of this transmission, after `hops` relays (its txid says
+    /// it's ours, so it counts even off the belt): where it landed
+    pub fn heard(&mut self, end_us: i64, hops: u8) -> Landing {
+        let landing = self.conveyor.landing(end_us, Some(hops));
         self.last_bin = self.last_bin.max(landing.bin);
-        self.tally.good(landing);
+        self.tally.good(landing, hops);
         landing
     }
 
@@ -148,7 +127,7 @@ impl Transmission {
     /// only if it rode the belt: then the transmission is still going. True
     /// if it did
     pub fn heard_garbled(&mut self, end_us: i64) -> bool {
-        let landing = self.conveyor.landing(end_us);
+        let landing = self.conveyor.landing(end_us, None);
         self.tally.garbled(landing);
         if landing.on_belt() {
             self.last_bin = self.last_bin.max(landing.bin);
@@ -164,9 +143,9 @@ impl Transmission {
         now_us > last_could_end_us + TOLERANCE_US
     }
 
-    /// Is this the first copy of the talker's `packet` (direct or relayed)?
-    /// Then it's taken: to play, or for a repeater to relay. A later copy, or
-    /// a packet older than one already taken, isn't
+    /// Is this the first copy of the talker's `packet` (any hops)? Then it's
+    /// taken: to play, or for a repeater to relay. A later copy, or a packet
+    /// older than one already taken, isn't
     pub fn first_copy(&mut self, packet: i64) -> bool {
         if self.last_taken.is_some_and(|taken| packet <= taken) {
             return false;
@@ -184,10 +163,14 @@ impl Transmission {
 /// How a transmission's packets landed on the belt
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct Tally {
+    /// Good packets straight from the talker (0 hops)
     direct: u32,
+    /// Good packets through one or more repeaters
     relayed: u32,
     /// Good packets more than TOLERANCE_US from their bin's start
     off_belt: u32,
+    /// Good packets in a bin that doesn't fit their hops: no packet number
+    wrong_bin: u32,
     /// CRC failed, on the belt: counted as part of the transmission
     garbled_on_belt: u32,
     /// CRC failed, between bins: ignored
@@ -198,22 +181,22 @@ pub struct Tally {
 }
 
 impl Tally {
-    fn good(&mut self, landing: Landing) {
-        let worst = match landing.path() {
-            Path::Direct => {
-                self.direct += 1;
-                &mut self.worst_direct_us
-            }
-            Path::Relayed => {
-                self.relayed += 1;
-                &mut self.worst_relayed_us
-            }
+    fn good(&mut self, landing: Landing, hops: u8) {
+        let worst = if hops == 0 {
+            self.direct += 1;
+            &mut self.worst_direct_us
+        } else {
+            self.relayed += 1;
+            &mut self.worst_relayed_us
         };
         if landing.off_by_us.abs() > worst.abs() {
             *worst = landing.off_by_us;
         }
         if !landing.on_belt() {
             self.off_belt += 1;
+        }
+        if landing.packet.is_none() {
+            self.wrong_bin += 1;
         }
     }
 
@@ -231,12 +214,13 @@ impl fmt::Display for Tally {
         write!(
             f,
             "direct {} (worst {:+.1}ms), relayed {} (worst {:+.1}ms), off the belt {}, \
-             garbled on the belt {}, garbled between bins {}",
+             wrong bin for its hops {}, garbled on the belt {}, garbled between bins {}",
             self.direct,
             self.worst_direct_us as f32 / 1000.0,
             self.relayed,
             self.worst_relayed_us as f32 / 1000.0,
             self.off_belt,
+            self.wrong_bin,
             self.garbled_on_belt,
             self.garbled_off_belt
         )
@@ -274,67 +258,74 @@ mod tests {
     }
 
     #[test]
-    fn a_relay_lands_in_the_odd_bin_after_its_talkers() {
-        let belt = Conveyor::start(FIRST_END, Path::Direct);
+    fn every_hop_of_a_packet_is_the_same_packet() {
+        let belt = Conveyor::start(FIRST_END, 0);
+        let direct = belt.landing(ends(4, 0), Some(0));
+        let relay = belt.landing(ends(5, -4_200), Some(1)); // a repeater starts ~4 ms early
+        let second_relay = belt.landing(ends(6, 1_000), Some(2));
+        assert_eq!((direct.bin, direct.packet), (4, Some(2)));
         assert_eq!(
-            belt.landing(ends(0, 0)),
-            Landing {
-                bin: 0,
-                off_by_us: 0
-            }
+            (relay.bin, relay.packet, relay.off_by_us),
+            (5, Some(2), -4_200)
         );
-        let relay = belt.landing(ends(1, -4_200)); // a repeater starts ~4 ms early
-        assert_eq!(
-            relay,
-            Landing {
-                bin: 1,
-                off_by_us: -4_200
-            }
-        );
-        assert_eq!(relay.path(), Path::Relayed);
-        assert_eq!(relay.packet(), 0); // packet 0's relay
+        assert_eq!((second_relay.bin, second_relay.packet), (6, Some(2)));
         assert!(relay.on_belt());
-        let next = belt.landing(ends(2, 1_500));
-        assert_eq!((next.bin, next.path(), next.packet()), (2, Path::Direct, 1));
+    }
+
+    #[test]
+    fn a_copy_round_a_loop_of_repeaters_is_still_the_same_packet() {
+        let mut transmission = Transmission::start(42, FIRST_END, 0).0;
+        assert!(transmission.first_copy(1)); // packet 1, direct, in bin 2
+        let looped = transmission.heard(ends(5, 0), 3); // packet 1, three hops on
+        assert_eq!(looped.packet, Some(1));
+        assert!(!transmission.first_copy(1));
     }
 
     #[test]
     fn starting_from_a_relay_gives_the_same_belt() {
-        let from_direct = Conveyor::start(FIRST_END, Path::Direct);
-        let from_relay = Conveyor::start(ends(1, 0), Path::Relayed);
+        let from_direct = Conveyor::start(FIRST_END, 0);
+        let from_relay = Conveyor::start(ends(1, 0), 1);
+        let from_second_relay = Conveyor::start(ends(2, 0), 2);
         assert_eq!(from_direct.bin_start(7), from_relay.bin_start(7));
-        assert_eq!(from_relay.landing(ends(40, 0)).bin, 40);
+        assert_eq!(from_direct.bin_start(7), from_second_relay.bin_start(7));
     }
 
     #[test]
-    fn bins_count_on_past_the_seq_wrap() {
-        // seq is 4 bits and wraps every 16 packets; bins don't
-        let belt = Conveyor::start(FIRST_END, Path::Direct);
-        let late = belt.landing(ends(2 * 40, 2_000));
-        assert_eq!((late.bin, late.packet()), (80, 40));
+    fn a_packet_in_the_wrong_bin_for_its_hops_has_no_number() {
+        let mut transmission = Transmission::start(42, FIRST_END, 0).0;
+        let landing = transmission.heard(ends(3, 0), 0); // direct, but in an odd bin
+        assert_eq!(landing.packet, None);
+        assert_eq!(transmission.tally().wrong_bin, 1);
+    }
+
+    #[test]
+    fn packets_count_on_past_where_seq_used_to_wrap() {
+        let belt = Conveyor::start(FIRST_END, 0);
+        let late = belt.landing(ends(2 * 40, 2_000), Some(0));
+        assert_eq!((late.bin, late.packet), (80, Some(40)));
     }
 
     #[test]
     fn between_bins_is_off_the_belt() {
-        let belt = Conveyor::start(FIRST_END, Path::Direct);
-        assert!(belt.landing(ends(3, TOLERANCE_US)).on_belt());
-        let between = belt.landing(ends(3, TOLERANCE_US + 1));
+        let belt = Conveyor::start(FIRST_END, 0);
+        assert!(belt.landing(ends(3, TOLERANCE_US), None).on_belt());
+        let between = belt.landing(ends(3, TOLERANCE_US + 1), None);
         assert_eq!(between.bin, 3);
         assert!(!between.on_belt());
-        let halfway = belt.landing(ends(3, BIN / 2 - 1));
+        let halfway = belt.landing(ends(3, BIN / 2 - 1), None);
         assert_eq!(halfway.bin, 3); // still nearest bin 3, just off the belt
     }
 
     #[test]
     fn bin_start_is_when_its_packet_goes_on_the_air() {
-        let belt = Conveyor::start(FIRST_END, Path::Direct);
+        let belt = Conveyor::start(FIRST_END, 0);
         assert_eq!(belt.bin_start(0), FIRST_END - AIR);
         assert_eq!(belt.bin_start(5), FIRST_END - AIR + 5 * BIN);
     }
 
     #[test]
     fn garbled_packets_on_the_belt_keep_a_transmission_going() {
-        let mut transmission = Transmission::start(42, FIRST_END, Path::Direct);
+        let mut transmission = Transmission::start(42, FIRST_END, 0).0;
         assert!(transmission.heard_garbled(ends(2, 3_000)));
         assert!(!transmission.heard_garbled(ends(4, 30_000))); // between bins: noise
         assert_eq!(transmission.last_bin, 2);
@@ -342,8 +333,8 @@ mod tests {
 
     #[test]
     fn good_packets_count_even_off_the_belt() {
-        let mut transmission = Transmission::start(42, FIRST_END, Path::Direct);
-        let landing = transmission.heard(ends(6, 25_000));
+        let mut transmission = Transmission::start(42, FIRST_END, 0).0;
+        let landing = transmission.heard(ends(6, 25_000), 0);
         assert!(!landing.on_belt());
         assert_eq!(transmission.last_bin, 6);
         assert_eq!(transmission.tally().off_belt, 1);
@@ -351,15 +342,15 @@ mod tests {
 
     #[test]
     fn a_late_copy_doesnt_wind_the_belt_back() {
-        let mut transmission = Transmission::start(42, FIRST_END, Path::Direct);
-        transmission.heard(ends(8, 0));
-        transmission.heard(ends(5, 0));
+        let mut transmission = Transmission::start(42, FIRST_END, 0).0;
+        transmission.heard(ends(8, 0), 0);
+        transmission.heard(ends(5, 0), 1);
         assert_eq!(transmission.last_bin, 8);
     }
 
     #[test]
     fn only_the_first_copy_of_a_packet_is_taken() {
-        let mut transmission = Transmission::start(42, FIRST_END, Path::Direct);
+        let mut transmission = Transmission::start(42, FIRST_END, 0).0;
         assert!(transmission.first_copy(3));
         assert!(!transmission.first_copy(3)); // its relay
         assert!(transmission.first_copy(5)); // 4 lost
@@ -368,8 +359,8 @@ mod tests {
 
     #[test]
     fn over_after_twelve_empty_bins() {
-        let mut transmission = Transmission::start(42, FIRST_END, Path::Direct);
-        transmission.heard(ends(10, 0));
+        let mut transmission = Transmission::start(42, FIRST_END, 0).0;
+        transmission.heard(ends(10, 0), 0);
         // A packet in bin 22 would have ended by ends(22, 0), give or take
         // the tolerance; until then bin 22 might still bring one
         assert!(!transmission.over(ends(22, TOLERANCE_US)));
@@ -381,11 +372,11 @@ mod tests {
 
     #[test]
     fn the_tally_keeps_the_worst_landing_per_path() {
-        let mut transmission = Transmission::start(42, FIRST_END, Path::Direct);
-        transmission.heard(ends(1, -4_000));
-        transmission.heard(ends(2, 3_000));
-        transmission.heard(ends(3, -6_000));
-        transmission.heard(ends(4, -1_000));
+        let mut transmission = Transmission::start(42, FIRST_END, 0).0;
+        transmission.heard(ends(1, -4_000), 1);
+        transmission.heard(ends(2, 3_000), 0);
+        transmission.heard(ends(3, -6_000), 1);
+        transmission.heard(ends(4, -1_000), 0);
         let tally = transmission.tally();
         assert_eq!((tally.direct, tally.relayed), (3, 2));
         assert_eq!(

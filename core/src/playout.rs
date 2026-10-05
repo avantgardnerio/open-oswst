@@ -11,7 +11,7 @@
 //! - play the squelch tail after the last decode still in flight
 //!
 //! Packets are counted on the conveyor (conveyor::Landing::packet), never by
-//! seq, which wraps every 16. Pure logic, tested here: the app passes what
+//! a sequence number. Pure logic, tested here: the app passes what
 //! comes out on to the speaker (SPK_AUDIO).
 
 /// What the speaker gets next, in order

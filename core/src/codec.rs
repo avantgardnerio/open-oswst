@@ -10,7 +10,7 @@ pub const CODEC2_FRAME_BYTES: usize = 6;
 pub const CODEC2_FRAME_SAMPLES: usize = 320;
 
 /// Pack 4 Codec2 frames per LoRa packet (24 bytes payload, 160ms audio).
-/// 2-byte header for repeater dedup/reorder: |5b type|7b txid|4b seq| = 16 bits.
+/// 2-byte header: |5b type|7b txid|3b hops|1b spare| (packet.rs).
 /// 26 bytes total sits in the same SF8 symbol bin as 24 — zero air time cost.
 pub const FRAMES_PER_PACKET: usize = 4;
 pub const HEADER_BYTES: usize = 2;

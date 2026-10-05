@@ -30,7 +30,7 @@ use crate::codec::{
     PACKET_BYTES, PACKET_SAMPLES, PAYLOAD_BYTES,
 };
 use crate::config;
-use crate::conveyor::{Landing, Path, Transmission};
+use crate::conveyor::{Landing, Transmission};
 use crate::echo::{self, Recorder};
 use crate::menu::{Menu, Outcome, Setting};
 use crate::mode::{self, Mode};
@@ -121,7 +121,6 @@ pub async fn init<P: Platform>(
             // 3KB: on the heap, once. In the App it overflowed the main task's stack
             playback: Box::default(),
             own_txid: None,
-            relayed_wake: None,
         },
         sounds: Sounds {
             silence: vec![0i16; PACKET_SAMPLES].into(),
@@ -173,7 +172,6 @@ struct Receiving {
     transmission: Option<Transmission>, // the transmission on its conveyor: says when it's over
     playback: Box<PlaybackTiming>, // per received transmission, logged at its end
     own_txid: Option<u8>,     // our last transmission's, so we ignore it relayed back
-    relayed_wake: Option<u8>, // repeater: the last wake-up relayed (its txid), to relay each once
 }
 
 /// Audio built once at boot, played as-is
@@ -328,7 +326,7 @@ impl<P: Platform> App<P> {
 
     async fn on_rx_packet(&mut self, rx_pkt: RxPacket) {
         self.logs.last_activity = Instant::now();
-        // A failed CRC: the bytes are garbage, even txid and seq, so nothing
+        // A failed CRC: the bytes are garbage, even txid and hops, so nothing
         // below may see them. It still counts as activity (above): it was on
         // the air, and the radio may have stayed locked on it, so the air
         // isn't quiet and the Sweep waits. On the conveyor it was part of the
@@ -352,7 +350,7 @@ impl<P: Platform> App<P> {
         let Header {
             pkt_type,
             txid,
-            seq,
+            hops,
         } = packet::unpack([rx_pkt.data[0], rx_pkt.data[1]]);
 
         let pkt_type = match pkt_type {
@@ -374,34 +372,26 @@ impl<P: Platform> App<P> {
         let landing = if ours || pkt_type == PacketType::Bench {
             None
         } else {
-            self.ride_conveyor(&rx_pkt, pkt_type, txid)
+            self.ride_conveyor(&rx_pkt, pkt_type, txid, hops)
         };
 
         // Only wakes up radios that are sweeping: nothing to play. A repeater
-        // passes it on (once), so radios that only hear the repeater find
-        // the transmission on the channel it relays on
+        // passes it on (its first copy: it's the transmission's packet 0), so
+        // radios that only hear the repeater find the transmission on the
+        // channel it relays on
         if pkt_type == PacketType::Wake {
             log::info!(
-                "RX wake txid={} rssi={} snr={} ch={}",
+                "RX wake txid={} hops={} rssi={} snr={} ch={}",
                 txid,
+                hops,
                 rx_pkt.rssi,
                 rx_pkt.snr,
                 rx_pkt.channel
             );
-            if mode::get() == Mode::Repeater && !ours && self.rx.relayed_wake != Some(txid) {
-                self.rx.relayed_wake = Some(txid);
-                let channel = relay_channel(rx_pkt.channel);
-                let mut relay = heapless::Vec::new();
-                let _ = relay.extend_from_slice(&rx_pkt.data);
-                TX_CHAN
-                    .send(TxRequest {
-                        data: relay,
-                        preamble: Some(air::wake_preamble_symbols()),
-                        channel,
-                        clear_air_first: true,
-                    })
-                    .await;
-                log::info!("RELAY wake txid={} ch={}", txid, channel);
+            if mode::get() == Mode::Repeater && self.take_first_copy(landing) {
+                if let Some(channel) = relay(&rx_pkt, Some(air::wake_preamble_symbols())).await {
+                    log::info!("RELAY wake txid={} hops={} ch={}", txid, hops + 1, channel);
+                }
             }
             return;
         }
@@ -414,22 +404,22 @@ impl<P: Platform> App<P> {
         // Our own transmission, relayed back by a repeater
         if ours {
             log::info!(
-                "RX txid={} seq={} is our own, relayed back: dropping",
+                "RX txid={} hops={} is our own, relayed back: dropping",
                 txid,
-                seq
+                hops
             );
             return;
         }
 
         if matches!(pkt_type, PacketType::VoiceEnd | PacketType::EchoEnd) {
-            self.on_end(&rx_pkt, pkt_type, txid).await;
+            self.on_end(&rx_pkt, pkt_type, txid, hops, landing).await;
             return;
         }
 
         // Echo mode records live voice instead of playing it. Echoes are never
         // echoed, so they fall through and play like voice.
         if mode::get() == Mode::Echo && pkt_type == PacketType::Voice {
-            self.on_echo_packet(&rx_pkt, txid, seq, landing).await;
+            self.on_echo_packet(&rx_pkt, txid, hops, landing).await;
             return;
         }
 
@@ -448,41 +438,36 @@ impl<P: Platform> App<P> {
             log::warn!("RX ignoring txid={} (locked to {:?})", txid, locked);
             return;
         };
-        // The second copy of a packet (direct, then a repeater's relay), or an
-        // old one: already played or relayed. Counted on the conveyor, never
-        // by seq (which wraps every 16)
-        let packet = landing.packet();
-        let first_copy = self
-            .rx
-            .transmission
-            .as_mut()
-            .is_some_and(|transmission| transmission.first_copy(packet));
-        if !first_copy {
-            log::info!("RX packet={} seq={} duplicate, dropping", packet, seq);
+        // A good packet whose bin doesn't fit its hops: its timing or its hops
+        // are wrong, so it can't be numbered (the CONVEYOR tally counts these)
+        let Some(packet) = landing.packet else {
+            log::warn!(
+                "RX txid={} hops={} in the wrong bin {} for its hops, dropping",
+                txid,
+                hops,
+                landing.bin
+            );
+            return;
+        };
+        // The second copy of a packet (any hops, even round a loop of
+        // repeaters), or an old one: already played or relayed
+        if !self.take_first_copy(Some(landing)) {
+            log::info!("RX packet={} hops={} duplicate, dropping", packet, hops);
             return;
         }
 
         // Repeater: relay the first copy of each packet
         if mode::get() == Mode::Repeater {
-            let channel = relay_channel(rx_pkt.channel);
-            let mut relay = heapless::Vec::new();
-            let _ = relay.extend_from_slice(&rx_pkt.data);
-            TX_CHAN
-                .send(TxRequest {
-                    data: relay,
-                    preamble: None,
-                    channel,
-                    clear_air_first: true,
-                })
-                .await;
-            log::info!(
-                "RELAY [{}B] txid={} seq={} packet={} ch={}",
-                rx_pkt.data.len(),
-                txid,
-                seq,
-                packet,
-                channel
-            );
+            if let Some(channel) = relay(&rx_pkt, None).await {
+                log::info!(
+                    "RELAY [{}B] txid={} packet={} hops={} ch={}",
+                    rx_pkt.data.len(),
+                    txid,
+                    packet,
+                    hops + 1,
+                    channel
+                );
+            }
             // Drawn after the relay is queued, so it doesn't delay it
             self.show(Activity::Repeating);
             return; // skip decode — fast turnaround
@@ -506,11 +491,11 @@ impl<P: Platform> App<P> {
         }
 
         log::info!(
-            "RX [{}B] txid={} seq={} packet={} rssi={} snr={}",
+            "RX [{}B] txid={} packet={} hops={} rssi={} snr={}",
             rx_pkt.data.len(),
             txid,
-            seq,
             packet,
+            hops,
             rx_pkt.rssi,
             rx_pkt.snr,
         );
@@ -544,34 +529,41 @@ impl<P: Platform> App<P> {
         rx_pkt: &RxPacket,
         pkt_type: PacketType,
         txid: u8,
+        hops: u8,
     ) -> Option<Landing> {
         if let Some(transmission) = &mut self.rx.transmission {
             if transmission.txid != txid {
                 return None;
             }
-            return Some(transmission.heard(rx_pkt.end_us));
+            return Some(transmission.heard(rx_pkt.end_us, hops));
         }
         if matches!(pkt_type, PacketType::VoiceEnd | PacketType::EchoEnd) {
             return None;
         }
-        // Talkers send on the start slot (channel 0), repeaters relay on the
-        // next. A radio that doesn't sweep hears both on 0, and takes the
-        // first packet it hears as the talker's
-        let path = if rx_pkt.channel == 0 {
-            Path::Direct
-        } else {
-            Path::Relayed
-        };
-        let transmission = Transmission::start(txid, rx_pkt.end_us, path);
-        let landing = transmission.landing(rx_pkt.end_us);
+        // Its hops say where it is on the belt, whatever channel it was heard
+        // on: at point-blank range a radio hears the next channel too
+        let (transmission, landing) = Transmission::start(txid, rx_pkt.end_us, hops);
         log::info!(
-            "CONVEYOR start txid={} from a {:?} packet on ch{}",
+            "CONVEYOR start txid={} from a packet with {} hops, on ch{}",
             txid,
-            path,
+            hops,
             rx_pkt.channel
         );
         self.rx.transmission = Some(transmission);
         Some(landing)
+    }
+
+    /// Is `landing` the first copy of its packet on the conveyor? Then it's
+    /// taken (to play or relay). Not for a packet that isn't the
+    /// transmission's, or has no number (the wrong bin for its hops)
+    fn take_first_copy(&mut self, landing: Option<Landing>) -> bool {
+        let Some(packet) = landing.and_then(|landing| landing.packet) else {
+            return false;
+        };
+        self.rx
+            .transmission
+            .as_mut()
+            .is_some_and(|transmission| transmission.first_copy(packet))
     }
 
     /// The end of a transmission: who sent it and where they were. A
@@ -579,7 +571,14 @@ impl<P: Platform> App<P> {
     /// everyone else plays the squelch tail (a repeater never plays the
     /// voice, so a tail on its own would be noise). The screen shows who it
     /// was from the first copy heard (direct before relayed)
-    async fn on_end(&mut self, rx_pkt: &RxPacket, pkt_type: PacketType, txid: u8) {
+    async fn on_end(
+        &mut self,
+        rx_pkt: &RxPacket,
+        pkt_type: PacketType,
+        txid: u8,
+        hops: u8,
+        landing: Option<Landing>,
+    ) {
         let ident = packet::read_end(&rx_pkt.data);
         match &ident {
             Some(Ident {
@@ -607,18 +606,14 @@ impl<P: Platform> App<P> {
 
         let echo_this = mode::get() == Mode::Echo && pkt_type == PacketType::VoiceEnd;
         if mode::get() == Mode::Repeater {
-            let channel = relay_channel(rx_pkt.channel);
-            let mut relay = heapless::Vec::new();
-            let _ = relay.extend_from_slice(&rx_pkt.data);
-            TX_CHAN
-                .send(TxRequest {
-                    data: relay,
-                    preamble: None,
-                    channel,
-                    clear_air_first: true,
-                })
-                .await;
-            log::info!("RELAY EOT txid={} ch={}", txid, channel);
+            // Its first copy only: the transmission ends with it, so a later
+            // copy (another repeater's, or one round a loop) finds no
+            // conveyor and isn't relayed again
+            if self.take_first_copy(landing) {
+                if let Some(channel) = relay(rx_pkt, None).await {
+                    log::info!("RELAY EOT txid={} hops={} ch={}", txid, hops + 1, channel);
+                }
+            }
         } else if !echo_this {
             // The tail, after whatever of the transmission is still being
             // decoded (a repeater's copy of the end packet plays it again)
@@ -672,27 +667,24 @@ impl<P: Platform> App<P> {
         &mut self,
         rx_pkt: &RxPacket,
         txid: u8,
-        seq: u8,
+        hops: u8,
         landing: Option<Landing>,
     ) {
-        let Some(landing) = landing else {
+        let Some(packet) = landing.and_then(|landing| landing.packet) else {
             return;
         };
         if rx_pkt.data.len() != PACKET_BYTES {
             return;
         }
-        // The second copy of a packet (direct and relayed) isn't stored
-        if !self
-            .echo
-            .record(txid, landing.packet(), &rx_pkt.data[HEADER_BYTES..])
-        {
+        // The second copy of a packet (any hops) isn't stored
+        if !self.echo.record(txid, packet, &rx_pkt.data[HEADER_BYTES..]) {
             return;
         }
         log::info!(
-            "ECHO rec txid={} seq={} bin={} rssi={} snr={}",
+            "ECHO rec txid={} packet={} hops={} rssi={} snr={}",
             txid,
-            seq,
-            landing.bin,
+            packet,
+            hops,
             rx_pkt.rssi,
             rx_pkt.snr
         );
@@ -719,7 +711,7 @@ impl<P: Platform> App<P> {
         // The replay ends with the echo station's own Ident: whoever hears it
         // learns how far away the station is
         let ident = self.ident();
-        let end = |seq| packet::end(PacketType::EchoEnd, txid, seq, &ident);
+        let end = packet::end(PacketType::EchoEnd, txid, &ident);
         let replay = echo::replay(packets, txid, config::WAKE_PREAMBLE.is_on(), end);
         if let Either::Second(()) = select(replay, discard_rx()).await {
             unreachable!("discard_rx never returns");
@@ -775,22 +767,23 @@ impl<P: Platform> App<P> {
         let wake = config::WAKE_PREAMBLE.is_on();
         let mic = &mut self.devices.mic;
         let codec_tx = &self.codec_tx;
-        let mut seq: u8 = 0;
+        // Every packet's header is the same: its place on the conveyor (its
+        // bin) says which packet it is
+        let header = packet::pack(PacketType::Voice, txid);
         // TODO: pipeline per Codec2 frame, for latency: a packet is 4 frames
         // of 40 ms. Encode each frame as soon as it's captured, while the
         // next is captured, so a packet is ready one frame's encode after its
         // capture ends, not four, and ENCODE_DEADLINE can shrink
-        let mut pending_pkt: Option<([u8; 2], Box<[i16]>)> = None;
+        let mut pending_pkt: Option<Box<[i16]>> = None;
         let mut packets: u64 = 0;
         let mut timing = SendTiming::default();
         while self.devices.ptt.is_pressed() {
-            let header = packet::pack(PacketType::Voice, txid, seq);
             // Voice packet n goes in bin 2(n + 1); the wake-up packet in bin
             // 0. The first on the air (the wake-up packet, else voice packet
             // 0) waits for clear air; after that the bins are ours
             let (pcm, ()) = join(capture_packet(mic), async {
                 match pending_pkt.take() {
-                    Some((header, pcm)) => {
+                    Some(pcm) => {
                         let first_on_air = packets == 1 && !wake;
                         let bin = bin_start(2 * packets);
                         encode_and_send(codec_tx, header, pcm, bin, first_on_air, &mut timing)
@@ -804,11 +797,10 @@ impl<P: Platform> App<P> {
                 }
             })
             .await;
-            pending_pkt = Some((header, pcm));
+            pending_pkt = Some(pcm);
             packets += 1;
-            seq = (seq + 1) & 0x0F; // wrap at 16
         }
-        if let Some((header, pcm)) = pending_pkt {
+        if let Some(pcm) = pending_pkt {
             let first_on_air = packets == 1 && !wake;
             let bin = bin_start(2 * packets);
             encode_and_send(codec_tx, header, pcm, bin, first_on_air, &mut timing).await;
@@ -819,7 +811,7 @@ impl<P: Platform> App<P> {
         // was on the air while a repeater relayed that one, and the repeater
         // never heard it (relayed 1 of 16 EOTs, 3 desk runs 2026-10-04)
         Timer::at(bin_start(2 * (packets + 1))).await;
-        let end = packet::end(PacketType::VoiceEnd, txid, seq, &self.ident());
+        let end = packet::end(PacketType::VoiceEnd, txid, &self.ident());
         TX_CHAN
             .send(TxRequest {
                 data: end,
@@ -1024,6 +1016,29 @@ fn own_name(short_mac: &str) -> heapless::String<NAME_BYTES> {
 /// heard the packet on (wrapping at rx_hops), so a relay never lands on the
 /// channel the packet came in on. Without the sweep flag every radio
 /// listens on the start slot only, so the relay stays where it was heard
+/// A repeater's relay of `rx_pkt`: the same packet with one more hop, on the
+/// next channel (`preamble`: a wake-up's long one). Which channel, or None
+/// once it has had packet::MAX_HOPS
+async fn relay(rx_pkt: &RxPacket, preamble: Option<u16>) -> Option<u8> {
+    let Some(header) = packet::relayed([rx_pkt.data[0], rx_pkt.data[1]]) else {
+        log::info!("RELAY: not relayed, it has had {} hops", packet::MAX_HOPS);
+        return None;
+    };
+    let channel = relay_channel(rx_pkt.channel);
+    let mut data = heapless::Vec::new();
+    let _ = data.extend_from_slice(&header);
+    let _ = data.extend_from_slice(&rx_pkt.data[HEADER_BYTES..]);
+    TX_CHAN
+        .send(TxRequest {
+            data,
+            preamble,
+            channel,
+            clear_air_first: true,
+        })
+        .await;
+    Some(channel)
+}
+
 fn relay_channel(heard_on: u8) -> u8 {
     if !config::SWEEP.is_on() {
         return heard_on;

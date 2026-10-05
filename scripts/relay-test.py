@@ -131,17 +131,6 @@ def by_mode(boards, mode):
     return next((b for b in boards if b.mode.lower() == mode.lower()), None)
 
 
-def unique_in_order(seqs):
-    """Distinct packets in a stream of 4-bit seqs, in arrival order: a step
-    of 1..8 forward is new, anything else is a repeat (e.g. via a relay)."""
-    count, last = 0, None
-    for seq in seqs:
-        if last is None or 1 <= (seq - last) % 16 <= 8:
-            count += 1
-            last = seq
-    return count
-
-
 TX_END = re.compile(
     r"TX end \[26B\] \d+ms: standby=(\d+)us prep=(\d+)us tx=(\d+)us back_to_rx=(\d+)us"
 )
@@ -245,12 +234,12 @@ def transmissions(handheld):
 
 def report_repeater(repeater, txid, sent):
     lines = repeater.lines
-    margins, relayed_seqs, relay_lines = [], [], []
+    margins, relayed_packets, relay_lines = [], set(), []
     for i, (ms, msg) in enumerate(lines):
-        m = re.match(rf"RELAY \[26B\] txid={txid} seq=(\d+)", msg)
+        m = re.match(rf"RELAY \[26B\] txid={txid} packet=(\d+)", msg)
         if not m:
             continue
-        relayed_seqs.append(int(m.group(1)))
+        relayed_packets.add(int(m.group(1)))
         rx_end = next(
             (at_ms(lines[j]) for j in range(i - 1, max(i - 6, -1), -1) if lines[j][1].startswith("RX end [26B]")),
             None,
@@ -264,7 +253,7 @@ def report_repeater(repeater, txid, sent):
         relay_lines.append(lines[done])
         margins.append(rx_end - AIR_MS + PERIOD_MS - at_ms(lines[done]))
     late = sum(1 for m in margins if m < 0)
-    print(f"  repeater relayed  {unique_in_order(relayed_seqs)}/{sent}")
+    print(f"  repeater relayed  {len(relayed_packets)}/{sent}")
     print(f"  late TX margin ms {stats(margins)}  late: {late}")
     for step, values in tx_steps(relay_lines).items():
         print(f"    relay {step:10} {stats(values)}")
@@ -275,18 +264,18 @@ def report_echo(echo, txid, sent):
 
     A gap of 500ms+ in the talker's stream makes the echo replay early, then
     record the rest as a second recording: that's flagged as SPLIT."""
-    seqs, replays = [], []
+    recorded, replays = set(), []
     for _, msg in echo.lines:
-        if m := re.match(r"ECHO rec txid=(\d+) seq=(\d+)", msg):
+        if m := re.match(r"ECHO rec txid=(\d+) packet=(\d+)", msg):
             if int(m.group(1)) == txid:
-                seqs.append(int(m.group(2)))
-            elif seqs:
+                recorded.add(int(m.group(2)))
+            elif recorded:
                 break  # the next transmission
-        elif seqs and (m := re.match(r"ECHO replaying (\d+) packets", msg)):
+        elif recorded and (m := re.match(r"ECHO replaying (\d+) packets", msg)):
             replays.append(int(m.group(1)))
     replayed = sum(replays)
     split = f"  SPLIT into {len(replays)} replays: {'+'.join(map(str, replays))}" if len(replays) > 1 else ""
-    print(f"  echo recorded     {unique_in_order(seqs)}/{sent}, replayed {replayed}{split}")
+    print(f"  echo recorded     {len(recorded)}/{sent}, replayed {replayed}{split}")
     return replayed
 
 
@@ -302,12 +291,12 @@ def report_handheld(handheld, txid, start, after, replayed):
     # still arrives for a moment, relayed back by the repeater)
     # (a split recording comes back as several replays, each its own txid)
     window = lines[release:nxt]
-    echo_seqs = {}
+    echo_packets = {}
     for _, msg in window:
-        m = re.match(r"RX \[26B\] txid=(\d+) seq=(\d+)", msg)
+        m = re.match(r"RX \[26B\] txid=(\d+) packet=(\d+)", msg)
         if m and int(m.group(1)) != txid:
-            echo_seqs.setdefault(int(m.group(1)), []).append(int(m.group(2)))
-    heard = sum(unique_in_order(seqs) for seqs in echo_seqs.values())
+            echo_packets.setdefault(int(m.group(1)), set()).add(int(m.group(2)))
+    heard = sum(len(packets) for packets in echo_packets.values())
     gaps = sum(1 for _, msg in window if msg.startswith("SPK gap"))
     underruns = sum(1 for _, msg in window if msg.startswith("SPK underrun"))
     allocs = [

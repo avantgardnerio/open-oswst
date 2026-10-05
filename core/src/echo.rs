@@ -87,25 +87,20 @@ impl Recorder {
 }
 
 /// Send a recording back out at the pace it was spoken, then the end packet
-/// `end` makes for the seq after the last. With `wake`, a wake-up packet
-/// goes first, in the slot before the audio.
-pub async fn replay(
-    packets: Vec<Payload>,
-    txid: u8,
-    wake: bool,
-    end: impl FnOnce(u8) -> heapless::Vec<u8, 255>,
-) {
+/// `end`. With `wake`, a wake-up packet goes first, in the slot before the
+/// audio.
+pub async fn replay(packets: Vec<Payload>, txid: u8, wake: bool, end: heapless::Vec<u8, 255>) {
     Timer::after_millis(REPLAY_DELAY_MS).await;
     if wake {
         TX_CHAN.send(packet::wake(txid)).await;
     }
 
     let mut ticker = Ticker::every(Duration::from_millis(PACKET_MS));
-    let mut seq = 0u8;
+    let header = packet::pack(PacketType::Echo, txid);
     for payload in &packets {
         ticker.next().await;
         let mut data = heapless::Vec::new();
-        let _ = data.extend_from_slice(&packet::pack(PacketType::Echo, txid, seq));
+        let _ = data.extend_from_slice(&header);
         let _ = data.extend_from_slice(payload);
         TX_CHAN
             .send(TxRequest {
@@ -115,7 +110,6 @@ pub async fn replay(
                 clear_air_first: true,
             })
             .await;
-        seq = (seq + 1) & 0x0F;
     }
 
     // On the beat, a slot after the last packet, like any packet: sent
@@ -124,7 +118,7 @@ pub async fn replay(
     ticker.next().await;
     TX_CHAN
         .send(TxRequest {
-            data: end(seq),
+            data: end,
             preamble: None,
             channel: 0,
             clear_air_first: true,
@@ -153,7 +147,7 @@ mod tests {
 
     #[test]
     fn a_gap_of_any_length_is_filled_with_silence() {
-        // Past the 4-bit seq's wrap: 10 packets missing
+        // Longer than the old 4-bit seq could count: 10 packets missing
         let mut recorder = Recorder::new(SILENCE);
         recorder.record(7, 0, &voice(1));
         recorder.record(7, 11, &voice(2));

@@ -14,12 +14,12 @@ pub struct RxPacket {
     /// 0 = the start slot. Always 0 for a radio that doesn't sweep
     pub channel: u8,
     /// False: our CRC didn't match, so `data` can't be trusted (not even
-    /// its txid or seq). A packet was still on the air at `end_us`, so its
+    /// its txid or hops). A packet was still on the air at `end_us`, so its
     /// timing is real
     pub crc_ok: bool,
     /// When the packet ended on the air: the radio's RX-done IRQ, in µs
-    /// since boot. For now it's read when the radio task wakes for the IRQ,
-    /// so it can run late by however long the task took to be scheduled
+    /// since boot, as the DIO1 interrupt noted it (the radio task's own,
+    /// later, time if no interrupt fired: DIO1 was already high)
     pub end_us: i64,
 }
 

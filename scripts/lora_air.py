@@ -43,7 +43,7 @@ HEADER_BYTES = _const(_codec, "HEADER_BYTES")
 PACKET_BYTES = HEADER_BYTES + CODEC2_FRAME_BYTES * FRAMES_PER_PACKET
 SAMPLE_RATE_HZ = 8000  # Codec2's
 
-# Our 2-byte header's fields, from packet.rs's doc comment: |5b type|7b txid|4b seq|
+# Our 2-byte header's fields, from packet.rs's doc comment: |5b type|7b txid|3b hops|1b spare|
 HEADER_FIELDS = [
     (int(bits), name)
     for bits, name in re.findall(r"(\d+)b (\w+)", re.search(r"//! .*?(\|.*\|)", _source("core/src/packet.rs")).group(1))
