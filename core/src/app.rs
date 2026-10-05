@@ -991,6 +991,14 @@ fn generate_squelch(random: fn() -> u32) -> Arc<[i16]> {
 fn to_speaker(play: Play<Arc<[i16]>>, sounds: &Sounds) {
     let audio = match play {
         Play::Audio(audio) => audio,
+        // Known only once the next packet's audio is back. If the speaker
+        // has run dry by then, it already sat silent through the lost
+        // packet's time: more silence now would play the gap twice and
+        // put everything after it later
+        Play::Silence if SPK_AUDIO.is_empty() => {
+            log::info!("SPK gap: the speaker already ran dry through a lost packet");
+            return;
+        }
         Play::Silence => {
             log::info!("SPK gap: silence for a lost packet");
             sounds.silence.clone()
