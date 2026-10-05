@@ -56,6 +56,45 @@ pub enum Listen {
     Hold,
     /// The air has gone quiet: sweep the channels for the next transmission
     Sweep,
+    /// Listen on a schedule of channels, until told otherwise
+    Rotation(Rotation),
+}
+
+/// A schedule of channels that repeats on a clock: turns of `every_us`,
+/// from `from_us` on, turn n on `channels[n % 2]`. Just times and channels:
+/// the app works out which (a transmission's bins and which hops are on
+/// which channel, conveyor.rs). `from_us` may be long past: the rotation
+/// has been going round since then
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Rotation {
+    /// When turn 0 started, in µs since boot (esp_timer, like
+    /// `RxPacket::end_us`)
+    pub from_us: i64,
+    /// How long each turn lasts, µs
+    pub every_us: u32,
+    /// The channel for even turns, then odd ones: an index into the hop
+    /// channels, like `RxPacket::channel`
+    pub channels: [u8; 2],
+}
+
+impl Rotation {
+    /// The channel to be on at `at_us`
+    pub fn channel_at(&self, at_us: i64) -> u8 {
+        let turn = (at_us - self.from_us).div_euclid(self.every_us as i64);
+        self.channels[turn.rem_euclid(2) as usize]
+    }
+
+    /// When the turn after the one at `at_us` starts
+    pub fn next_turn_us(&self, at_us: i64) -> i64 {
+        let every_us = self.every_us as i64;
+        let turn = (at_us - self.from_us).div_euclid(every_us);
+        self.from_us + (turn + 1) * every_us
+    }
+
+    /// Both turns on the same channel: it never moves
+    pub fn stays(&self) -> bool {
+        self.channels[0] == self.channels[1]
+    }
 }
 
 // Static, ISR-safe
@@ -63,3 +102,33 @@ pub static RX_CHAN: Channel<CriticalSectionRawMutex, RxPacket, 2> = Channel::new
 pub static TX_CHAN: Channel<CriticalSectionRawMutex, TxRequest, 4> = Channel::new();
 /// The latest Listen wins
 pub static LISTEN: Signal<CriticalSectionRawMutex, Listen> = Signal::new();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ROTATION: Rotation = Rotation {
+        from_us: 1_000_000,
+        every_us: 80_000,
+        channels: [3, 4],
+    };
+
+    #[test]
+    fn a_rotation_takes_turns_on_its_channels() {
+        assert_eq!(ROTATION.channel_at(1_000_000), 3);
+        assert_eq!(ROTATION.channel_at(1_079_999), 3);
+        assert_eq!(ROTATION.channel_at(1_080_000), 4);
+        assert_eq!(ROTATION.channel_at(1_160_000), 3);
+        // Long after it started, and before
+        assert_eq!(ROTATION.channel_at(1_000_000 + 1001 * 80_000 + 5), 4);
+        assert_eq!(ROTATION.channel_at(999_999), 4);
+    }
+
+    #[test]
+    fn the_next_turn_is_at_the_next_edge() {
+        assert_eq!(ROTATION.next_turn_us(1_000_000), 1_080_000);
+        assert_eq!(ROTATION.next_turn_us(1_079_999), 1_080_000);
+        assert_eq!(ROTATION.next_turn_us(1_080_000), 1_160_000);
+        assert_eq!(ROTATION.next_turn_us(999_999), 1_000_000);
+    }
+}

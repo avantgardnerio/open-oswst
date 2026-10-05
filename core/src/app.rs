@@ -3,7 +3,7 @@ use crate::devices::knob::{Event as Knob, Knob as _};
 use crate::devices::mic::Mic;
 use crate::devices::network::Network;
 use crate::devices::ptt::Ptt;
-use crate::devices::radio::{Listen, RxPacket, TxRequest, LISTEN, RX_CHAN, TX_CHAN};
+use crate::devices::radio::{Listen, Rotation, RxPacket, TxRequest, LISTEN, RX_CHAN, TX_CHAN};
 use crate::devices::screen::Screen;
 use crate::devices::speaker::{self, MAX_VOLUME, SPK_AUDIO};
 use crate::logger;
@@ -127,6 +127,7 @@ pub async fn init<P: Platform>(
             own_txid: None,
             own_txid_until: Instant::now(),
             last_heard_txid: None,
+            rotation: None,
         },
         sounds: Sounds {
             silence: vec![0i16; PACKET_SAMPLES].into(),
@@ -180,6 +181,7 @@ struct Receiving {
     own_txid: Option<u8>,     // our last transmission's, so we ignore it relayed back
     own_txid_until: Instant,  // until then: our relayed copies only come back for a moment
     last_heard_txid: Option<u8>, // the last transmission heard: a new one of ours never takes it
+    rotation: Option<Rotation>, // the last rotation the radio was told to listen on, if it still is
 }
 
 /// Audio built once at boot, played as-is
@@ -281,7 +283,7 @@ impl<P: Platform> App<P> {
             && quiet_since.elapsed() > RX_TIMEOUT
             && self.swept_after != Some(quiet_since)
         {
-            LISTEN.signal(Listen::Sweep);
+            self.listen(Listen::Sweep);
             self.swept_after = Some(quiet_since);
         }
 
@@ -382,6 +384,7 @@ impl<P: Platform> App<P> {
         } else {
             self.ride_conveyor(&rx_pkt, pkt_type, txid, hops)
         };
+        self.listen_to_conveyor();
 
         // Only wakes up radios that are sweeping: nothing to play. A repeater
         // passes it on (its first copy: it's the transmission's packet 0), so
@@ -590,6 +593,32 @@ impl<P: Platform> App<P> {
         from_base.unwrap_or(((rx_pkt.channel as u32 + 1) % channel_count() as u32) as u8)
     }
 
+    /// Tell the radio how to listen, and remember it
+    fn listen(&mut self, listen: Listen) {
+        self.rx.rotation = match listen {
+            Listen::Rotation(rotation) => Some(rotation),
+            Listen::Hold | Listen::Sweep => None,
+        };
+        LISTEN.signal(listen);
+    }
+
+    /// The radio listens on the conveyor's rotation: a new one whenever it
+    /// changes (the conveyor started, its time or base channel settled).
+    /// Only a few times a transmission: the radio turns at each bin itself
+    fn listen_to_conveyor(&mut self) {
+        let repeater = mode::get() == Mode::Repeater;
+        let rotation = self
+            .rx
+            .transmission
+            .as_ref()
+            .and_then(|transmission| transmission.rotation(repeater));
+        if let Some(rotation) = rotation {
+            if self.rx.rotation != Some(rotation) {
+                self.listen(Listen::Rotation(rotation));
+            }
+        }
+    }
+
     /// Is `landing` the first copy of its packet on the conveyor? Then it's
     /// taken (to play or relay). Not for a packet that isn't the
     /// transmission's, or has no number (the wrong bin for its hops)
@@ -731,7 +760,7 @@ impl<P: Platform> App<P> {
     async fn replay_echo(&mut self) {
         let talker_txid = self.echo.txid();
         let packets = self.echo.take();
-        LISTEN.signal(Listen::Hold);
+        self.listen(Listen::Hold);
         log::info!("ECHO replaying {} packets", packets.len());
         self.draw_screen(Activity::Transmitting);
         // Drop anything heard while we transmit it, as it comes: like on_ptt.
@@ -764,7 +793,7 @@ impl<P: Platform> App<P> {
         self.rx.playout.reset();
         self.rx.playing_txid = None;
         self.rx.transmission = None;
-        LISTEN.signal(Listen::Hold);
+        self.listen(Listen::Hold);
 
         let txid = self.new_txid(None);
         self.rx.own_txid = Some(txid);

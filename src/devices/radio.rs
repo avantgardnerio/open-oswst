@@ -16,7 +16,9 @@ use super::radio_bus::{self, RadioSpi};
 use open_oswst_core::air;
 use open_oswst_core::codec::PACKET_BYTES;
 use open_oswst_core::crc;
-pub use open_oswst_core::devices::radio::{Listen, RxPacket, TxRequest, LISTEN, RX_CHAN, TX_CHAN};
+pub use open_oswst_core::devices::radio::{
+    Listen, Rotation, RxPacket, TxRequest, LISTEN, RX_CHAN, TX_CHAN,
+};
 
 type Radio = LoRa<Sx126x<RadioSpi, radio_bus::Interface, Sx1262>, embassy_time::Delay>;
 
@@ -69,32 +71,6 @@ const CAD_SETTINGS: (CADSymbols, u8, u8) = (CADSymbols::_2, 22, 10);
 /// in STDBY_RC, which stops the TCXO, so each channel waits this. lora-phy's
 /// default is 10ms; 2ms is the TCXO's datasheet maximum (KDS DSB321SDN)
 const TCXO_WAKEUP_US: u32 = 2_000;
-
-/// Following a transmission on two channels (Follow): a repeater's relay
-/// goes on the air this long after the packet it relays ends (RX done to
-/// relay on air, desk median 2026-10-04: 8.5ms)
-const RELAY_GAP: Duration = Duration::from_micros(8_500);
-/// Following: no packet on the first channel by this long after its slot
-/// began, move on to the second anyway
-const MISSED_A: Duration = Duration::from_millis(80);
-/// Following: after a packet on the first channel, wait this long before
-/// moving to the second. A repeater's own relay request comes in ~4.7ms
-/// and goes first (switching straight away cost it 2.5ms of slack on the
-/// desk); the relay's 12-symbol preamble starts ~8.5ms after the packet
-/// and lasts ~12ms, plenty for a receiver that's moved by ~7.5ms
-const SWITCH_AFTER: Duration = Duration::from_millis(6);
-/// Following: back on the first channel this long before the next slot,
-/// relay heard or not
-const BACK_BEFORE_NEXT: Duration = Duration::from_millis(10);
-
-/// One packet's air time: every packet we send takes this (voice, wake, end)
-fn packet_air() -> Duration {
-    Duration::from_micros(air::packet_us(PREAMBLE_SYMBOLS, PACKET_BYTES) as u64)
-}
-
-fn slot() -> Duration {
-    Duration::from_micros(air::slot_us() as u64)
-}
 
 /// Sweeping: a hit with no header within this was a false alarm (or a
 /// voice packet's short preamble, caught too late to receive it): back to
@@ -218,7 +194,6 @@ pub async fn init(
         sweep,
         state,
         sweep_stats: SweepStats::default(),
-        follow_stats: FollowStats::default(),
     };
     async move { driver.run().await }
 }
@@ -240,7 +215,6 @@ struct Driver {
     sweep: Vec<ModulationParams>, // channels to sweep while idle; empty: don't
     state: State,
     sweep_stats: SweepStats,
-    follow_stats: FollowStats,
 }
 
 /// How the radio listens. With sweep channels, the app moves it between
@@ -254,43 +228,16 @@ enum State {
     /// CAD (any TX or RX in between undoes that)
     Sweeping { next: usize, ready: bool },
     /// RX on sweep channel `channel`: a CAD hit there at `hit_at`, or the
-    /// app said Hold (channel 0, the start slot). `heard`: a packet handed
-    /// to the app since, or the app's Hold: then it stays until the app says
-    /// Sweep. `follow`: once heard, every slot we listen on two channels
-    /// (`channel` is whichever we're on now)
+    /// app said Hold (channel 0, the start slot) or gave us a rotation.
+    /// `heard`: a packet handed to the app since, or the app's word: then it
+    /// stays until the app says Sweep. `rotation`: the app's schedule of
+    /// channels, bin by bin (`channel` is whichever we're on now)
     Locked {
         channel: usize,
         hit_at: Instant,
         heard: bool,
-        follow: Option<Follow>,
+        rotation: Option<Rotation>,
     },
-}
-
-/// Hearing a transmission twice a slot: each packet on channel `a` (from
-/// the talker), then its relay on `b`, the next channel (from a repeater),
-/// whichever of them we hear. Both copies of every packet: the app plays
-/// the first and drops the other (the same packet), so a packet is lost only if
-/// both are. The walk of 2026-10-04 locked onto the weak direct copy while
-/// the repeater's was 40dB stronger on the next channel.
-///
-/// ```text
-/// slot start      +66        +74           +141   +150 +160
-/// [packet n on a ]  ->b      [relay n on b ]  ->a      [packet n+1 on a
-/// ```
-///
-/// Talkers send on the start slot (tx_hops 0), so a = 0, b = 1; a radio
-/// that locked on a later relay channel c follows c-1 and c, the two
-/// copies it can hear. Every packet that ends re-anchors the slot
-#[derive(Clone, Copy)]
-struct Follow {
-    a: usize,
-    b: usize,
-    /// When the copy on `a` of the current slot began (or would have)
-    slot_start: Instant,
-    got_a: bool, // this slot
-    got_b: bool,
-    /// Got the copy on `a`: when to move to `b` for the relay (SWITCH_AFTER)
-    switch_at: Option<Instant>,
 }
 
 /// The sweep since the last log line
@@ -301,42 +248,6 @@ struct SweepStats {
     max_check_us: u32,
     hits: u32,
     false_alarms: u32,
-}
-
-/// Following, since the last log line: which copies each slot brought
-#[derive(Default)]
-struct FollowStats {
-    slots: u32,
-    a_only: u32,
-    b_only: u32,
-    both: u32,
-    neither: u32,
-}
-
-impl FollowStats {
-    fn count(&mut self, follow: &Follow) {
-        self.slots += 1;
-        match (follow.got_a, follow.got_b) {
-            (true, true) => self.both += 1,
-            (true, false) => self.a_only += 1,
-            (false, true) => self.b_only += 1,
-            (false, false) => self.neither += 1,
-        }
-    }
-
-    fn log_and_reset(&mut self) {
-        if self.slots > 0 {
-            log::info!(
-                "FOLLOW: {} slots, both {}, first only {}, relay only {}, neither {}",
-                self.slots,
-                self.both,
-                self.a_only,
-                self.b_only,
-                self.neither
-            );
-        }
-        *self = FollowStats::default();
-    }
 }
 
 /// What's on the air, as far as this radio can tell
@@ -370,14 +281,14 @@ impl Driver {
                 self.sweep_step(next, ready).await;
                 continue;
             }
-            // Locked: the timer also wakes us for a false alarm, or to move
-            // between the two channels we follow
+            // Locked: the timer also wakes us for a false alarm, or for the
+            // rotation's next turn
             let mut wake = next_rx_state;
-            for at in [self.false_alarm_at(), self.follow_deadline()]
+            for at in [self.false_alarm_at().map(deadline), self.turn_at()]
                 .into_iter()
                 .flatten()
             {
-                wake = wake.min(deadline(at));
+                wake = wake.min(at);
             }
             match select4(
                 self.lora.wait_for_irq(),
@@ -395,10 +306,10 @@ impl Driver {
                         self.on_false_alarm();
                     }
                     if self
-                        .follow_deadline()
-                        .is_some_and(|at| Instant::now() >= at)
+                        .turn_at()
+                        .is_some_and(|at| embassy_time::Instant::now() >= at)
                     {
-                        self.on_follow_deadline().await;
+                        self.on_turn().await;
                     }
                     if embassy_time::Instant::now() >= next_rx_state {
                         next_rx_state += every;
@@ -446,7 +357,7 @@ impl Driver {
             channel: next,
             hit_at: Instant::now(),
             heard: false,
-            follow: None,
+            rotation: None,
         };
         self.resume_listening().await;
     }
@@ -461,9 +372,48 @@ impl Driver {
                     channel: 0,
                     hit_at: Instant::now(),
                     heard: true,
-                    follow: None,
+                    rotation: None,
                 };
                 self.resume_listening().await;
+            }
+            (Listen::Rotation(rotation), _)
+                if rotation
+                    .channels
+                    .iter()
+                    .any(|&channel| channel as usize >= self.sweep.len()) =>
+            {
+                log::warn!(
+                    "LISTEN rotation on channels {:?}: we only have {}, ignored",
+                    rotation.channels,
+                    self.sweep.len()
+                );
+            }
+            (Listen::Rotation(rotation), state) => {
+                log::info!(
+                    "LISTEN rotation: channels {} and {}, turns of {}us from {}us",
+                    rotation.channels[0],
+                    rotation.channels[1],
+                    rotation.every_us,
+                    rotation.from_us
+                );
+                // Already listening: stay on this channel until the air's
+                // free, then the turn moves us (turn_at). Sweeping: start
+                // straight on the rotation's channel
+                let on = match state {
+                    State::Locked { channel, .. } => Some(channel),
+                    _ => None,
+                };
+                let channel = rotation.channel_at(uptime_us()) as usize;
+                self.state = State::Locked {
+                    channel: on.unwrap_or(channel),
+                    hit_at: Instant::now(),
+                    heard: true,
+                    rotation: Some(rotation),
+                };
+                if on.is_none() {
+                    self.air = Air::Clear;
+                    self.resume_listening().await;
+                }
             }
             (Listen::Sweep, State::Sweeping { .. }) => {}
             (Listen::Sweep, State::Locked { channel, .. }) => {
@@ -530,8 +480,6 @@ impl Driver {
         };
         let state = self.lora.get_irq_state().await;
         self.air = Air::after(&state);
-        let packet_ended = matches!(state, Ok(Some(IrqState::Done)));
-        let mut good_packet = false;
         match state {
             Ok(Some(IrqState::PreambleReceived)) => {
                 self.header_us = None;
@@ -548,7 +496,7 @@ impl Driver {
                 // then nothing would ever unlock us: leave those to the false
                 // alarm timer
                 let header_us = self.header_us.take();
-                good_packet = self
+                let good_packet = self
                     .receive(header_at, header_us, irq_us, task_late_us)
                     .await;
                 if good_packet {
@@ -565,133 +513,50 @@ impl Driver {
         // right after the preamble) stays set and fires again. RX continuous
         // keeps running, so there's nothing to set up again.
         self.lora.clear_irq_flags_read().await.unwrap();
-        // Good or bad CRC, a packet ended now: the slot's timing is known
-        if packet_ended {
-            self.on_follow_packet(good_packet).await;
-        }
     }
 
-    /// Following, when to move channel: off the first channel once its
-    /// packet is overdue, off the second just before the next slot. Never
-    /// while a packet is arriving
-    fn follow_deadline(&self) -> Option<Instant> {
+    /// On a rotation, when to turn: at the next bin's edge, or now if we're
+    /// not on the channel it says (just given it, or back from sending).
+    /// Never while a packet is arriving: it finishes first. Senders put
+    /// packets in the middle of their bins, so one ends a guard (7.1 ms)
+    /// before the edge
+    fn turn_at(&self) -> Option<embassy_time::Instant> {
         let State::Locked {
             channel,
-            follow: Some(follow),
+            rotation: Some(rotation),
             ..
         } = self.state
         else {
             return None;
         };
-        let at = if channel == follow.a {
-            follow.switch_at.unwrap_or(follow.slot_start + MISSED_A)
+        let now_us = uptime_us();
+        let at_us = if rotation.channel_at(now_us) as usize != channel {
+            now_us
+        } else if rotation.stays() {
+            return None;
         } else {
-            follow.slot_start + slot() - BACK_BEFORE_NEXT
+            rotation.next_turn_us(now_us)
         };
-        Some(self.air.busy_until().map_or(at, |busy| at.max(busy)))
+        let at = embassy_time::Instant::from_micros(at_us.max(0) as u64);
+        Some(match self.air.busy_until() {
+            Some(busy) => at.max(deadline(busy)),
+            None => at,
+        })
     }
 
-    /// A packet ended on the channel we're on. Once a transmission is ours
-    /// (heard), a good packet starts following it on two channels; then each
-    /// packet, good or garbled, sets the slot's timing and sends us to the
-    /// other channel. A garbled packet never starts a follow (receive says
-    /// why), not even while the app holds us on the start slot
-    async fn on_follow_packet(&mut self, good: bool) {
-        let State::Locked {
-            channel,
-            heard: true,
-            follow,
-            ..
-        } = self.state
-        else {
-            return;
-        };
-        let mut follow = match follow {
-            Some(follow) => follow,
-            None if !good => return,
-            None => {
-                // Talkers send on channel 0 (tx_hops 0), relays on 1. Locked
-                // on a later relay channel, the copies we can hear are on
-                // that one and the one before
-                let a = channel.saturating_sub(1);
-                let b = a + 1;
-                if b >= self.sweep.len() {
-                    return;
-                }
-                log::info!("FOLLOW channels {} and {}", a, b);
-                Follow {
-                    a,
-                    b,
-                    slot_start: Instant::now(),
-                    got_a: false,
-                    got_b: false,
-                    switch_at: None,
-                }
-            }
-        };
-        let now = Instant::now();
-        if channel == follow.a {
-            // Its relay comes next, on b: move there shortly (SWITCH_AFTER)
-            follow.slot_start = now.checked_sub(packet_air()).unwrap_or(now);
-            follow.got_a = true;
-            follow.switch_at = Some(now + SWITCH_AFTER);
-            self.follow_to(follow.a, follow).await;
-        } else if channel == follow.b {
-            // That was the relay: the slot is over, back to a for the next
-            let began = packet_air() + RELAY_GAP + packet_air();
-            follow.slot_start = now.checked_sub(began).unwrap_or(now);
-            follow.got_b = true;
-            self.next_slot(follow).await;
-        }
-    }
-
-    /// A deadline passed with no packet: move on to the other channel
-    async fn on_follow_deadline(&mut self) {
-        let State::Locked {
-            channel,
-            follow: Some(follow),
-            ..
-        } = self.state
-        else {
-            return;
-        };
-        if channel == follow.a {
-            self.follow_to(follow.b, follow).await;
-        } else {
-            self.next_slot(follow).await;
-        }
-    }
-
-    /// The slot is over: count what it brought, then the first channel for
-    /// the next one
-    async fn next_slot(&mut self, mut follow: Follow) {
-        self.follow_stats.count(&follow);
-        follow.slot_start += slot();
-        follow.got_a = false;
-        follow.got_b = false;
-        follow.switch_at = None;
-        self.follow_to(follow.a, follow).await;
-    }
-
-    /// Listen on `channel` now, still following (already there: nothing
-    /// to set up)
-    async fn follow_to(&mut self, channel: usize, follow: Follow) {
+    /// The rotation's turn: on to the channel it says for now
+    async fn on_turn(&mut self) {
         let State::Locked {
             channel: on,
-            hit_at,
-            heard,
+            rotation: Some(rotation),
             ..
-        } = self.state
+        } = &mut self.state
         else {
             return;
         };
-        self.state = State::Locked {
-            channel,
-            hit_at,
-            heard,
-            follow: Some(follow),
-        };
-        if channel != on {
+        let channel = rotation.channel_at(uptime_us()) as usize;
+        if channel != *on {
+            *on = channel;
             self.air = Air::Clear;
             self.resume_listening().await;
         }
@@ -707,12 +572,10 @@ impl Driver {
     }
 
     /// A packet arrived: read it out and hand it to the app, flagged if its
-    /// CRC failed. True only for a good packet: only a good packet starts
-    /// following a transmission. A garbled one never does: at point-blank
-    /// range a repeater's relay on the next channel arrived garbled but of
-    /// our length, and a follow anchored on it listened to the wrong channel
-    /// all transmission (bench 2026-10-05). Once following, a garbled packet
-    /// changes nothing: the lock holds until the app says the air is quiet
+    /// CRC failed. True only for a good packet: only a good packet keeps a
+    /// lock (a garbled one might not be ours: at point-blank range a
+    /// repeater's relay on the next channel arrived garbled but of our
+    /// length, bench 2026-10-05)
     /// `task_late_us`: how long after the interrupt the radio task got to it,
     /// None if no interrupt fired (and `irq_us` is the task's own time)
     /// `header_us`: when its header IRQ fired, if we saw it: the time from
@@ -792,24 +655,6 @@ impl Driver {
     async fn on_tx(&mut self, tx_req: TxRequest) {
         if tx_req.clear_air_first {
             self.wait_for_clear_air().await;
-        }
-        // Following: after our own transmission (a repeater's relay, in the
-        // window the other copy would have used), back to the first channel
-        // straight away, ready for the next slot
-        if let State::Locked {
-            follow: Some(follow),
-            channel,
-            ..
-        } = &mut self.state
-        {
-            *channel = follow.a;
-            if follow.got_a {
-                self.follow_stats.count(follow);
-                follow.slot_start += slot();
-                follow.got_a = false;
-                follow.got_b = false;
-                follow.switch_at = None;
-            }
         }
         self.transmit(
             &tx_req.data,
@@ -1021,7 +866,6 @@ impl Driver {
     /// the packet, not the noise floor, so skip it then. Sweeping, the chip
     /// isn't receiving: the sweep's numbers instead.
     async fn on_rx_state_due(&mut self) {
-        self.follow_stats.log_and_reset();
         if let State::Sweeping { .. } = self.state {
             self.sweep_stats.log_and_reset(self.sweep.len());
         } else if self.air.busy_until().is_none() {
@@ -1030,8 +874,17 @@ impl Driver {
     }
 
     /// Back to listening after a TX or a lock: RX on our channel, or on the
-    /// one locked onto. Sweeping needs nothing now; the next CAD sets up.
+    /// one locked onto (on a rotation, the one it says for now). Sweeping
+    /// needs nothing now; the next CAD sets up.
     async fn resume_listening(&mut self) {
+        if let State::Locked {
+            channel,
+            rotation: Some(rotation),
+            ..
+        } = &mut self.state
+        {
+            *channel = rotation.channel_at(uptime_us()) as usize;
+        }
         let channel = match self.state {
             State::Fixed => &self.mdltn,
             State::Locked { channel, .. } => &self.sweep[channel],

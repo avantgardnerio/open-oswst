@@ -21,6 +21,7 @@
 
 use crate::air;
 use crate::codec::PACKET_BYTES;
+use crate::devices::radio::Rotation;
 use core::fmt;
 
 /// How far from the middle of its bin a packet may start and still be on
@@ -105,10 +106,16 @@ pub struct Transmission {
     /// How many hop channels there are (1: a radio that doesn't sweep)
     channels: u8,
     /// The talker's channel: hop h is on base + h (round the channels).
-    /// Worked out from the first packet whose timing we trust (channel heard
-    /// on - hops), never assumed: a skewed packet was decoded off its
-    /// channel, so its channel says nothing
+    /// Worked out from the packets, never assumed: each one whose timing we
+    /// trust votes for channel heard on - hops (vote_for_base). A skewed
+    /// packet was decoded off its channel, so its channel says nothing
     base_channel: Option<u8>,
+    /// The base channel's lead in the vote
+    base_lead: u16,
+    /// The hops we listen for first: the first good packet's. Its copies
+    /// are in the bins of its hops' parity (bin 2n + hops); the other bins
+    /// carry the next hop or the one before (rotation)
+    primary_hops: u8,
     /// The belt's time came from a packet whose timing we trust. False while
     /// it's started from a skewed one: the first trusted packet sets it
     anchored: bool,
@@ -138,13 +145,15 @@ impl Transmission {
             conveyor,
             channels: channels.max(1),
             base_channel: None,
+            base_lead: 0,
+            primary_hops: hops,
             anchored: timing_ok,
             last_bin: landing.bin,
             last_taken: None,
             tally: Tally::default(),
         };
         if timing_ok {
-            transmission.base_channel = Some(transmission.base(channel, hops));
+            transmission.vote_for_base(channel, hops);
             transmission.tally.good(landing, hops);
         } else {
             transmission.tally.skewed += 1;
@@ -157,8 +166,8 @@ impl Transmission {
     /// `channel` (its txid says it's ours, so it counts even off the belt):
     /// where it landed. With skewed timing it keeps the transmission going
     /// but gets no number. The first trusted packet on a belt started from a
-    /// skewed one sets the belt's time, keeping the bin it was nearest, and
-    /// the base channel
+    /// skewed one sets the belt's time, keeping the bin it was nearest. Each
+    /// trusted one votes for the base channel
     pub fn heard(&mut self, end_us: i64, hops: u8, channel: u8, timing_ok: bool) -> Landing {
         let mut landing = self.conveyor.landing(end_us, Some(hops));
         if !timing_ok {
@@ -172,9 +181,7 @@ impl Transmission {
             self.anchored = true;
             landing = self.conveyor.landing(end_us, Some(hops));
         }
-        if self.base_channel.is_none() {
-            self.base_channel = Some(self.base(channel, hops));
-        }
+        self.vote_for_base(channel, hops);
         self.last_bin = self.last_bin.max(landing.bin);
         self.tally.good(landing, hops);
         landing
@@ -197,15 +204,57 @@ impl Transmission {
         landing.on_belt()
     }
 
+    /// Where to listen, bin by bin: the primary hops' channel in their bins,
+    /// and in the other bins the secondary's, one hop either side: the
+    /// repeater before, or at the talker (0 hops) the first repeater. A
+    /// repeater listens for its primary only: in the other bins it's
+    /// sending. None until the belt's time and the base channel are known
+    pub fn rotation(&self, repeater: bool) -> Option<Rotation> {
+        if !self.anchored {
+            return None;
+        }
+        let primary = self.channel_of(self.primary_hops)?;
+        let secondary_hops = match self.primary_hops {
+            _ if repeater => self.primary_hops,
+            0 => 1,
+            hops => hops - 1,
+        };
+        let secondary = self.channel_of(secondary_hops)?;
+        let channels = if self.primary_hops.is_multiple_of(2) {
+            [primary, secondary]
+        } else {
+            [secondary, primary]
+        };
+        Some(Rotation {
+            from_us: self.conveyor.bin_start(0),
+            every_us: air::bin_us(),
+            channels,
+        })
+    }
+
     /// The channel hop `hops` is on, once a trusted packet has told us
     pub fn channel_of(&self, hops: u8) -> Option<u8> {
         let base = self.base_channel?;
         Some(((base as u32 + hops as u32) % self.channels as u32) as u8)
     }
 
-    /// The talker's channel, from a packet heard on `channel` after `hops`
-    fn base(&self, channel: u8, hops: u8) -> u8 {
-        (channel as i32 - hops as i32).rem_euclid(self.channels as i32) as u8
+    /// A trusted packet heard on `channel` after `hops` votes for the
+    /// talker's channel being channel - hops. A running majority (two
+    /// fields, no list): the same vote adds to the lead, another takes one
+    /// away, and with no lead left the next vote wins. Not just the first
+    /// packet's word: at point-blank range a talker gets in on a channel MHz
+    /// away with its timing true (the echo's sweep stopped on channel 1 and
+    /// heard a direct packet, desk 2026-10-05), and the next few outvote it
+    fn vote_for_base(&mut self, channel: u8, hops: u8) {
+        let vote = (channel as i32 - hops as i32).rem_euclid(self.channels as i32) as u8;
+        if self.base_lead == 0 {
+            self.base_channel = Some(vote);
+            self.base_lead = 1;
+        } else if self.base_channel == Some(vote) {
+            self.base_lead = self.base_lead.saturating_add(1);
+        } else {
+            self.base_lead -= 1;
+        }
     }
 
     /// EMPTY_BINS_TO_END bins have gone by empty since the last one that
@@ -452,9 +501,70 @@ mod tests {
         assert_eq!(transmission.channel_of(0), None);
         transmission.heard(ends(1, 0), 1, 1, true);
         assert_eq!(transmission.channel_of(0), Some(0));
-        // A later packet doesn't move it
-        transmission.heard(ends(2, 0), 0, 3, true);
+    }
+
+    #[test]
+    fn a_stray_channel_is_outvoted() {
+        // The desk run of 2026-10-05: the echo's sweep stopped on channel 1
+        // and heard the talker's packet 0 there, timing true
+        let (mut transmission, _) = Transmission::start(42, CHANNELS, FIRST_END, 0, 1, true);
+        assert_eq!(transmission.channel_of(0), Some(1));
+        // Then its relay (hops 1 on channel 1), packet 1 direct on channel 0
+        transmission.heard(ends(1, 0), 1, 1, true);
+        assert_eq!(transmission.channel_of(0), Some(1)); // a tie: it stands
+        transmission.heard(ends(2, 0), 0, 0, true);
         assert_eq!(transmission.channel_of(0), Some(0));
+        // One more stray doesn't move it back
+        transmission.heard(ends(3, 0), 1, 3, true);
+        transmission.heard(ends(4, 0), 0, 0, true);
+        transmission.heard(ends(5, 0), 1, 2, true);
+        assert_eq!(transmission.channel_of(0), Some(0));
+    }
+
+    #[test]
+    fn the_rotation_listens_for_each_bins_hops() {
+        // Heard the talker first (on channel 2): its packets in the even
+        // bins, the first repeater's relays (channel 3) in the odd ones
+        let direct = Transmission::start(42, CHANNELS, FIRST_END, 0, 2, true).0;
+        let rotation = direct.rotation(false).unwrap();
+        assert_eq!(rotation.channels, [2, 3]);
+        assert_eq!(rotation.every_us, BIN as u32);
+        // Turns start at the bins' edges, a guard before their packets
+        assert_eq!(rotation.from_us, FIRST_END - AIR - GUARD);
+        assert_eq!(rotation.channel_at(ends(4, 0) - 1), 2);
+        assert_eq!(rotation.channel_at(ends(5, 0) - 1), 3);
+        // Heard a second repeater first (hops 2, channel 4): its relays in
+        // the even bins, the first repeater's (channel 3) in the odd ones
+        let far = Transmission::start(42, CHANNELS, FIRST_END, 2, 4, true).0;
+        assert_eq!(far.rotation(false).unwrap().channels, [4, 3]);
+        // Heard the first repeater first: its relays in the odd bins
+        let relayed = Transmission::start(42, CHANNELS, FIRST_END, 1, 3, true).0;
+        assert_eq!(relayed.rotation(false).unwrap().channels, [2, 3]);
+        // The same belt, whichever copy started it
+        assert_eq!(
+            relayed.rotation(false).unwrap().from_us,
+            Transmission::start(42, CHANNELS, ends(-1, 0), 0, 2, true)
+                .0
+                .rotation(false)
+                .unwrap()
+                .from_us
+        );
+    }
+
+    #[test]
+    fn a_repeater_listens_for_its_primary_only() {
+        let transmission = Transmission::start(42, CHANNELS, FIRST_END, 0, 2, true).0;
+        let rotation = transmission.rotation(true).unwrap();
+        assert_eq!(rotation.channels, [2, 2]);
+        assert!(rotation.stays());
+    }
+
+    #[test]
+    fn no_rotation_until_the_belts_time_is_trusted() {
+        let (mut transmission, _) = Transmission::start(42, CHANNELS, ends(0, 28_000), 0, 1, false);
+        assert_eq!(transmission.rotation(false), None);
+        transmission.heard(ends(1, 0), 1, 1, true);
+        assert_eq!(transmission.rotation(false).unwrap().channels, [0, 1]);
     }
 
     #[test]
