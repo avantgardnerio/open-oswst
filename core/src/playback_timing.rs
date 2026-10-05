@@ -8,9 +8,9 @@
 //! - wait: how long the app waited for the decoded audio, from asking to
 //!   getting it (the codec time plus however long the codec thread took to
 //!   get scheduled)
-//! - queued: speaker frames still waiting when the decoded packet arrived,
-//!   i.e. how much audio was left before a gap. 0 = the speaker was about to
-//!   run dry (or already had)
+//! - queued: packets of audio still waiting for the speaker when the decoded
+//!   packet arrived, not counting the one playing: how much audio was left
+//!   before a gap. 0 = only the playing packet (up to 160 ms) was left
 //!
 //! Underruns are counted by the speaker driver.
 
@@ -88,14 +88,14 @@ struct Summary {
 }
 
 /// e.g. `Playback: 42 packets, codec p50/max 31.2/48.0ms, wait p50/max
-/// 33.0/120.4ms, queued min/p50 0/3 frames, underruns 2 (138ms)`
+/// 33.0/120.4ms, queued min/p50 0/3 packets, underruns 2 (138ms)`
 impl fmt::Display for Summary {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let ms = |us: u32| us as f32 / 1000.0;
         write!(
             f,
             "Playback: {} packets, codec p50/max {:.1}/{:.1}ms, wait p50/max {:.1}/{:.1}ms, \
-             queued min/p50 {}/{} frames, underruns {} ({}ms)",
+             queued min/p50 {}/{} packets, underruns {} ({}ms)",
             self.packets,
             ms(self.codec_us.0),
             ms(self.codec_us.1),
@@ -132,7 +132,7 @@ mod tests {
         assert_eq!(
             timing.summary(2, 138).to_string(),
             "Playback: 4 packets, codec p50/max 32.0/48.0ms, wait p50/max 33.0/120.4ms, \
-             queued min/p50 1/3 frames, underruns 2 (138ms)"
+             queued min/p50 1/3 packets, underruns 2 (138ms)"
         );
     }
 

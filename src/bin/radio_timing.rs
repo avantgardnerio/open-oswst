@@ -46,7 +46,7 @@ use lora_phy::sx126x::{self, Sx1262, Sx126x, TcxoCtrlVoltage};
 use lora_phy::LoRa;
 use open_oswst::board;
 use open_oswst::devices::{fem, radio};
-use open_oswst_core::codec::{self, CodecRequest, CODEC2_FRAME_SAMPLES, CODEC_REPLY};
+use open_oswst_core::codec::{self, CodecRequest, CODEC2_FRAME_SAMPLES, DECODED, ENCODED};
 use open_oswst_core::codec::{FRAMES_PER_PACKET, PAYLOAD_BYTES};
 use open_oswst_core::packet;
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
@@ -195,11 +195,11 @@ fn feed_codec(codec_tx: std::sync::mpsc::SyncSender<CodecRequest>) {
             codec_tx
                 .send(CodecRequest::encode([0; 2], pcm.clone().into()))
                 .unwrap();
-            block_on(CODEC_REPLY.receive());
+            block_on(ENCODED.receive());
             codec_tx
                 .send(CodecRequest::decode(0, 0, [0x55; PAYLOAD_BYTES]))
                 .unwrap();
-            block_on(CODEC_REPLY.receive());
+            block_on(DECODED.receive());
             CODEC_US.store(start.elapsed().as_micros() as u32, Ordering::Relaxed);
         }
         std::thread::sleep(std::time::Duration::from_millis(160));

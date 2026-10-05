@@ -9,7 +9,7 @@ use esp_idf_svc::hal::i2s::{I2sDriver, I2sTx, I2S0};
 
 // The queues and volume the app talks to; this driver plays them over I2S
 pub use open_oswst_core::devices::speaker::{
-    note_underrun, scale, set_volume, volume, MAX_VOLUME, SPK_FRAMES, SPK_REQ,
+    note_underrun, scale, set_volume, volume, FRAME_SAMPLES, MAX_VOLUME, SPK_AUDIO,
 };
 
 pub struct Peripherals {
@@ -54,27 +54,28 @@ pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
     }
 }
 
+/// Play SPK_AUDIO back to back, a 40 ms frame at a time: each write waits
+/// for a DMA buffer to come free, so the I2S clock sets the pace. Dry, it
+/// waits for the next audio, and the DMA plays silence meanwhile
 async fn speaker_loop(mut i2s_tx: I2sDriver<'_, I2sTx>) {
     let mut last_frame = std::time::Instant::now();
     let mut scaled: Vec<i16> = Vec::new();
     loop {
-        // Underrun: mid-stream (a frame played recently) but the queue was
-        // empty, so the DMA ran dry waiting for the next frame
-        let starved = SPK_FRAMES.is_empty();
+        // Underrun: mid-stream (a frame played recently) but nothing was
+        // queued, so the DMA ran dry waiting for the next audio
+        let starved = SPK_AUDIO.is_empty();
         let wait_start = std::time::Instant::now();
-        let frame = SPK_FRAMES.receive().await;
+        let audio = SPK_AUDIO.receive().await;
         let waited = wait_start.elapsed().as_millis();
         if starved && last_frame.elapsed().as_millis() < 500 && waited > 5 {
             log::warn!("SPK underrun: waited {}ms for next frame", waited);
             note_underrun(waited as u32);
         }
-        last_frame = std::time::Instant::now();
 
-        scale(&frame, &mut scaled);
-        i2s_tx.write_async(pcm_as_bytes(&scaled)).await.unwrap();
-
-        if SPK_FRAMES.len() <= 1 {
-            let _ = SPK_REQ.try_send(());
+        for frame in audio.chunks(FRAME_SAMPLES) {
+            scale(frame, &mut scaled);
+            i2s_tx.write_async(pcm_as_bytes(&scaled)).await.unwrap();
         }
+        last_frame = std::time::Instant::now();
     }
 }

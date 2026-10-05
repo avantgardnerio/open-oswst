@@ -5,7 +5,7 @@ use crate::devices::network::Network;
 use crate::devices::ptt::Ptt;
 use crate::devices::radio::{Listen, RxPacket, TxRequest, LISTEN, RX_CHAN, TX_CHAN};
 use crate::devices::screen::Screen;
-use crate::devices::speaker::{self, MAX_VOLUME, SPK_FRAMES, SPK_REQ};
+use crate::devices::speaker::{self, MAX_VOLUME, SPK_AUDIO};
 use crate::logger;
 use crate::platform::Platform;
 use crate::playback_timing::PlaybackTiming;
@@ -20,15 +20,14 @@ use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
 use embedded_graphics::text::{Baseline, Text};
 use std::future::Future;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::air;
 use crate::codec::{
-    CodecRequest, CodecResponse, CODEC2_FRAME_SAMPLES, CODEC_REPLY, FRAMES_PER_PACKET,
-    HEADER_BYTES, PACKET_BYTES, PAYLOAD_BYTES, STEREO_PACKET_SAMPLES,
+    CodecRequest, Decoded, CODEC2_FRAME_SAMPLES, DECODED, ENCODED, FRAMES_PER_PACKET, HEADER_BYTES,
+    PACKET_BYTES, PAYLOAD_BYTES, STEREO_PACKET_SAMPLES,
 };
 use crate::config;
 use crate::conveyor::{Landing, Path, Transmission};
@@ -36,7 +35,7 @@ use crate::echo::{self, Recorder};
 use crate::menu::{Menu, Outcome, Setting};
 use crate::mode::{self, Mode};
 use crate::packet::{self, Header, Ident, PacketType, NAME_BYTES};
-use crate::rx_buffer::{Next, RxBuffer, Verdict};
+use crate::playout::{Play, Playout};
 use crate::screen_text::{self, Activity, Heard};
 use crate::utc;
 
@@ -48,9 +47,6 @@ use crate::utc;
 /// PTT press, so packet n's bin, 2(n + 1), starts this long after its capture
 /// ends
 const ENCODE_DEADLINE: embassy_time::Duration = embassy_time::Duration::from_millis(150);
-
-/// Stereo samples per Codec2 frame (320 mono × 2 channels)
-const STEREO_FRAME_SAMPLES: usize = CODEC2_FRAME_SAMPLES * 2;
 
 /// How often `housekeeping()` runs
 const HOUSEKEEPING_PERIOD: embassy_time::Duration = embassy_time::Duration::from_millis(250);
@@ -70,7 +66,7 @@ const GPS_LOG_PERIOD: Duration = Duration::from_secs(30);
 enum AppEvent {
     Rx(RxPacket),
     Ptt,
-    Speaker, // the speaker wants its next frame
+    Decoded(Decoded), // a packet's audio, back from the codec
     Knob(Knob),
     Tick, // time for housekeeping()
 }
@@ -98,9 +94,8 @@ pub async fn init<P: Platform>(
         .send(CodecRequest::encode([0; 2], silent_pcm))
         .unwrap();
     let mut silence = [0u8; PAYLOAD_BYTES];
-    if let CodecResponse::Encoded { packet } = CODEC_REPLY.receive().await {
-        silence.copy_from_slice(&packet[HEADER_BYTES..]);
-    }
+    let packet = ENCODED.receive().await;
+    silence.copy_from_slice(&packet[HEADER_BYTES..]);
 
     let app = App::<P> {
         devices,
@@ -120,7 +115,8 @@ pub async fn init<P: Platform>(
             shown_activity: Activity::Idle,
         },
         rx: Receiving {
-            buffer: RxBuffer::default(),
+            playout: Playout::default(),
+            playing_txid: None,
             transmission: None,
             // 3KB: on the heap, once. In the App it overflowed the main task's stack
             playback: Box::default(),
@@ -172,10 +168,11 @@ struct Display {
 
 /// The transmission we're hearing
 struct Receiving {
-    buffer: RxBuffer<Arc<[i16]>>, // the talker we're hearing, in seq order
+    playout: Playout<Arc<[i16]>>, // decoded audio on its way to the speaker, in order
+    playing_txid: Option<u8>, // whose audio the playout is for: later decodes of others' are dropped
     transmission: Option<Transmission>, // the transmission on its conveyor: says when it's over
     playback: Box<PlaybackTiming>, // per received transmission, logged at its end
-    own_txid: Option<u8>,         // our last transmission's, so we ignore it relayed back
+    own_txid: Option<u8>,     // our last transmission's, so we ignore it relayed back
     relayed_wake: Option<u8>, // repeater: the last wake-up relayed (its txid), to relay each once
 }
 
@@ -200,7 +197,7 @@ impl<P: Platform> App<P> {
             match self.next_event(&mut ticker).await {
                 AppEvent::Rx(rx_pkt) => self.on_rx_packet(rx_pkt).await,
                 AppEvent::Ptt => self.on_ptt().await,
-                AppEvent::Speaker => self.on_speaker_request(),
+                AppEvent::Decoded(decoded) => self.on_decoded(decoded),
                 AppEvent::Knob(Knob::Click) => self.run_menu().await,
                 AppEvent::Knob(Knob::Cw) => self.change_volume(1),
                 AppEvent::Knob(Knob::Ccw) => self.change_volume(-1),
@@ -224,7 +221,7 @@ impl<P: Platform> App<P> {
         match select5(
             RX_CHAN.receive(),
             ptt,
-            SPK_REQ.receive(),
+            DECODED.receive(),
             self.devices.knob.next(),
             ticker.next(),
         )
@@ -232,7 +229,7 @@ impl<P: Platform> App<P> {
         {
             Either5::First(rx_pkt) => AppEvent::Rx(rx_pkt),
             Either5::Second(()) => AppEvent::Ptt,
-            Either5::Third(()) => AppEvent::Speaker,
+            Either5::Third(decoded) => AppEvent::Decoded(decoded),
             Either5::Fourth(knob) => AppEvent::Knob(knob),
             Either5::Fifth(()) => AppEvent::Tick,
         }
@@ -246,12 +243,11 @@ impl<P: Platform> App<P> {
         // squelch tail here: at the edge this can come mid-transmission, and a
         // tail in the middle of broken-up audio sounds like the talker let go.
         // Only a received EOT plays the tail.
-        let over = match &self.rx.transmission {
-            Some(transmission) => transmission.over(P::now_us()),
-            // Locked with nothing on the conveyor: the same good packet starts
-            // both, so it shouldn't happen, but never stay locked for good
-            None => true,
-        };
+        let over = self
+            .rx
+            .transmission
+            .as_ref()
+            .is_some_and(|transmission| transmission.over(P::now_us()));
         if over {
             if let Some(transmission) = self.rx.transmission.take() {
                 log::info!(
@@ -260,11 +256,10 @@ impl<P: Platform> App<P> {
                     transmission.tally()
                 );
             }
-            if self.rx.buffer.txid().is_some() {
+            if self.rx.playing_txid.take().is_some() {
                 log::info!("RX timeout, resetting txid lock");
-                log_worst_alloc();
                 self.rx.playback.log_and_reset();
-                self.rx.buffer.end();
+                self.rx.playout.reset();
                 self.draw_screen(Activity::Idle);
             }
             // Echo mode: replay what was recorded anyway
@@ -287,7 +282,7 @@ impl<P: Platform> App<P> {
         self.log_gps();
 
         // Idle: keep the clock and position on screen current
-        let receiving = self.rx.buffer.txid().is_some() || self.echo.txid().is_some();
+        let receiving = self.rx.transmission.is_some() || self.echo.txid().is_some();
         if !receiving
             && (self.devices.gps.latest() != self.display.shown_fix
                 || P::network() != self.display.shown_network
@@ -443,38 +438,31 @@ impl<P: Platform> App<P> {
             return;
         }
 
-        let payload = &rx_pkt.data[HEADER_BYTES..];
-
-        let verdict = self.rx.buffer.check(txid, seq);
-        if let Verdict::OtherTxid { locked } = verdict {
-            log::warn!("RX ignoring txid={} (locked to {})", txid, locked);
+        // Someone else's, while another transmission is on the conveyor
+        let Some(landing) = landing else {
+            let locked = self
+                .rx
+                .transmission
+                .as_ref()
+                .map(|transmission| transmission.txid);
+            log::warn!("RX ignoring txid={} (locked to {:?})", txid, locked);
+            return;
+        };
+        // The second copy of a packet (direct, then a repeater's relay), or an
+        // old one: already played or relayed. Counted on the conveyor, never
+        // by seq (which wraps every 16)
+        let packet = landing.packet();
+        let first_copy = self
+            .rx
+            .transmission
+            .as_mut()
+            .is_some_and(|transmission| transmission.first_copy(packet));
+        if !first_copy {
+            log::info!("RX packet={} seq={} duplicate, dropping", packet, seq);
             return;
         }
-        match verdict {
-            Verdict::Old(diff) => {
-                log::info!("RX seq={} old (diff={}), dropping", seq, diff);
-                return;
-            }
-            Verdict::Duplicate => {
-                log::info!("RX seq={} duplicate, dropping", seq);
-                return;
-            }
-            Verdict::Corrupt(diff) => {
-                log::warn!(
-                    "RX seq={} impossible (diff={}), dropping as corrupt",
-                    seq,
-                    diff
-                );
-                return;
-            }
-            Verdict::Resync(diff) => {
-                log::warn!("RX seq={} impossible again (diff={}), resyncing", seq, diff);
-                return;
-            }
-            Verdict::OtherTxid { .. } | Verdict::Take => {}
-        }
 
-        // Repeater: relay after dedup (non-duplicate voice)
+        // Repeater: relay the first copy of each packet
         if mode::get() == Mode::Repeater {
             let channel = relay_channel(rx_pkt.channel);
             let mut relay = heapless::Vec::new();
@@ -488,52 +476,63 @@ impl<P: Platform> App<P> {
                 })
                 .await;
             log::info!(
-                "RELAY [{}B] txid={} seq={} ch={}",
+                "RELAY [{}B] txid={} seq={} packet={} ch={}",
                 rx_pkt.data.len(),
                 txid,
                 seq,
+                packet,
                 channel
             );
-            self.rx.buffer.relayed(seq);
             // Drawn after the relay is queued, so it doesn't delay it
             self.show(Activity::Repeating);
             return; // skip decode — fast turnaround
         }
-        // Send to codec thread for decode, await reply
-        let mut payload_arr = [0u8; PAYLOAD_BYTES];
-        payload_arr.copy_from_slice(payload);
-        let asked = Instant::now();
-        self.codec_tx
-            .send(CodecRequest::decode(seq, txid, payload_arr))
-            .unwrap();
-        if let CodecResponse::Decoded {
-            seq,
-            txid,
-            pcm,
-            decode_us,
-        } = CODEC_REPLY.receive().await
+
+        // To the codec thread. Its audio comes back as an event of its own
+        // (on_decoded): waiting for it here, the app couldn't keep the
+        // speaker fed, playback fell behind and the backlog filled the heap
+        let mut payload = [0u8; PAYLOAD_BYTES];
+        payload.copy_from_slice(&rx_pkt.data[HEADER_BYTES..]);
+        if self.rx.playing_txid != Some(txid) {
+            self.rx.playout.reset();
+            self.rx.playing_txid = Some(txid);
+        }
+        match self
+            .codec_tx
+            .try_send(CodecRequest::decode(txid, packet, payload))
         {
-            let waited_us = asked.elapsed().as_micros() as u32;
-            self.rx
-                .playback
-                .record(decode_us, waited_us, SPK_FRAMES.len());
-            // The speaker starts once two in a row are here
-            if let Some(first) = self.rx.buffer.insert(txid, seq, timed_alloc(|| pcm.into())) {
-                send_to_speaker(&first);
-            }
+            Ok(()) => self.rx.playout.decoding(),
+            Err(_) => log::warn!("RX packet={} dropped: the codec is behind", packet),
         }
 
         log::info!(
-            "RX [{}B] txid={} seq={} played_to={} rssi={} snr={}",
+            "RX [{}B] txid={} seq={} packet={} rssi={} snr={}",
             rx_pkt.data.len(),
             txid,
             seq,
-            self.rx.buffer.last_played(),
+            packet,
             rx_pkt.rssi,
             rx_pkt.snr,
         );
 
         self.show(Activity::Receiving);
+    }
+
+    /// A packet's audio, back from the codec: on to the speaker, in order,
+    /// with silence for any lost before it
+    fn on_decoded(&mut self, decoded: Decoded) {
+        // From a transmission we've stopped playing (a new one, our PTT, the menu)
+        if self.rx.playing_txid != Some(decoded.txid) {
+            return;
+        }
+        let waited_us = decoded.asked.elapsed().as_micros() as u32;
+        self.rx
+            .playback
+            .record(decoded.decode_us, waited_us, SPK_AUDIO.len());
+        let sounds = &self.sounds;
+        self.rx
+            .playout
+            .decoded(decoded.packet, decoded.pcm, |play| to_speaker(play, sounds));
     }
 
     /// A good packet: where it landed on its transmission's conveyor, if
@@ -621,11 +620,16 @@ impl<P: Platform> App<P> {
                 .await;
             log::info!("RELAY EOT txid={} ch={}", txid, channel);
         } else if !echo_this {
-            send_to_speaker(&self.sounds.squelch);
+            // The tail, after whatever of the transmission is still being
+            // decoded (a repeater's copy of the end packet plays it again)
+            if self.rx.playing_txid != Some(txid) {
+                self.rx.playout.reset();
+                self.rx.playing_txid = Some(txid);
+            }
+            let sounds = &self.sounds;
+            self.rx.playout.ended(|play| to_speaker(play, sounds));
         }
-        log_worst_alloc();
         self.rx.playback.log_and_reset();
-        self.rx.buffer.end();
         if self
             .rx
             .transmission
@@ -717,7 +721,8 @@ impl<P: Platform> App<P> {
 
     async fn on_ptt(&mut self) {
         // PTT pressed — reset RX state
-        self.rx.buffer.end();
+        self.rx.playout.reset();
+        self.rx.playing_txid = None;
         self.rx.transmission = None;
         LISTEN.signal(Listen::Hold);
 
@@ -826,18 +831,6 @@ impl<P: Platform> App<P> {
         }
     }
 
-    fn on_speaker_request(&mut self) {
-        match self.rx.buffer.for_speaker() {
-            Next::Audio(pcm) => send_to_speaker(&pcm),
-            Next::Gap(seq) => {
-                log::info!("SPK gap at seq={}, sending silence", seq);
-                send_to_speaker(&self.sounds.silence);
-            }
-            // Not receiving, nothing to send — DMA auto_clear handles silence
-            Next::Idle => {}
-        }
-    }
-
     fn change_volume(&mut self, delta: i8) {
         let level = speaker::volume()
             .saturating_add_signed(delta)
@@ -850,7 +843,9 @@ impl<P: Platform> App<P> {
     /// Menu mode is only menuing: audio and RX stop until we leave, and PTT
     /// is ignored.
     async fn run_menu(&mut self) {
-        self.rx.buffer.end();
+        self.rx.playout.reset();
+        self.rx.playing_txid = None;
+        self.rx.transmission = None;
         let mut menu = Menu::new();
         loop {
             self.draw_menu(&menu);
@@ -866,7 +861,6 @@ impl<P: Platform> App<P> {
         }
         // Drop whatever arrived while we were menuing
         while RX_CHAN.try_receive().is_ok() {}
-        let _ = SPK_REQ.try_receive();
         self.draw_screen(Activity::Idle);
     }
 
@@ -994,34 +988,19 @@ fn generate_squelch(random: fn() -> u32) -> Arc<[i16]> {
     buf.into()
 }
 
-/// Slowest heap allocation on the audio path this transmission, in µs.
-/// Logged and reset when the transmission ends.
-// TODO: borrow frames from a pool allocated at boot instead of allocating
-// per frame, so the audio path never touches the heap.
-static WORST_ALLOC_US: AtomicU32 = AtomicU32::new(0);
-
-/// Allocate `make()`, recording how long the heap took.
-fn timed_alloc<T>(make: impl FnOnce() -> T) -> T {
-    let started = Instant::now();
-    let made = make();
-    WORST_ALLOC_US.fetch_max(started.elapsed().as_micros() as u32, Ordering::Relaxed);
-    made
-}
-
-fn log_worst_alloc() {
-    let us = WORST_ALLOC_US.swap(0, Ordering::Relaxed);
-    log::info!("Audio heap alloc: worst {}us this transmission", us);
-}
-
-/// Split a packet (4 × 40ms stereo frames) into individual frames and send to speaker.
-fn send_to_speaker(packet: &[i16]) {
-    for i in 0..FRAMES_PER_PACKET {
-        let offset = i * STEREO_FRAME_SAMPLES;
-        let frame: Arc<[i16]> =
-            timed_alloc(|| packet[offset..offset + STEREO_FRAME_SAMPLES].into());
-        if SPK_FRAMES.try_send(frame).is_err() {
-            log::warn!("SPK queue full, dropped frame {} of packet", i);
+/// One thing from the playout onto the speaker's queue. Full (the speaker is
+/// 4 packets behind): dropped and logged, rather than piling up
+fn to_speaker(play: Play<Arc<[i16]>>, sounds: &Sounds) {
+    let audio = match play {
+        Play::Audio(audio) => audio,
+        Play::Silence => {
+            log::info!("SPK gap: silence for a lost packet");
+            sounds.silence.clone()
         }
+        Play::Squelch => sounds.squelch.clone(),
+    };
+    if SPK_AUDIO.try_send(audio).is_err() {
+        log::warn!("SPK queue full, dropped a packet of audio");
     }
 }
 
@@ -1079,7 +1058,8 @@ async fn encode_and_send(
 ) {
     let asked = embassy_time::Instant::now();
     codec_tx.send(CodecRequest::encode(header, pcm)).unwrap();
-    if let CodecResponse::Encoded { packet } = CODEC_REPLY.receive().await {
+    {
+        let packet = ENCODED.receive().await;
         timing.note(asked, embassy_time::Instant::now(), bin_start);
         // TODO: hand the radio the bin's start with the packet and let it
         // send at that microsecond (timed TX, step 3 of #36). Waiting here, the

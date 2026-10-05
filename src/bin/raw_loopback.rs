@@ -12,7 +12,7 @@ use esp_idf_svc::hal::task::block_on;
 use open_oswst::board;
 use open_oswst::devices::mic::{self, FRAME_SAMPLES};
 use open_oswst::devices::screen::{self, Screen};
-use open_oswst::devices::speaker::{self, SPK_FRAMES};
+use open_oswst::devices::speaker::{self, SPK_AUDIO};
 use std::sync::Arc;
 
 /// Max recording: 5 seconds at 8kHz (125 frames)
@@ -68,7 +68,7 @@ fn main() {
                 for chunk in rec_buf[..rec_len].chunks(FRAME_SAMPLES) {
                     // Mono → stereo interleave
                     let stereo: Arc<[i16]> = chunk.iter().flat_map(|&s| [s, s]).collect();
-                    SPK_FRAMES.send(stereo).await;
+                    SPK_AUDIO.send(stereo).await;
                 }
 
                 log::info!("Playback done");

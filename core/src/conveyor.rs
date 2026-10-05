@@ -109,6 +109,8 @@ pub struct Transmission {
     pub txid: u8,
     conveyor: Conveyor,
     last_bin: i64,
+    /// The last of the talker's packets taken (first_copy), if any
+    last_taken: Option<i64>,
     tally: Tally,
 }
 
@@ -121,6 +123,7 @@ impl Transmission {
             txid,
             conveyor,
             last_bin: landing.bin,
+            last_taken: None,
             tally: Tally::default(),
         };
         transmission.tally.good(landing);
@@ -159,6 +162,17 @@ impl Transmission {
         let last_could_end_us =
             self.conveyor.bin_start(self.last_bin + EMPTY_BINS_TO_END) + packet_air_us();
         now_us > last_could_end_us + TOLERANCE_US
+    }
+
+    /// Is this the first copy of the talker's `packet` (direct or relayed)?
+    /// Then it's taken: to play, or for a repeater to relay. A later copy, or
+    /// a packet older than one already taken, isn't
+    pub fn first_copy(&mut self, packet: i64) -> bool {
+        if self.last_taken.is_some_and(|taken| packet <= taken) {
+            return false;
+        }
+        self.last_taken = Some(packet);
+        true
     }
 
     /// How its packets landed, for the log
@@ -341,6 +355,15 @@ mod tests {
         transmission.heard(ends(8, 0));
         transmission.heard(ends(5, 0));
         assert_eq!(transmission.last_bin, 8);
+    }
+
+    #[test]
+    fn only_the_first_copy_of_a_packet_is_taken() {
+        let mut transmission = Transmission::start(42, FIRST_END, Path::Direct);
+        assert!(transmission.first_copy(3));
+        assert!(!transmission.first_copy(3)); // its relay
+        assert!(transmission.first_copy(5)); // 4 lost
+        assert!(!transmission.first_copy(4)); // late: 5 is already taken
     }
 
     #[test]

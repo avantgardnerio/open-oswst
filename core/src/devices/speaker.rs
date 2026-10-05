@@ -1,17 +1,21 @@
-//! The speaker, as two queues: audio frames to play, and a nudge when it
-//! wants more. Also the volume, which the driver applies with `scale`.
+//! The speaker, as one queue of audio to play (SPK_AUDIO). Also the volume,
+//! which the driver applies with `scale`.
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 
-/// Speaker requests next audio packet from app
-pub static SPK_REQ: Channel<CriticalSectionRawMutex, (), 1> = Channel::new();
+/// Audio for the speaker, played in order, back to back: stereo interleaved
+/// (L, R, L, R…), any whole number of 40 ms frames (640 samples each). The
+/// app sends whole decoded packets (160 ms), the bringup bins single frames.
+/// When it runs dry the speaker just stops (the DMA plays silence) and starts
+/// again with the next audio: the I2S clock sets the pace, nobody schedules
+/// it. Small, so a backlog can't eat the heap: 4 packets is ~20 KB
+pub static SPK_AUDIO: Channel<CriticalSectionRawMutex, Arc<[i16]>, 4> = Channel::new();
 
-/// Audio frames for speaker — each is one 40ms stereo frame (640 i16).
-/// Capacity 8 = 2 packets worth of frames.
-pub static SPK_FRAMES: Channel<CriticalSectionRawMutex, Arc<[i16]>, 8> = Channel::new();
+/// Samples in one 40 ms stereo frame: what the speaker hands the DMA at a time
+pub const FRAME_SAMPLES: usize = 640;
 
 /// Volume levels 0 (mute) ..= MAX_VOLUME (full scale), 3dB apart.
 pub const MAX_VOLUME: u8 = 10;

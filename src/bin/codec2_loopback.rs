@@ -13,9 +13,9 @@ use esp_idf_svc::hal::task::block_on;
 use open_oswst::board;
 use open_oswst::devices::mic::{self, FRAME_SAMPLES};
 use open_oswst::devices::screen::{self, Screen};
-use open_oswst::devices::speaker::{self, SPK_FRAMES};
+use open_oswst::devices::speaker::{self, SPK_AUDIO};
 use open_oswst_core::codec::{
-    self, CodecRequest, CodecResponse, CODEC_REPLY, FRAMES_PER_PACKET, HEADER_BYTES, PAYLOAD_BYTES,
+    self, CodecRequest, DECODED, ENCODED, FRAMES_PER_PACKET, HEADER_BYTES, PAYLOAD_BYTES,
 };
 use std::sync::Arc;
 
@@ -92,7 +92,8 @@ fn main() {
                     codec_tx
                         .send(CodecRequest::encode([0; HEADER_BYTES], pcm))
                         .unwrap();
-                    if let CodecResponse::Encoded { packet } = CODEC_REPLY.receive().await {
+                    {
+                        let packet = ENCODED.receive().await;
                         payload.copy_from_slice(&packet[HEADER_BYTES..]);
                     }
                 }
@@ -103,11 +104,11 @@ fn main() {
                 // the recording, to avoid a second 160KB buffer ---
                 let t0 = std::time::Instant::now();
                 for (p, payload) in payloads[..num_packets].iter().enumerate() {
-                    let seq = (p & 0x0F) as u8;
                     codec_tx
-                        .send(CodecRequest::decode(seq, 0, *payload))
+                        .send(CodecRequest::decode(0, p as i64, *payload))
                         .unwrap();
-                    if let CodecResponse::Decoded { pcm, .. } = CODEC_REPLY.receive().await {
+                    {
+                        let pcm = DECODED.receive().await.pcm;
                         let mono = &mut rec_buf[p * PACKET_SAMPLES..(p + 1) * PACKET_SAMPLES];
                         for (dst, lr) in mono.iter_mut().zip(pcm.chunks(2)) {
                             *dst = lr[0];
@@ -129,7 +130,7 @@ fn main() {
                 for chunk in rec_buf[..num_packets * PACKET_SAMPLES].chunks(FRAME_SAMPLES) {
                     // Mono → stereo interleave
                     let stereo: Arc<[i16]> = chunk.iter().flat_map(|&s| [s, s]).collect();
-                    SPK_FRAMES.send(stereo).await;
+                    SPK_AUDIO.send(stereo).await;
                 }
 
                 log::info!("Playback done");

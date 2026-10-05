@@ -21,7 +21,7 @@
 use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::hal::task::block_on;
 use esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration;
-use open_oswst_core::codec::{self, CodecRequest, CODEC2_FRAME_SAMPLES, CODEC_REPLY};
+use open_oswst_core::codec::{self, CodecRequest, CODEC2_FRAME_SAMPLES, DECODED, ENCODED};
 use open_oswst_core::codec::{FRAMES_PER_PACKET, PAYLOAD_BYTES};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -79,11 +79,11 @@ fn feed_codec(codec_tx: std::sync::mpsc::SyncSender<CodecRequest>) {
             codec_tx
                 .send(CodecRequest::encode([0; 2], pcm.clone().into()))
                 .unwrap();
-            block_on(CODEC_REPLY.receive());
+            block_on(ENCODED.receive());
             codec_tx
                 .send(CodecRequest::decode(0, 0, [0x55; PAYLOAD_BYTES]))
                 .unwrap();
-            block_on(CODEC_REPLY.receive());
+            block_on(DECODED.receive());
         } else {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }

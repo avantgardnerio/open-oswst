@@ -2,6 +2,8 @@ use codec2::{Codec2, Codec2Mode};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use std::sync::mpsc::Receiver;
+use std::sync::Arc;
+use std::time::Instant;
 
 /// Codec2 MODE_1200: 320 samples → 6 bytes per frame
 pub const CODEC2_FRAME_BYTES: usize = 6;
@@ -24,9 +26,13 @@ pub enum CodecRequest {
         pcm: Box<[i16]>, // 1280 samples (4×320)
     },
     Decode {
-        seq: u8,
         txid: u8,
+        /// Which of the talker's packets, counted on its conveyor
+        /// (conveyor::Landing::packet)
+        packet: i64,
         payload: [u8; PAYLOAD_BYTES],
+        /// When the app asked, handed back in the reply: how long it waited
+        asked: Instant,
     },
 }
 
@@ -35,43 +41,37 @@ impl CodecRequest {
         Self::Encode { header, pcm }
     }
 
-    pub fn decode(seq: u8, txid: u8, payload: [u8; PAYLOAD_BYTES]) -> Self {
-        Self::Decode { seq, txid, payload }
-    }
-}
-
-// Encoded is ~250B bigger than Decoded, but responses only ever sit in the
-// single-slot CODEC_REPLY, so boxing it would cost a heap alloc per packet for nothing.
-#[allow(clippy::large_enum_variant)]
-pub enum CodecResponse {
-    Encoded {
-        packet: heapless::Vec<u8, 255>,
-    },
-    Decoded {
-        seq: u8,
-        txid: u8,
-        pcm: Box<[i16]>, // 2560 stereo samples
-        decode_us: u32,  // the codec thread's time on it
-    },
-}
-
-impl CodecResponse {
-    pub fn encoded(packet: heapless::Vec<u8, 255>) -> Self {
-        Self::Encoded { packet }
-    }
-
-    pub fn decoded(seq: u8, txid: u8, pcm: Box<[i16]>, decode_us: u32) -> Self {
-        Self::Decoded {
-            seq,
+    pub fn decode(txid: u8, packet: i64, payload: [u8; PAYLOAD_BYTES]) -> Self {
+        Self::Decode {
             txid,
-            pcm,
-            decode_us,
+            packet,
+            payload,
+            asked: Instant::now(),
         }
     }
 }
 
-/// Single-slot reply channel — acts as a oneshot since app always awaits before next request.
-pub static CODEC_REPLY: Channel<CriticalSectionRawMutex, CodecResponse, 1> = Channel::new();
+/// One packet's decoded audio, for the speaker
+pub struct Decoded {
+    pub txid: u8,
+    /// Which of the talker's packets (from the request)
+    pub packet: i64,
+    /// Stereo, ready to play: 2560 samples (4 frames × 320 × 2 channels).
+    /// Built as an Arc in place, so it goes to the speaker without a copy
+    pub pcm: Arc<[i16]>,
+    /// The codec thread's own time on it
+    pub decode_us: u32,
+    /// When the app asked (from the request)
+    pub asked: Instant,
+}
+
+/// Encoded packets, back to the talker, which waits for each in turn
+pub static ENCODED: Channel<CriticalSectionRawMutex, heapless::Vec<u8, 255>, 1> = Channel::new();
+
+/// Decoded audio, back to the app as an event of its own: it never waits for a
+/// decode. Apart from ENCODED, so a talker never takes a decode for its encode.
+/// Requests are taken in order, so replies come back in packet order
+pub static DECODED: Channel<CriticalSectionRawMutex, Decoded, 2> = Channel::new();
 
 /// Codec thread entry point. Owns encoder + decoder, loops on requests.
 pub fn run(rx: Receiver<CodecRequest>) {
@@ -98,30 +98,45 @@ pub fn run(rx: Receiver<CodecRequest>) {
                     let _ = packet.extend_from_slice(&frame_bytes);
                 }
 
-                CODEC_REPLY.try_send(CodecResponse::encoded(packet)).ok();
+                ENCODED.try_send(packet).ok();
             }
-            CodecRequest::Decode { seq, txid, payload } => {
-                let started = std::time::Instant::now();
-                let mut pcm = vec![0i16; STEREO_PACKET_SAMPLES].into_boxed_slice();
+            CodecRequest::Decode {
+                txid,
+                packet,
+                payload,
+                asked,
+            } => {
+                let started = Instant::now();
+                // Collected straight into its Arc: one allocation, no copy.
+                // TODO: take it from a pool allocated at boot instead, so the
+                // audio path never touches the heap
+                let mut pcm: Arc<[i16]> =
+                    std::iter::repeat_n(0i16, STEREO_PACKET_SAMPLES).collect();
+                let stereo = Arc::get_mut(&mut pcm).expect("not shared yet");
 
                 for i in 0..FRAMES_PER_PACKET {
                     let coded = &payload[i * CODEC2_FRAME_BYTES..(i + 1) * CODEC2_FRAME_BYTES];
                     decoder.decode(&mut decode_buf, coded);
                     let offset = i * CODEC2_FRAME_SAMPLES * 2;
                     for (j, &sample) in decode_buf.iter().enumerate() {
-                        pcm[offset + j * 2] = sample;
-                        pcm[offset + j * 2 + 1] = sample;
+                        stereo[offset + j * 2] = sample;
+                        stereo[offset + j * 2 + 1] = sample;
                     }
                 }
 
-                CODEC_REPLY
-                    .try_send(CodecResponse::decoded(
-                        seq,
-                        txid,
-                        pcm,
-                        started.elapsed().as_micros() as u32,
-                    ))
-                    .ok();
+                let decoded = Decoded {
+                    txid,
+                    packet,
+                    pcm,
+                    decode_us: started.elapsed().as_micros() as u32,
+                    asked,
+                };
+                if DECODED.try_send(decoded).is_err() {
+                    log::warn!(
+                        "Codec: decoded packet {} dropped, the app is behind",
+                        packet
+                    );
+                }
             }
         }
     }
