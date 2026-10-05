@@ -1,0 +1,274 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1340" viewBox="0 0 1600 1340">
+  <style>
+    text { font-family: 'DejaVu Sans', Arial, Helvetica, sans-serif; font-size: 14px; fill: #222; }
+    .title { font-size: 24px; font-weight: bold; }
+    .sub { font-size: 14px; fill: #555; }
+    .h { font-size: 17px; font-weight: bold; }
+    .h2 { font-size: 15px; font-weight: bold; }
+    .pin { font-family: 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; }
+    .small { font-size: 12.5px; fill: #444; }
+    .red { fill: #c62828; font-weight: bold; }
+    .tagt { font-size: 12.5px; font-weight: bold; fill: #fff; text-anchor: middle; }
+    .tagd { font-size: 12.5px; font-weight: bold; fill: #222; text-anchor: middle; }
+    .box { fill: #fafafa; stroke: #555; stroke-width: 2; }
+    .lead { stroke: #999; stroke-width: 1.5; stroke-dasharray: 3 3; }
+    .wire { stroke: #222; stroke-width: 2.5; fill: none; }
+    .part { fill: #fff; stroke: #222; stroke-width: 2.5; }
+    .dot { fill: #222; }
+    .cb { fill: #fff; stroke: #444; stroke-width: 1.5; }
+  </style>
+  <rect width="1600" height="1340" fill="#ffffff"/>
+
+  <!-- Net colors: 3V3 #c62828 · GND #212121 · I2S_BCK #1565c0 · I2S_LRCK #00838f · I2S_DIN #4527a0
+       SPK #ad1457 · MIC+ #2e7d32 · MIC_OUT #689f38 · PTT_LINE #ef6c00 · PTT_IN #f9a825 · PTT_PWR #6d4c41
+       Same net name = same wire. -->
+
+  <text x="30" y="40" class="title">Headset breadboard: Kenwood PTT + Peltor on a spare Heltec V4</text>
+  <text x="30" y="64" class="sub">Same tag name = connect them together. Pinout and PTT circuit from OpenMANET OpenVLM (docs/reference/openvlm/). Not yet verified on our PTTs.</text>
+
+  <!-- ===================== Heltec V4 ===================== -->
+  <rect x="30" y="80" width="380" height="425" rx="8" class="box"/>
+  <text x="50" y="108" class="h">Heltec V4 (spare board)</text>
+
+  <text x="50" y="135" class="h2">J3 header</text>
+  <text x="50" y="165" class="pin">J3-1  GND</text>   <line x1="190" y1="160" x2="285" y2="160" class="lead"/>
+  <rect x="285" y="149" width="110" height="22" rx="4" fill="#212121"/><text x="340" y="165" class="tagt">GND</text>
+  <text x="50" y="195" class="pin">J3-3  3V3</text>   <line x1="190" y1="190" x2="285" y2="190" class="lead"/>
+  <rect x="285" y="179" width="110" height="22" rx="4" fill="#c62828"/><text x="340" y="195" class="tagt">3V3</text>
+  <text x="50" y="225" class="pin">J3-15 GPIO4</text> <line x1="190" y1="220" x2="285" y2="220" class="lead"/>
+  <rect x="285" y="209" width="110" height="22" rx="4" fill="#689f38"/><text x="340" y="225" class="tagt">MIC_OUT</text>
+  <text x="50" y="255" class="pin">J3-17 GPIO6</text> <line x1="190" y1="250" x2="285" y2="250" class="lead"/>
+  <rect x="285" y="239" width="110" height="22" rx="4" fill="#f9a825"/><text x="340" y="255" class="tagd">PTT_IN</text>
+
+  <text x="50" y="295" class="h2">J2 header</text>
+  <text x="50" y="325" class="pin">J2-1  GND</text>    <line x1="190" y1="320" x2="285" y2="320" class="lead"/>
+  <rect x="285" y="309" width="110" height="22" rx="4" fill="#212121"/><text x="340" y="325" class="tagt">GND</text>
+  <text x="50" y="355" class="pin">J2-12 GPIO33</text> <line x1="190" y1="350" x2="285" y2="350" class="lead"/>
+  <rect x="285" y="339" width="110" height="22" rx="4" fill="#4527a0"/><text x="340" y="355" class="tagt">I2S_DIN</text>
+  <text x="50" y="385" class="pin">J2-13 GPIO47</text> <line x1="190" y1="380" x2="285" y2="380" class="lead"/>
+  <rect x="285" y="369" width="110" height="22" rx="4" fill="#1565c0"/><text x="340" y="385" class="tagt">I2S_BCK</text>
+  <text x="50" y="415" class="pin">J2-14 GPIO48</text> <line x1="190" y1="410" x2="285" y2="410" class="lead"/>
+  <rect x="285" y="399" width="110" height="22" rx="4" fill="#00838f"/><text x="340" y="415" class="tagt">I2S_LRCK</text>
+
+  <text x="50" y="450" class="red">J2-2 is 5 V. Don't connect it.</text>
+  <text x="50" y="474" class="small">Pin 1 = GND on both headers. Find it by continuity</text>
+  <text x="50" y="492" class="small">to the USB-C shell, then count from there.</text>
+
+  <!-- ===================== PCM5102A ===================== -->
+  <rect x="450" y="80" width="420" height="450" rx="8" class="box"/>
+  <text x="470" y="108" class="h">PCM5102A DAC board (GY-PCM5102)</text>
+
+  <text x="470" y="145" class="pin">VIN</text>  <line x1="540" y1="140" x2="730" y2="140" class="lead"/>
+  <rect x="730" y="129" width="110" height="22" rx="4" fill="#c62828"/><text x="785" y="145" class="tagt">3V3</text>
+  <text x="470" y="173" class="pin">GND</text>  <line x1="540" y1="168" x2="730" y2="168" class="lead"/>
+  <rect x="730" y="157" width="110" height="22" rx="4" fill="#212121"/><text x="785" y="173" class="tagt">GND</text>
+  <text x="470" y="201" class="pin">BCK</text>  <line x1="540" y1="196" x2="730" y2="196" class="lead"/>
+  <rect x="730" y="185" width="110" height="22" rx="4" fill="#1565c0"/><text x="785" y="201" class="tagt">I2S_BCK</text>
+  <text x="470" y="229" class="pin">LCK</text>  <line x1="540" y1="224" x2="730" y2="224" class="lead"/>
+  <rect x="730" y="213" width="110" height="22" rx="4" fill="#00838f"/><text x="785" y="229" class="tagt">I2S_LRCK</text>
+  <text x="470" y="257" class="pin">DIN</text>  <line x1="540" y1="252" x2="730" y2="252" class="lead"/>
+  <rect x="730" y="241" width="110" height="22" rx="4" fill="#4527a0"/><text x="785" y="257" class="tagt">I2S_DIN</text>
+  <text x="470" y="285" class="pin">SCK</text>  <line x1="540" y1="280" x2="730" y2="280" class="lead"/>
+  <rect x="730" y="269" width="110" height="22" rx="4" fill="#212121"/><text x="785" y="285" class="tagt">GND</text>
+  <text x="470" y="313" class="pin">FLT</text>  <line x1="540" y1="308" x2="730" y2="308" class="lead"/>
+  <rect x="730" y="297" width="110" height="22" rx="4" fill="#212121"/><text x="785" y="313" class="tagt">GND</text>
+  <text x="470" y="341" class="pin">DEMP</text> <line x1="540" y1="336" x2="730" y2="336" class="lead"/>
+  <rect x="730" y="325" width="110" height="22" rx="4" fill="#212121"/><text x="785" y="341" class="tagt">GND</text>
+  <text x="470" y="369" class="pin">XSMT</text> <line x1="540" y1="364" x2="730" y2="364" class="lead"/>
+  <rect x="730" y="353" width="110" height="22" rx="4" fill="#c62828"/><text x="785" y="369" class="tagt">3V3</text>
+  <text x="470" y="397" class="pin">FMT</text>  <line x1="540" y1="392" x2="730" y2="392" class="lead"/>
+  <rect x="730" y="381" width="110" height="22" rx="4" fill="#212121"/><text x="785" y="397" class="tagt">GND</text>
+  <text x="470" y="425" class="pin">LOUT</text> <line x1="540" y1="420" x2="730" y2="420" class="lead"/>
+  <rect x="730" y="409" width="110" height="22" rx="4" fill="#ad1457"/><text x="785" y="425" class="tagt">SPK</text>
+  <text x="470" y="453" class="pin">AGND</text> <line x1="540" y1="448" x2="730" y2="448" class="lead"/>
+  <rect x="730" y="437" width="110" height="22" rx="4" fill="#212121"/><text x="785" y="453" class="tagt">GND</text>
+
+  <text x="470" y="482" class="small">Pin names vary by seller. FLT/DEMP/XSMT/FMT may be solder</text>
+  <text x="470" y="500" class="small">jumpers on the back (H1L–H4L): set L, L, H, L. SCK may be a</text>
+  <text x="470" y="518" class="small">pad on the front. Only LOUT is used (we send mono, L = R).</text>
+
+  <!-- ===================== MAX9814 ===================== -->
+  <rect x="900" y="80" width="320" height="320" rx="8" class="box"/>
+  <text x="920" y="108" class="h">MAX9814 mic amp board</text>
+
+  <text x="920" y="145" class="pin">VDD</text>      <line x1="1040" y1="140" x2="1100" y2="140" class="lead"/>
+  <rect x="1100" y="129" width="110" height="22" rx="4" fill="#c62828"/><text x="1155" y="145" class="tagt">3V3</text>
+  <text x="920" y="173" class="pin">GND</text>      <line x1="1040" y1="168" x2="1100" y2="168" class="lead"/>
+  <rect x="1100" y="157" width="110" height="22" rx="4" fill="#212121"/><text x="1155" y="173" class="tagt">GND</text>
+  <text x="920" y="201" class="pin">OUT</text>      <line x1="1040" y1="196" x2="1100" y2="196" class="lead"/>
+  <rect x="1100" y="185" width="110" height="22" rx="4" fill="#689f38"/><text x="1155" y="201" class="tagt">MIC_OUT</text>
+  <text x="920" y="229" class="pin">mic + pad</text><line x1="1040" y1="224" x2="1100" y2="224" class="lead"/>
+  <rect x="1100" y="213" width="110" height="22" rx="4" fill="#2e7d32"/><text x="1155" y="229" class="tagt">MIC+</text>
+  <text x="920" y="257" class="pin">mic − pad</text><line x1="1040" y1="252" x2="1100" y2="252" class="lead"/>
+  <rect x="1100" y="241" width="110" height="22" rx="4" fill="#212121"/><text x="1155" y="257" class="tagt">GND</text>
+  <text x="920" y="285" class="pin">Gain</text>     <text x="1100" y="285">open = 60 dB</text>
+  <text x="920" y="313" class="pin">AR</text>       <text x="1100" y="313">leave open</text>
+
+  <text x="920" y="345" class="small">Desolder the onboard mic capsule first.</text>
+  <text x="920" y="363" class="small">Its − pad is the one with continuity to GND.</text>
+  <text x="920" y="381" class="small">Too hot? Gain→GND 50 dB, Gain→VDD 40 dB.</text>
+
+  <!-- ===================== Jacks ===================== -->
+  <rect x="1250" y="80" width="320" height="450" rx="8" class="box"/>
+  <text x="1270" y="108" class="h">Jacks (Kenwood K1)</text>
+
+  <text x="1270" y="140" class="h2">3.5 mm: mic + PTT</text>
+  <!-- plug drawing: sleeve | ring | tip -->
+  <rect x="1270" y="152" width="90" height="22" fill="#bdbdbd" stroke="#555"/>
+  <rect x="1360" y="152" width="6" height="22" fill="#333"/>
+  <rect x="1366" y="152" width="34" height="22" fill="#bdbdbd" stroke="#555"/>
+  <rect x="1400" y="152" width="6" height="22" fill="#333"/>
+  <path d="M1406,152 L1430,152 Q1446,163 1430,174 L1406,174 Z" fill="#bdbdbd" stroke="#555"/>
+  <text x="1300" y="190" class="small">sleeve</text><text x="1368" y="190" class="small">ring</text><text x="1414" y="190" class="small">tip</text>
+
+  <text x="1270" y="220" class="pin">Tip</text>    <line x1="1340" y1="215" x2="1450" y2="215" class="lead"/>
+  <rect x="1450" y="204" width="110" height="22" rx="4" fill="#6d4c41"/><text x="1505" y="220" class="tagt">PTT_PWR</text>
+  <text x="1270" y="248" class="pin">Ring</text>   <line x1="1340" y1="243" x2="1450" y2="243" class="lead"/>
+  <rect x="1450" y="232" width="110" height="22" rx="4" fill="#2e7d32"/><text x="1505" y="248" class="tagt">MIC+</text>
+  <text x="1270" y="276" class="pin">Sleeve</text> <line x1="1340" y1="271" x2="1450" y2="271" class="lead"/>
+  <rect x="1450" y="260" width="110" height="22" rx="4" fill="#ef6c00"/><text x="1505" y="276" class="tagt">PTT_LINE</text>
+
+  <text x="1270" y="318" class="h2">2.5 mm: speaker</text>
+  <rect x="1270" y="330" width="80" height="18" fill="#bdbdbd" stroke="#555"/>
+  <rect x="1350" y="330" width="6" height="18" fill="#333"/>
+  <path d="M1356,330 L1378,330 Q1392,339 1378,348 L1356,348 Z" fill="#bdbdbd" stroke="#555"/>
+  <text x="1295" y="364" class="small">sleeve</text><text x="1362" y="364" class="small">tip</text>
+
+  <text x="1270" y="393" class="pin">Tip</text>    <line x1="1340" y1="388" x2="1450" y2="388" class="lead"/>
+  <rect x="1450" y="377" width="110" height="22" rx="4" fill="#ad1457"/><text x="1505" y="393" class="tagt">SPK</text>
+  <text x="1270" y="421" class="pin">Sleeve</text> <line x1="1340" y1="416" x2="1450" y2="416" class="lead"/>
+  <rect x="1450" y="405" width="110" height="22" rx="4" fill="#212121"/><text x="1505" y="421" class="tagt">GND</text>
+
+  <text x="1270" y="455" class="red">3.3 V goes out on the 3.5 mm TIP.</text>
+  <text x="1270" y="474" class="red">Meter each PTT before plugging in.</text>
+  <text x="1270" y="500" class="small">Find each jack's tip/ring/sleeve lugs</text>
+  <text x="1270" y="518" class="small">with a meter and a plug inserted.</text>
+
+  <!-- ===================== PTT circuit ===================== -->
+  <rect x="30" y="560" width="840" height="480" rx="8" class="box"/>
+  <text x="50" y="595" class="h">PTT sense + PTT power (from OpenVLM; R3 changed to 100k)</text>
+
+  <!-- 3V3 tags over R1 and R3 -->
+  <rect x="325" y="629" width="110" height="22" rx="4" fill="#c62828"/><text x="380" y="645" class="tagt">3V3</text>
+  <rect x="465" y="629" width="110" height="22" rx="4" fill="#c62828"/><text x="520" y="645" class="tagt">3V3</text>
+
+  <!-- R1 1M: 3V3 to node B -->
+  <line x1="380" y1="651" x2="380" y2="665" class="wire"/>
+  <rect x="370" y="665" width="20" height="60" class="part"/>
+  <line x1="380" y1="725" x2="380" y2="790" class="wire"/>
+  <text x="398" y="692" class="h2">R1</text><text x="398" y="710">1M</text>
+
+  <!-- R3 100k: 3V3 to collector -->
+  <line x1="520" y1="651" x2="520" y2="665" class="wire"/>
+  <rect x="510" y="665" width="20" height="60" class="part"/>
+  <line x1="520" y1="725" x2="520" y2="750" class="wire"/>
+  <text x="538" y="692" class="h2">R3</text><text x="538" y="710">100k</text>
+
+  <!-- collector node to PTT_IN -->
+  <line x1="520" y1="740" x2="600" y2="740" class="wire"/>
+  <circle cx="520" cy="740" r="4.5" class="dot"/>
+  <rect x="600" y="729" width="110" height="22" rx="4" fill="#f9a825"/><text x="655" y="745" class="tagd">PTT_IN</text>
+
+  <!-- PTT_LINE in, node P, R2, node B -->
+  <rect x="50" y="779" width="110" height="22" rx="4" fill="#ef6c00"/><text x="105" y="795" class="tagt">PTT_LINE</text>
+  <line x1="160" y1="790" x2="260" y2="790" class="wire"/>
+  <circle cx="220" cy="790" r="4.5" class="dot"/><text x="200" y="778" class="small">P</text>
+  <rect x="260" y="780" width="70" height="20" class="part"/>
+  <text x="270" y="770" class="h2">R2</text><text x="298" y="770">100k</text>
+  <line x1="330" y1="790" x2="470" y2="790" class="wire"/>
+  <circle cx="380" cy="790" r="4.5" class="dot"/><text x="386" y="808" class="small">B</text>
+
+  <!-- C1 10nF: P to GND -->
+  <line x1="220" y1="790" x2="220" y2="830" class="wire"/>
+  <line x1="198" y1="830" x2="242" y2="830" class="wire"/>
+  <line x1="198" y1="840" x2="242" y2="840" class="wire"/>
+  <line x1="220" y1="840" x2="220" y2="880" class="wire"/>
+  <text x="250" y="832" class="h2">C1</text><text x="250" y="850">10nF</text>
+  <line x1="205" y1="880" x2="235" y2="880" class="wire"/><line x1="211" y1="886" x2="229" y2="886" class="wire"/><line x1="217" y1="892" x2="223" y2="892" class="wire"/>
+
+  <!-- Q1 NPN -->
+  <circle cx="497" cy="790" r="38" fill="none" stroke="#222" stroke-width="2"/>
+  <line x1="470" y1="765" x2="470" y2="815" stroke="#222" stroke-width="4"/>
+  <line x1="470" y1="778" x2="520" y2="752" class="wire"/>
+  <line x1="470" y1="802" x2="520" y2="828" class="wire"/>
+  <path d="M520,828 L506,828 L513,816 Z" fill="#222"/>
+  <line x1="520" y1="828" x2="520" y2="880" class="wire"/>
+  <line x1="505" y1="880" x2="535" y2="880" class="wire"/><line x1="511" y1="886" x2="529" y2="886" class="wire"/><line x1="517" y1="892" x2="523" y2="892" class="wire"/>
+  <text x="545" y="790" class="h2">Q1</text><text x="545" y="808">2N3904</text><text x="545" y="826" class="small">or any small NPN</text>
+  <text x="456" y="760" class="small">B</text><text x="527" y="768" class="small">C</text><text x="527" y="845" class="small">E</text>
+
+  <!-- truth table -->
+  <rect x="670" y="770" width="190" height="62" rx="6" fill="#fff8e1" stroke="#f9a825" stroke-width="2"/>
+  <text x="680" y="795">Released → GPIO6 LOW</text>
+  <text x="680" y="820">Pressed → GPIO6 HIGH</text>
+
+  <!-- PTT power: 3V3 - R4 100R - PTT_PWR, C2 1uF to GND -->
+  <text x="50" y="912" class="h2">PTT power (feeds the PTT's own electronics)</text>
+  <rect x="50" y="939" width="110" height="22" rx="4" fill="#c62828"/><text x="105" y="955" class="tagt">3V3</text>
+  <line x1="160" y1="950" x2="200" y2="950" class="wire"/>
+  <rect x="200" y="940" width="70" height="20" class="part"/>
+  <text x="206" y="980" class="h2">R4</text><text x="234" y="980">100Ω</text>
+  <line x1="270" y1="950" x2="420" y2="950" class="wire"/>
+  <circle cx="330" cy="950" r="4.5" class="dot"/>
+  <rect x="420" y="939" width="110" height="22" rx="4" fill="#6d4c41"/><text x="475" y="955" class="tagt">PTT_PWR</text>
+  <line x1="330" y1="950" x2="330" y2="975" class="wire"/>
+  <line x1="308" y1="975" x2="352" y2="975" class="wire"/>
+  <line x1="308" y1="985" x2="352" y2="985" class="wire"/>
+  <line x1="330" y1="985" x2="330" y2="1005" class="wire"/>
+  <text x="360" y="980" class="h2">C2</text><text x="360" y="998">1µF</text>
+  <line x1="315" y1="1005" x2="345" y2="1005" class="wire"/><line x1="321" y1="1011" x2="339" y2="1011" class="wire"/><line x1="327" y1="1017" x2="333" y2="1017" class="wire"/>
+
+  <!-- TO-92 pinout -->
+  <text x="700" y="900" class="h2">2N3904 legs</text>
+  <path d="M740,965 L740,935 A30,30 0 0 1 800,935 L800,965 Z" fill="#424242"/>
+  <line x1="752" y1="965" x2="752" y2="995" stroke="#888" stroke-width="3"/>
+  <line x1="770" y1="965" x2="770" y2="995" stroke="#888" stroke-width="3"/>
+  <line x1="788" y1="965" x2="788" y2="995" stroke="#888" stroke-width="3"/>
+  <text x="746" y="1012" class="h2">E</text><text x="764" y="1012" class="h2">B</text><text x="782" y="1012" class="h2">C</text>
+  <text x="700" y="1030" class="small">flat side toward you</text>
+
+  <!-- ===================== Warnings ===================== -->
+  <rect x="30" y="1060" width="840" height="255" rx="8" fill="#fff5f5" stroke="#c62828" stroke-width="2"/>
+  <text x="50" y="1090" class="h">Read before powering up</text>
+  <text x="50" y="1118"><tspan class="red">DANGER</tspan> Never put this PTT on GPIO0 (the PRG button). Released, the transistor holds it LOW,</text>
+  <text x="50" y="1136">and GPIO0 LOW at power-up boots the ESP32 into download mode instead of the app.</text>
+  <text x="50" y="1162"><tspan class="red">DANGER</tspan> J2 pin 2 is 5 V, right next to GND. One pin off puts 5 V on a 3.3 V pin.</text>
+  <text x="50" y="1188"><tspan font-weight="bold">NOTE</tspan> R3 is 100k, not OpenVLM's 10k. Their MMBT5088 has very high gain; at only ~3 µA of</text>
+  <text x="50" y="1206">base current through R1, a 2N3904 needs the bigger pull-up to switch fully.</text>
+  <text x="50" y="1232"><tspan font-weight="bold">NOTE</tspan> Firmware not written yet: PTT on GPIO6, active HIGH. The PCM5102's PLL can't run at 8 kHz</text>
+  <text x="50" y="1250">(datasheet Table 11), so I2S must run at 16 kHz with 32-bit slots and we upsample 2×.</text>
+  <text x="50" y="1276"><tspan font-weight="bold">NOTE</tspan> Left out from OpenVLM: the BAT54S clamp diode on PTT_LINE (ESD protection). Fine on the bench.</text>
+  <text x="50" y="1302"><tspan font-weight="bold">NOTE</tspan> Every GND is the same net: breadboard − rail.</text>
+
+  <!-- ===================== Wire list ===================== -->
+  <rect x="900" y="560" width="670" height="755" rx="8" class="box"/>
+  <text x="920" y="590" class="h">Wire list: tick each one off</text>
+  <text x="945" y="612" class="small">FROM</text><text x="1200" y="612" class="small">TO</text>
+
+  <text x="920" y="640" class="h2">Power</text>
+  <rect x="920" y="657" width="13" height="13" class="cb"/><text x="945" y="669">J3-3 (3V3)</text><text x="1200" y="669">red + rail</text>
+  <rect x="920" y="686" width="13" height="13" class="cb"/><text x="945" y="698">J3-1 (GND)</text><text x="1200" y="698">black − rail</text>
+
+  <text x="920" y="730" class="h2">Speaker (PCM5102A)</text>
+  <rect x="920" y="747" width="13" height="13" class="cb"/><text x="945" y="759">+ rail</text><text x="1200" y="759">VIN, XSMT</text>
+  <rect x="920" y="776" width="13" height="13" class="cb"/><text x="945" y="788">− rail</text><text x="1200" y="788">GND, SCK, FLT, DEMP, FMT, AGND</text>
+  <rect x="920" y="805" width="13" height="13" class="cb"/><text x="945" y="817">J2-13 (GPIO47)</text><text x="1200" y="817">BCK</text>
+  <rect x="920" y="834" width="13" height="13" class="cb"/><text x="945" y="846">J2-14 (GPIO48)</text><text x="1200" y="846">LCK</text>
+  <rect x="920" y="863" width="13" height="13" class="cb"/><text x="945" y="875">J2-12 (GPIO33)</text><text x="1200" y="875">DIN</text>
+  <rect x="920" y="892" width="13" height="13" class="cb"/><text x="945" y="904">LOUT</text><text x="1200" y="904">2.5 mm TIP</text>
+  <rect x="920" y="921" width="13" height="13" class="cb"/><text x="945" y="933">− rail</text><text x="1200" y="933">2.5 mm SLEEVE</text>
+
+  <text x="920" y="965" class="h2">Mic (MAX9814)</text>
+  <rect x="920" y="982" width="13" height="13" class="cb"/><text x="945" y="994">+ rail</text><text x="1200" y="994">VDD</text>
+  <rect x="920" y="1011" width="13" height="13" class="cb"/><text x="945" y="1023">− rail</text><text x="1200" y="1023">GND, mic − pad</text>
+  <rect x="920" y="1040" width="13" height="13" class="cb"/><text x="945" y="1052">3.5 mm RING</text><text x="1200" y="1052">mic + pad</text>
+  <rect x="920" y="1069" width="13" height="13" class="cb"/><text x="945" y="1081">OUT</text><text x="1200" y="1081">J3-15 (GPIO4)</text>
+
+  <text x="920" y="1113" class="h2">PTT</text>
+  <rect x="920" y="1130" width="13" height="13" class="cb"/><text x="945" y="1142">3.5 mm SLEEVE</text><text x="1200" y="1142">node P: R2 100k, and C1 10nF to − rail</text>
+  <rect x="920" y="1159" width="13" height="13" class="cb"/><text x="945" y="1171">R2 other end</text><text x="1200" y="1171">node B: Q1 base, and R1 1M to + rail</text>
+  <rect x="920" y="1188" width="13" height="13" class="cb"/><text x="945" y="1200">Q1 emitter</text><text x="1200" y="1200">− rail</text>
+  <rect x="920" y="1217" width="13" height="13" class="cb"/><text x="945" y="1229">Q1 collector</text><text x="1200" y="1229">R3 100k to + rail, and J3-17 (GPIO6)</text>
+  <rect x="920" y="1246" width="13" height="13" class="cb"/><text x="945" y="1258">+ rail → R4 100Ω</text><text x="1200" y="1258">3.5 mm TIP, and C2 1µF to − rail</text>
+  <rect x="920" y="1275" width="13" height="13" class="cb"/><text x="945" y="1287">J2-1 (GND)</text><text x="1200" y="1287">− rail (second ground, optional)</text>
+</svg>
