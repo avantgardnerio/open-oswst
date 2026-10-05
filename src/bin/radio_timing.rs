@@ -269,7 +269,7 @@ async fn bench(lora: &mut Radio) -> Vec<Row> {
         let start = Instant::now();
         lora.enter_standby().await.unwrap();
         let standby = Instant::now();
-        lora.prepare_for_tx(&mdltn, &mut tx_params, radio::TX_POWER_DBM, &data)
+        lora.prepare_for_tx(&mdltn, &mut tx_params, radio::MAX_TX_POWER_DBM, &data)
             .await
             .unwrap();
         let prepared = Instant::now();

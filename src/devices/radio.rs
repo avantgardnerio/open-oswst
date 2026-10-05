@@ -15,6 +15,7 @@ use super::radio_bus::{self, RadioSpi};
 // The queues the app talks to; this driver connects them to the SX1262
 use open_oswst_core::air;
 use open_oswst_core::codec::PACKET_BYTES;
+use open_oswst_core::config;
 use open_oswst_core::crc;
 pub use open_oswst_core::devices::radio::{
     Listen, Rotation, RxPacket, TxRequest, LISTEN, RX_CHAN, TX_CHAN,
@@ -22,10 +23,12 @@ pub use open_oswst_core::devices::radio::{
 
 type Radio = LoRa<Sx126x<RadioSpi, radio_bus::Interface, Sx1262>, embassy_time::Delay>;
 
-/// SX1262 output power. The FEM adds ~13 dB, so this gives ~19 dBm into the
-/// Air Buddy amp (max input 20 dBm). At its max 11 dB gain that's ~30 dBm out,
-/// ~35 dBm EIRP on a 5 dBi antenna: under the FCC's 36 dBm.
-pub const TX_POWER_DBM: i32 = 6;
+/// The most SX1262 output power we ever ask for: every TX here is capped at
+/// it, whatever the tx_power_dbm setting says. The FEM adds ~13 dB, so this
+/// gives ~19 dBm into the Air Buddy amp (max input 20 dBm: more damages it).
+/// At its max 11 dB gain that's ~30 dBm out, ~35 dBm EIRP on a 5 dBi
+/// antenna: under the FCC's 36 dBm.
+pub const MAX_TX_POWER_DBM: i32 = 6;
 
 /// Random wait (0..this ms) before each TX, so repeaters that heard the same
 /// packet don't all relay at once. OFF (0) for now: with only 3 radios built
@@ -805,12 +808,13 @@ impl Driver {
         }
         self.tx_buf[..data.len()].copy_from_slice(data);
         self.tx_buf[data.len()..framed].copy_from_slice(&crc::crc16(data).to_be_bytes());
+        let tx_power_dbm = config::TX_POWER_DBM.get().min(MAX_TX_POWER_DBM);
         TX_SINCE_MS.store(uptime_ms(), Ordering::Relaxed);
         let start = Instant::now();
         self.lora.enter_standby().await.unwrap();
         let standby_us = start.elapsed().as_micros();
         self.lora
-            .prepare_for_tx(mdltn, params, TX_POWER_DBM, &self.tx_buf[..framed])
+            .prepare_for_tx(mdltn, params, tx_power_dbm, &self.tx_buf[..framed])
             .await
             .unwrap();
         let prepared_us = start.elapsed().as_micros();
