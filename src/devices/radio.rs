@@ -10,6 +10,7 @@ use std::future::Future;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
+use super::irq_pin;
 use super::radio_bus::{self, RadioSpi};
 
 // The queues the app talks to; this driver connects them to the SX1262
@@ -468,7 +469,7 @@ impl Driver {
         // waiting, no interrupt fired: then this task's own time, later. The
         // relay metric in scripts/relay-test.py times from here
         let task_us = uptime_us();
-        let isr_us = radio_bus::fired_at_us(self.dio1_gpio, task_us);
+        let isr_us = irq_pin::fired_at_us(self.dio1_gpio, task_us);
         let irq_us = isr_us.unwrap_or(task_us);
         // How long after the interrupt this task got here (measuring)
         let task_late_us = isr_us.map(|isr_us| task_us - isr_us);

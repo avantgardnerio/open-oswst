@@ -7,7 +7,10 @@
 
 use embassy_futures::select::{select, select3, Either};
 use embassy_time::Timer;
-use esp_idf_svc::hal::gpio::{AnyIOPin, Input, PinDriver, Pull};
+use embedded_hal_async::digital::Wait;
+use esp_idf_svc::hal::gpio::{AnyIOPin, Pull};
+
+use super::irq_pin::IrqPin;
 
 /// Switch must hold steady this long to count as a press or release
 const DEBOUNCE_MS: u64 = 15;
@@ -24,9 +27,9 @@ pub struct Peripherals {
 pub use open_oswst_core::devices::knob::Event;
 
 pub struct Encoder {
-    a: PinDriver<'static, Input>,
-    b: PinDriver<'static, Input>,
-    sw: PinDriver<'static, Input>,
+    a: IrqPin,
+    b: IrqPin,
+    sw: IrqPin,
     phase: u8,     // gray-code position 0..4
     steps: i8,     // transitions accumulated toward the next detent
     pressed: bool, // debounced switch state
@@ -34,9 +37,9 @@ pub struct Encoder {
 
 /// Configure the pins. Common ties to GND, so all three use internal pull-ups.
 pub fn init(p: Peripherals) -> Encoder {
-    let a = PinDriver::input(p.a, Pull::Up).unwrap();
-    let b = PinDriver::input(p.b, Pull::Up).unwrap();
-    let sw = PinDriver::input(p.sw, Pull::Up).unwrap();
+    let a = IrqPin::new(p.a.into(), Pull::Up);
+    let b = IrqPin::new(p.b.into(), Pull::Up);
+    let sw = IrqPin::new(p.sw.into(), Pull::Up);
     let phase = gray_phase(a.is_high(), b.is_high());
     let pressed = sw.is_low();
     Encoder {

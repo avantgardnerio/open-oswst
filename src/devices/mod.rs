@@ -1,6 +1,7 @@
 pub mod encoder;
 pub mod fem;
 pub mod gps;
+pub mod irq_pin;
 pub mod mic;
 pub mod ptt;
 pub mod radio;

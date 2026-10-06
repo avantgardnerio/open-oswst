@@ -7,9 +7,11 @@ use embedded_graphics::mono_font::{MonoTextStyle, MonoTextStyleBuilder};
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
 use embedded_graphics::text::Text;
-use esp_idf_svc::hal::gpio::{PinDriver, Pull};
+use embedded_hal_async::digital::Wait;
+use esp_idf_svc::hal::gpio::Pull;
 use esp_idf_svc::hal::task::block_on;
 use open_oswst::board;
+use open_oswst::devices::irq_pin::IrqPin;
 use open_oswst::devices::mic::{self, FRAME_SAMPLES};
 use open_oswst::devices::screen::{self, Screen};
 use open_oswst::devices::speaker::{self, SPK_AUDIO};
@@ -30,7 +32,7 @@ fn main() {
     log::info!("Raw audio loopback test starting...");
 
     let board = board::take();
-    let mut button = PinDriver::input(board.ptt, Pull::Up).unwrap();
+    let mut button = IrqPin::new(board.ptt.into(), Pull::Up);
     let mut mic = mic::init(board.mic);
     let screen = screen::init(board.screen);
     let style = MonoTextStyleBuilder::new()

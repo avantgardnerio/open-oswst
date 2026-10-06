@@ -7,7 +7,7 @@ use esp_idf_svc::hal::peripherals::Peripherals;
 use std::thread;
 use std::time::Duration;
 
-use crate::devices::{encoder, fem, gps, mic, radio, screen, speaker};
+use crate::devices::{encoder, fem, gps, irq_pin, mic, radio, screen, speaker};
 
 pub struct Board {
     pub fem: fem::Peripherals,
@@ -24,7 +24,8 @@ pub struct Board {
     _vext: PinDriver<'static, Output>,
 }
 
-/// Take the chip peripherals, power on Vext, and hand out each subsystem's pins.
+/// Take the chip peripherals, power on Vext, install the GPIO interrupt
+/// service, and hand out each subsystem's pins.
 pub fn take() -> Board {
     let p = Peripherals::take().unwrap();
 
@@ -32,6 +33,9 @@ pub fn take() -> Board {
     let mut vext = PinDriver::output(p.pins.gpio36).unwrap();
     vext.set_low().unwrap();
     thread::sleep(Duration::from_millis(50));
+
+    // Before any pin waits on an interrupt (devices::irq_pin)
+    irq_pin::install();
 
     Board {
         fem: fem::Peripherals {

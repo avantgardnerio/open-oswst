@@ -12,15 +12,14 @@
 //! - RadioSpi: lora-phy's SPI device. Each lora-phy transaction (a command,
 //!   then status or data) is one ESP-IDF transfer, chip select held low
 //!   throughout, through buffers DMA can reach that are allocated once
-//! - RadioPin: BUSY and DIO1. lora-phy waits for their levels
+//! - BUSY and DIO1: IrqPins (devices::irq_pin), whose interrupt is in IRAM
+//!   and notes when it fired: DIO1's is a packet's end time
 //!
-//! Neither interrupt is in IRAM (CONFIG_SPI_MASTER_ISR_IN_IRAM and
-//! CONFIG_GPIO_CTRL_FUNC_IN_IRAM are off): while the flash is being written
-//! they wait, so the callbacks can live in flash too. The pin interrupt also
-//! notes when it fired (`fired_at_us`): that's a packet's end time, so a
-//! flash write delays it too.
+//! The SPI interrupt is not in IRAM (CONFIG_SPI_MASTER_ISR_IN_IRAM is off):
+//! while the flash is being written it waits, so its callback can live in
+//! flash too.
 //!
-//! One radio only: the wake-ups are statics.
+//! One radio only: the SPI wake-up is a static.
 
 use core::future::poll_fn;
 use core::task::Poll;
@@ -28,16 +27,15 @@ use core::task::Poll;
 // is a FreeRTOS mutex, and a mutex can't be taken in an interrupt. This one is
 // only atomics (esp-idf-hal uses it for the same reason)
 use atomic_waker::AtomicWaker;
-use embedded_hal::digital::ErrorType as PinErrorType;
 use embedded_hal::spi::ErrorType as SpiErrorType;
-use embedded_hal_async::digital::Wait;
 use embedded_hal_async::spi::{Operation, SpiDevice};
-use esp_idf_svc::hal::gpio::{AnyIOPin, AnyInputPin, Input, Output, Pin, PinDriver, Pull};
+use esp_idf_svc::hal::gpio::{AnyIOPin, Output, Pin, PinDriver, Pull};
 use esp_idf_svc::hal::spi::SPI2;
 use esp_idf_svc::sys::*;
 use lora_phy::iv::GenericSx126xInterfaceVariant;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
+use super::irq_pin::IrqPin;
 use super::radio;
 
 /// SPI clock, as with esp-idf-hal (devices::radio)
@@ -48,21 +46,15 @@ const SPI_HZ: i32 = 2_000_000;
 const MAX_TRANSFER: usize = 264;
 
 /// What lora-phy's SX126x driver is built from
-pub type Interface = GenericSx126xInterfaceVariant<PinDriver<'static, Output>, RadioPin>;
+pub type Interface = GenericSx126xInterfaceVariant<PinDriver<'static, Output>, IrqPin>;
 
 /// The radio's SPI device and interface pins, from the board's radio
 /// peripherals. RESET and the FEM's TX switch are plain outputs, as before
 pub fn take(p: radio::Peripherals) -> (RadioSpi, Interface) {
     let spi = RadioSpi::new(p.spi, p.sck, p.mosi, p.miso, p.nss);
     let reset = PinDriver::output(p.reset).unwrap();
-    // Both pins disarmed before the interrupt service goes in (RadioPin::new)
-    let dio1 = RadioPin::new(p.dio1);
-    let busy = RadioPin::new(p.busy);
-    // The GPIO interrupt service is shared with esp-idf-hal: install it
-    // through the hal, so neither installs it twice
-    esp_idf_svc::hal::gpio::enable_isr_service().unwrap();
-    dio1.listen();
-    busy.listen();
+    let dio1 = IrqPin::new(p.dio1, Pull::Floating);
+    let busy = IrqPin::new(p.busy, Pull::Floating);
     let rf_switch_tx = p.rf_switch_tx.map(|pin| PinDriver::output(pin).unwrap());
     let iv = GenericSx126xInterfaceVariant::new(reset, dio1, busy, None, rf_switch_tx).unwrap();
     (spi, iv)
@@ -76,12 +68,6 @@ pub struct Error;
 impl embedded_hal::spi::Error for Error {
     fn kind(&self) -> embedded_hal::spi::ErrorKind {
         embedded_hal::spi::ErrorKind::Other
-    }
-}
-
-impl embedded_hal::digital::Error for Error {
-    fn kind(&self) -> embedded_hal::digital::ErrorKind {
-        embedded_hal::digital::ErrorKind::Other
     }
 }
 
@@ -257,149 +243,5 @@ fn operation_len(operation: &Operation<'_, u8>) -> Result<usize, Error> {
         Operation::Transfer(read, write) => Ok(read.len().max(write.len())),
         Operation::TransferInPlace(bytes) => Ok(bytes.len()),
         Operation::DelayNs(_) => Err(Error),
-    }
-}
-
-// --- BUSY and DIO1 ---
-
-pub struct RadioPin {
-    gpio: i32,
-    // Keeps the pin configured as an input, and owned
-    _driver: PinDriver<'static, Input>,
-}
-
-/// Per GPIO: set by the pin's interrupt, which wakes the waiting task
-struct PinWake {
-    fired: AtomicBool,
-    /// When it fired: the low 32 bits of esp_timer's µs (Xtensa has no
-    /// 64-bit atomics; `fired_at_us` rebuilds the rest)
-    fired_at_us: AtomicU32,
-    waker: AtomicWaker,
-}
-
-static PIN_WAKES: [PinWake; SOC_GPIO_PIN_COUNT as usize] = [const {
-    PinWake {
-        fired: AtomicBool::new(false),
-        fired_at_us: AtomicU32::new(0),
-        waker: AtomicWaker::new(),
-    }
-}; SOC_GPIO_PIN_COUNT as usize];
-
-impl RadioPin {
-    /// An input with its interrupt disarmed. A software reboot (OTA, panic)
-    /// keeps the GPIO's interrupt settings and doesn't reset the SX1262: the
-    /// last image's level interrupt can still be armed, its level still
-    /// there (BUSY low, DIO1 high). Installing the interrupt service then
-    /// fires it with no handler to disarm it, forever: the interrupt
-    /// watchdog reset the repeater on every boot. So every radio pin is
-    /// disarmed before anything installs the service (`listen`)
-    fn new(pin: AnyInputPin<'static>) -> Self {
-        let gpio = pin.pin() as i32;
-        let driver = PinDriver::input(pin, Pull::Floating).unwrap();
-        unsafe {
-            esp!(gpio_intr_disable(gpio)).unwrap();
-            esp!(gpio_set_intr_type(gpio, gpio_int_type_t_GPIO_INTR_DISABLE)).unwrap();
-        }
-        RadioPin {
-            gpio,
-            _driver: driver,
-        }
-    }
-
-    /// Hand the pin's interrupt to on_pin. The service must be installed
-    fn listen(&self) {
-        unsafe {
-            esp!(gpio_isr_handler_add(
-                self.gpio,
-                Some(on_pin),
-                self.gpio as *mut core::ffi::c_void
-            ))
-            .unwrap();
-        }
-    }
-
-    /// Wait for the pin's level (or edge) to come. A level that's already
-    /// there returns at once. Safe to drop mid-wait: the next wait disarms
-    /// the interrupt before anything else
-    async fn wait_for(&mut self, trigger: gpio_int_type_t) -> Result<(), Error> {
-        let wake = &PIN_WAKES[self.gpio as usize];
-        unsafe { esp!(gpio_intr_disable(self.gpio)).map_err(|_| Error)? };
-        wake.fired.store(false, Ordering::Relaxed);
-
-        // An edge only counts if it happens from now on
-        let level = unsafe { gpio_get_level(self.gpio) };
-        let already = (trigger == gpio_int_type_t_GPIO_INTR_HIGH_LEVEL && level == 1)
-            || (trigger == gpio_int_type_t_GPIO_INTR_LOW_LEVEL && level == 0);
-        if already {
-            return Ok(());
-        }
-
-        // A level interrupt armed while the level is already there fires at
-        // once, so nothing between the check and here is lost
-        unsafe {
-            esp!(gpio_set_intr_type(self.gpio, trigger)).map_err(|_| Error)?;
-            esp!(gpio_intr_enable(self.gpio)).map_err(|_| Error)?;
-        }
-        poll_fn(|cx| {
-            wake.waker.register(cx.waker());
-            if wake.fired.load(Ordering::Acquire) {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
-            }
-        })
-        .await;
-        Ok(())
-    }
-}
-
-/// ESP-IDF calls this from the GPIO interrupt. Disarm first: a level
-/// interrupt keeps firing for as long as the level holds
-unsafe extern "C" fn on_pin(arg: *mut core::ffi::c_void) {
-    let gpio = arg as i32;
-    gpio_intr_disable(gpio);
-    let wake = &PIN_WAKES[gpio as usize];
-    wake.fired_at_us
-        .store(esp_timer_get_time() as u32, Ordering::Relaxed);
-    wake.fired.store(true, Ordering::Release);
-    wake.waker.wake();
-}
-
-/// When `gpio`'s interrupt ended its last wait, in µs since boot (esp_timer).
-/// None if that wait found its level already there: no interrupt, so no
-/// time. `now_us` is esp_timer's time now: the interrupt's is rebuilt from
-/// its low 32 bits, so ask within ~71 minutes of it
-pub fn fired_at_us(gpio: i32, now_us: i64) -> Option<i64> {
-    let wake = &PIN_WAKES[gpio as usize];
-    if !wake.fired.load(Ordering::Acquire) {
-        return None;
-    }
-    let since_us = (now_us as u32).wrapping_sub(wake.fired_at_us.load(Ordering::Relaxed));
-    Some(now_us - since_us as i64)
-}
-
-impl PinErrorType for RadioPin {
-    type Error = Error;
-}
-
-impl Wait for RadioPin {
-    async fn wait_for_high(&mut self) -> Result<(), Error> {
-        self.wait_for(gpio_int_type_t_GPIO_INTR_HIGH_LEVEL).await
-    }
-
-    async fn wait_for_low(&mut self) -> Result<(), Error> {
-        self.wait_for(gpio_int_type_t_GPIO_INTR_LOW_LEVEL).await
-    }
-
-    async fn wait_for_rising_edge(&mut self) -> Result<(), Error> {
-        self.wait_for(gpio_int_type_t_GPIO_INTR_POSEDGE).await
-    }
-
-    async fn wait_for_falling_edge(&mut self) -> Result<(), Error> {
-        self.wait_for(gpio_int_type_t_GPIO_INTR_NEGEDGE).await
-    }
-
-    async fn wait_for_any_edge(&mut self) -> Result<(), Error> {
-        self.wait_for(gpio_int_type_t_GPIO_INTR_ANYEDGE).await
     }
 }

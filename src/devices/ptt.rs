@@ -1,12 +1,15 @@
 //! The push-to-talk button: GPIO0 (the PRG button), active LOW with the
 //! internal pull-up.
 
-use esp_idf_svc::hal::gpio::{AnyIOPin, Input, PinDriver, Pull};
+use embedded_hal_async::digital::Wait;
+use esp_idf_svc::hal::gpio::{AnyIOPin, Pull};
 
-pub struct Ptt(PinDriver<'static, Input>);
+use super::irq_pin::IrqPin;
+
+pub struct Ptt(IrqPin);
 
 pub fn init(pin: AnyIOPin<'static>) -> Ptt {
-    Ptt(PinDriver::input(pin, Pull::Up).unwrap())
+    Ptt(IrqPin::new(pin.into(), Pull::Up))
 }
 
 impl open_oswst_core::devices::ptt::Ptt for Ptt {
