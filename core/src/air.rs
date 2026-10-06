@@ -24,6 +24,13 @@ pub const CODING_RATE: u32 = 1;
 /// (61.7 -> 65.8ms) and leaves a single repeater ~17ms of slack.
 pub const PREAMBLE_SYMBOLS: u16 = 12;
 
+/// The sync word after the preamble: 4.25 symbols, in quarter symbols so it
+/// stays whole. Fixed by LoRa, at any SF or bandwidth
+const SYNC_WORD_QUARTERS: u32 = 17;
+/// LoRa's explicit header: the first block after the sync word, always 8
+/// symbols (sent at 4/8 whatever the coding rate)
+const HEADER_SYMBOLS: u32 = 8;
+
 /// The band we may use: 902-928 MHz (FCC 15.247)
 const BAND_LOW_HZ: u32 = 902_000_000;
 const BAND_HIGH_HZ: u32 = 928_000_000;
@@ -121,7 +128,7 @@ pub fn symbol_us() -> u32 {
 /// sync word, then the header and payload. 65.8ms for a voice packet
 pub fn packet_us(preamble_symbols: u16, bytes: usize) -> u32 {
     // In quarter symbols, so the 4.25 stays whole
-    let quarters = preamble_symbols as u32 * 4 + 17 + payload_symbols(bytes) * 4;
+    let quarters = preamble_symbols as u32 * 4 + SYNC_WORD_QUARTERS + payload_symbols(bytes) * 4;
     quarters * symbol_us() / 4
 }
 
@@ -131,7 +138,14 @@ pub fn packet_us(preamble_symbols: u16, bytes: usize) -> u32 {
 /// decoded off its channel: in LoRa a frequency offset looks like a time
 /// offset, so its end time is skewed
 pub fn after_header_us(bytes: usize) -> u32 {
-    (payload_symbols(bytes) - 8) * symbol_us()
+    (payload_symbols(bytes) - HEADER_SYMBOLS) * symbol_us()
+}
+
+/// The least time from a packet's preamble IRQ to its header IRQ: the
+/// preamble IRQ fires somewhere in the preamble, then come the sync word and
+/// the header. 12.5 ms at SF7/125k
+pub fn header_after_preamble_us() -> u32 {
+    (SYNC_WORD_QUARTERS + HEADER_SYMBOLS * 4) * symbol_us() / 4
 }
 
 /// Symbols after the sync word for `bytes` of payload, with an explicit
@@ -148,7 +162,7 @@ fn payload_symbols(bytes: usize) -> u32 {
     } else {
         0
     };
-    8 + blocks as u32 * (CODING_RATE + 4)
+    HEADER_SYMBOLS + blocks as u32 * (CODING_RATE + 4)
 }
 
 #[cfg(test)]
@@ -159,6 +173,12 @@ mod tests {
     fn voice_packet_is_65_8ms() {
         assert_eq!(symbol_us(), 1_024);
         assert_eq!(packet_us(PREAMBLE_SYMBOLS, PACKET_BYTES), 65_792);
+    }
+
+    #[test]
+    fn header_comes_12_5ms_after_the_preamble_irq_and_41ms_before_the_end() {
+        assert_eq!(header_after_preamble_us(), 12_544);
+        assert_eq!(after_header_us(PACKET_BYTES), 40_960);
     }
 
     #[test]

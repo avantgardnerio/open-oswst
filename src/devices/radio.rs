@@ -471,8 +471,6 @@ impl Driver {
         let task_us = uptime_us();
         let isr_us = irq_pin::fired_at_us(self.dio1_gpio, task_us);
         let irq_us = isr_us.unwrap_or(task_us);
-        // How long after the interrupt this task got here (measuring)
-        let task_late_us = isr_us.map(|isr_us| task_us - isr_us);
         if let Err(e) = irq {
             log::error!("IRQ error: {:?}", e);
             return;
@@ -482,6 +480,10 @@ impl Driver {
             _ => None,
         };
         let state = self.lora.get_irq_state().await;
+        // How long after the interrupt this task read what the IRQ was. From
+        // the read, not from when this task woke: a flash write can freeze
+        // it in between, and the next IRQ can come meanwhile (stamp_is_its)
+        let task_late_us = isr_us.map(|isr_us| uptime_us() - isr_us);
         self.air = Air::after(&state);
         match state {
             Ok(Some(IrqState::PreambleReceived)) => {
@@ -489,7 +491,11 @@ impl Driver {
                 log::info!("RX preamble");
             }
             Ok(Some(IrqState::HeaderValid)) => {
-                self.header_us = Some(irq_us);
+                // The preamble's IRQ comes first: if this task got here too
+                // late, DIO1's stamp may be the preamble's. Then no header
+                // time, and the skew check is skipped
+                self.header_us =
+                    stamp_is_its(task_late_us, air::header_after_preamble_us()).then_some(irq_us);
                 log::info!("RX header");
             }
             Ok(Some(IrqState::Done)) => {
@@ -580,9 +586,10 @@ impl Driver {
     /// repeater's relay on the next channel arrived garbled but of our
     /// length, bench 2026-10-05)
     /// `task_late_us`: how long after the interrupt the radio task got to it,
-    /// None if no interrupt fired (and `irq_us` is the task's own time)
-    /// `header_us`: when its header IRQ fired, if we saw it: the time from
-    /// there to the end says whether the end time can be trusted
+    /// None if no interrupt fired (and `irq_us` is the task's own time): too
+    /// late, or None, and the end time can't be trusted (stamp_is_its)
+    /// `header_us`: when its header IRQ fired, if we saw it in time: the time
+    /// from there to the end says whether the end time can be trusted
     async fn receive(
         &mut self,
         header_at: Option<Instant>,
@@ -607,13 +614,23 @@ impl Driver {
         // bytes are garbage, but it was on the air, and the app uses that
         // for timing
         let (packet, crc_ok) = crc::split(&self.rx_buf[..len as usize]);
+        // The header's IRQ comes before the end's: if this task got here too
+        // late, DIO1's stamp may be the header's (41 ms early), or there was
+        // no stamp at all. Then we don't know when the packet ended
+        let stamped = stamp_is_its(task_late_us, air::after_header_us(packet.len()));
         // Decoded off its channel, a packet ends at a skewed time (in LoRa a
         // frequency offset looks like a time offset): its header-to-end time
         // gives it away. Without the header's time, we can't tell
-        let timing_ok = header_us.is_none_or(|header_us| {
+        let skewed = header_us.is_some_and(|header_us| {
             let expected_us = air::after_header_us(packet.len()) as i64;
-            (irq_us - header_us - expected_us).abs() <= SKEWED_AFTER_US
+            (irq_us - header_us - expected_us).abs() > SKEWED_AFTER_US
         });
+        let timing_ok = stamped && !skewed;
+        let timing = match (stamped, skewed) {
+            (false, _) => " UNTIMED",
+            (true, true) => " SKEWED",
+            (true, false) => "",
+        };
         if crc_ok {
             log::info!(
                 "RX end [{}B] {}ms after header rssi={} snr={} at={}us {}{}",
@@ -623,7 +640,7 @@ impl Driver {
                 status.snr,
                 irq_us,
                 TaskLate(task_late_us),
-                if timing_ok { "" } else { " SKEWED" }
+                timing
             );
         } else {
             log::warn!(
@@ -634,7 +651,7 @@ impl Driver {
                 status.snr,
                 irq_us,
                 TaskLate(task_late_us),
-                if timing_ok { "" } else { " SKEWED" }
+                timing
             );
         }
 
@@ -1098,6 +1115,17 @@ impl core::fmt::Display for Channel {
             channel => write!(f, " ch={}", channel),
         }
     }
+}
+
+/// Whether DIO1's stamp belongs to the IRQ just handled. DIO1 rises for the
+/// first IRQ raised after the wait arms it, and stays up until this task
+/// clears it. A task that got there later than `gap_us` (the least time
+/// between that IRQ and the one before it in a packet) may find both
+/// raised, and the stamp is the earlier one's. No stamp at all (DIO1 was
+/// already up) is no better. Flash writes freeze this task for 30 ms+
+/// (2026-10-06 desk test): the stamp stays on time, the task doesn't
+fn stamp_is_its(task_late_us: Option<i64>, gap_us: u32) -> bool {
+    task_late_us.is_some_and(|late_us| late_us < gap_us as i64)
 }
 
 /// For the RX log: how long after the DIO1 interrupt the radio task got to
