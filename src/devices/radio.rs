@@ -76,12 +76,24 @@ const CAD_SETTINGS: (CADSymbols, u8, u8) = (CADSymbols::_2, 22, 10);
 /// default is 10ms; 2ms is the TCXO's datasheet maximum (KDS DSB321SDN)
 const TCXO_WAKEUP_US: u32 = 2_000;
 
-/// Sweeping: a hit with no header within this was a false alarm (or a
-/// voice packet's short preamble, caught too late to receive it): back to
-/// sweeping. A slot and a packet, so the next packet gets its chance
+/// Sweeping: a hit with no good packet and no sign of one (SIGN_HOLD_MAX)
+/// within this was a false alarm (or a voice packet's short preamble, caught
+/// too late to receive it): back to sweeping. A slot and a packet, so the
+/// next packet gets its chance. Logged "no header after the hit", as on
+/// every walk before
 fn false_alarm_wait() -> Duration {
     Duration::from_micros((air::slot_us() + air::packet_us(PREAMBLE_SYMBOLS, PACKET_BYTES)) as u64)
 }
+
+/// Locked on a hit with no good packet yet, each sign of a transmission (a
+/// preamble, a header, a garbled packet) starts the false alarm's wait
+/// again, but only this long from the hit: a source that keeps setting off
+/// the preamble detector can't hold the radio forever. At the edge on the
+/// walk of 2026-10-06 the handheld kept dropping the echo's replay, every
+/// preamble of it, for want of a good packet in one wait. Noise rarely
+/// gets that far: 2.6% of the handheld's 500 false alarms outside any
+/// transmission had a preamble IRQ, vs 58% during one
+const SIGN_HOLD_MAX: Duration = Duration::from_secs(2);
 
 pub struct Peripherals {
     pub spi: SPI2<'static>,
@@ -233,12 +245,15 @@ enum State {
     Sweeping { next: usize, ready: bool },
     /// RX on sweep channel `channel`: a CAD hit there at `hit_at`, or the
     /// app said Hold (channel 0, the start slot) or gave us a rotation.
+    /// `sign_at`: the last sign of a transmission there, the hit itself or a
+    /// preamble, header or garbled packet since (SIGN_HOLD_MAX).
     /// `heard`: a packet handed to the app since, or the app's word: then it
     /// stays until the app says Sweep. `rotation`: the app's schedule of
     /// channels, bin by bin (`channel` is whichever we're on now)
     Locked {
         channel: usize,
         hit_at: Instant,
+        sign_at: Instant,
         heard: bool,
         rotation: Option<Rotation>,
     },
@@ -360,6 +375,7 @@ impl Driver {
         self.state = State::Locked {
             channel: next,
             hit_at: Instant::now(),
+            sign_at: Instant::now(),
             heard: false,
             rotation: None,
         };
@@ -375,6 +391,7 @@ impl Driver {
                 self.state = State::Locked {
                     channel: 0,
                     hit_at: Instant::now(),
+                    sign_at: Instant::now(),
                     heard: true,
                     rotation: None,
                 };
@@ -410,6 +427,7 @@ impl Driver {
                 self.state = State::Locked {
                     channel: on.unwrap_or(channel),
                     hit_at: Instant::now(),
+                    sign_at: Instant::now(),
                     heard: true,
                     rotation: Some(rotation),
                 };
@@ -438,17 +456,20 @@ impl Driver {
         match self.state {
             State::Locked {
                 hit_at,
+                sign_at,
                 heard: false,
                 ..
             } => {
-                let at = hit_at + false_alarm_wait();
+                let at = (sign_at + false_alarm_wait()).min(hit_at + SIGN_HOLD_MAX);
                 Some(self.air.busy_until().map_or(at, |busy| at.max(busy)))
             }
             _ => None,
         }
     }
 
-    /// A hit, but no header followed: back to sweeping, from the next channel
+    /// A hit, but no good packet followed: back to sweeping, from the start
+    /// slot, where transmissions begin (or from the next one, if it was the
+    /// start slot that came to nothing)
     fn on_false_alarm(&mut self) {
         let State::Locked { channel, .. } = self.state else {
             return;
@@ -456,10 +477,12 @@ impl Driver {
         self.sweep_stats.false_alarms += 1;
         log::info!("SWEEP unlock channel {}: no header after the hit", channel);
         self.air = Air::Clear;
-        self.state = State::Sweeping {
-            next: (channel + 1) % self.sweep.len(),
-            ready: false,
+        let next = if channel == 0 {
+            1 % self.sweep.len()
+        } else {
+            0
         };
+        self.state = State::Sweeping { next, ready: false };
     }
 
     /// The radio raised an IRQ while listening.
@@ -485,6 +508,19 @@ impl Driver {
         // it in between, and the next IRQ can come meanwhile (stamp_is_its)
         let task_late_us = isr_us.map(|isr_us| uptime_us() - isr_us);
         self.air = Air::after(&state);
+        // Locked on a hit with no good packet yet: any IRQ is a sign someone's
+        // transmitting here, even if this packet is lost (SIGN_HOLD_MAX)
+        if let (
+            Ok(_),
+            State::Locked {
+                sign_at,
+                heard: false,
+                ..
+            },
+        ) = (&state, &mut self.state)
+        {
+            *sign_at = Instant::now();
+        }
         match state {
             Ok(Some(IrqState::PreambleReceived)) => {
                 self.header_us = None;

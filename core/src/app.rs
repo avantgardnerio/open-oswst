@@ -53,6 +53,12 @@ const HOUSEKEEPING_PERIOD: embassy_time::Duration = embassy_time::Duration::from
 /// Nothing heard or sent for this long, with no transmission on the conveyor
 /// (whose end is the conveyor's to say: conveyor.rs): the radio may sweep again
 const RX_TIMEOUT: Duration = Duration::from_millis(500);
+/// After our own transmission, the start slot is held this long for a reply
+/// before the radio may sweep: an echo station's replay arrives 1.25-1.65 s
+/// after PTT release (walk of 2026-10-06), and a sweeping radio at the edge
+/// lost it hopping between channels. Long enough for a person's answer to
+/// begin too
+const REPLY_WAIT: Duration = Duration::from_secs(3);
 /// After our own transmission, our txid counts as ours this long: its copies
 /// relayed back by repeaters arrive within a bin or two. After that it's
 /// anyone's, so a talker who draws the same txid isn't ignored
@@ -127,6 +133,7 @@ pub async fn init<P: Platform>(
             playback: Box::default(),
             own_txid: None,
             own_txid_until: Instant::now(),
+            reply_until: Instant::now(),
             last_heard_txid: None,
             rotation: None,
         },
@@ -183,6 +190,7 @@ struct Receiving {
     playback: Box<PlaybackTiming>, // per received transmission, logged at its end
     own_txid: Option<u8>,     // our last transmission's, so we ignore it relayed back
     own_txid_until: Instant,  // until then: our relayed copies only come back for a moment
+    reply_until: Instant,     // after our transmission: the start slot held for a reply until then
     last_heard_txid: Option<u8>, // the last transmission heard: a new one of ours never takes it
     rotation: Option<Rotation>, // the last rotation the radio was told to listen on, if it still is
 }
@@ -288,11 +296,13 @@ impl<P: Platform> App<P> {
             }
         }
 
-        // Nothing heard or sent for a while, and no transmission going: the
-        // radio may sweep again (if it sweeps at all). Once per quiet spell
+        // Nothing heard or sent for a while, no transmission going, and no
+        // reply to ours still due: the radio may sweep again (if it sweeps at
+        // all). Once per quiet spell
         let quiet_since = self.logs.last_activity;
         if self.rx.transmission.is_none()
             && quiet_since.elapsed() > RX_TIMEOUT
+            && Instant::now() >= self.rx.reply_until
             && self.swept_after != Some(quiet_since)
         {
             self.listen(Listen::Sweep);
@@ -790,6 +800,7 @@ impl<P: Platform> App<P> {
             unreachable!("discard_rx never returns");
         }
         self.rx.own_txid_until = Instant::now() + OWN_RELAYS_FOR;
+        self.rx.reply_until = Instant::now() + REPLY_WAIT;
         self.logs.last_activity = Instant::now();
         self.draw_screen(Activity::Idle);
     }
@@ -826,6 +837,7 @@ impl<P: Platform> App<P> {
 
         log::info!("PTT released — {} packets sent + EOT", packets);
         self.rx.own_txid_until = Instant::now() + OWN_RELAYS_FOR;
+        self.rx.reply_until = Instant::now() + REPLY_WAIT;
         self.logs.last_activity = Instant::now();
         self.draw_screen(Activity::Idle);
     }
