@@ -54,14 +54,14 @@ pub static RX_HOPS: Setting = Setting::number("rx_hops", 1, 207, 1).must_match()
 /// Only 0 is allowed yet: transmitters don't hop
 pub static TX_HOPS: Setting = Setting::number("tx_hops", 0, 0, 0).must_match();
 
-/// The SX1262's output power, dBm: -9 to 6. The radio driver caps it at
-/// what the amp can take whatever this says (src/devices/radio.rs
+/// The SX1262's output power, dBm: -9 to 15 (the FEM adds ~13 dB). The
+/// radio driver caps it whatever this says (src/devices/radio.rs
 /// MAX_TX_POWER_DBM). Lower it for radios sitting next to each other on the
 /// desk: at full power each transmitter leaks a copy onto the other channels
 /// that a radio inches away decodes, 10 dB down with its timing true (bench
 /// 2026-10-05), and a transmission can then be followed on the wrong
 /// channels
-pub static TX_POWER_DBM: Setting = Setting::number("tx_power_dbm", -9, 6, 6).live();
+pub static TX_POWER_DBM: Setting = Setting::number("tx_power_dbm", -9, 15, 15).live();
 
 pub static SETTINGS: &[&Setting] = &[
     &MODE,

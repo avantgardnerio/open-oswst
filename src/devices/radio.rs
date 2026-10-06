@@ -25,11 +25,13 @@ pub use open_oswst_core::devices::radio::{
 type Radio = LoRa<Sx126x<RadioSpi, radio_bus::Interface, Sx1262>, embassy_time::Delay>;
 
 /// The most SX1262 output power we ever ask for: every TX here is capped at
-/// it, whatever the tx_power_dbm setting says. The FEM adds ~13 dB, so this
-/// gives ~19 dBm into the Air Buddy amp (max input 20 dBm: more damages it).
-/// At its max 11 dB gain that's ~30 dBm out, ~35 dBm EIRP on a 5 dBi
-/// antenna: under the FCC's 36 dBm.
-pub const MAX_TX_POWER_DBM: i32 = 6;
+/// it, whatever the tx_power_dbm setting says. The FEM (KCT8103L) adds ~13
+/// dB, so this gives ~28 dBm at the antenna: the FEM's saturated output
+/// (28.0 dBm at 3.3 V, KCT's catalog in docs/); asking for more only costs
+/// current. ~30 dBm EIRP on our ~2 dBi whips.
+/// No external amp since 2026-10-06. 🚨 Don't run this with an Air Buddy
+/// fitted: ~28 dBm into its 20 dBm max input damages it (it was 6 then)
+pub const MAX_TX_POWER_DBM: i32 = 15;
 
 /// Random wait (0..this ms) before each TX, so repeaters that heard the same
 /// packet don't all relay at once. OFF (0) for now: with only 3 radios built
