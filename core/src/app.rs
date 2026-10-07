@@ -324,10 +324,10 @@ impl<P: Platform> App<P> {
         // Flash writes stall the chip, so logs only go to the file once the
         // air has been quiet a while, and one chunk per tick. Between chunks,
         // any packet or PTT press gets handled first.
-        // Never on a repeater: a packet can arrive at any moment, and one
-        // landing during the stall misses its relay slot.
-        let repeater = mode::get() == Mode::Repeater;
-        if !repeater
+        // Never with log_to_flash off (config::LOG_TO_FLASH): a repeater runs
+        // that way, since a packet can arrive at any moment and one landing
+        // during the stall misses its relay slot
+        if config::LOG_TO_FLASH.is_on()
             && !receiving
             && self.logs.last_activity.elapsed() > LOG_FLUSH_IDLE
             && logger::pending()
@@ -366,6 +366,9 @@ impl<P: Platform> App<P> {
         if !rx_pkt.crc_ok {
             if let Some(transmission) = &mut self.rx.transmission {
                 transmission.heard_garbled(rx_pkt.end_us, rx_pkt.timing_ok);
+            }
+            if config::PLAY_GARBLED.is_on() {
+                self.play_garbled(&rx_pkt);
             }
             return;
         }
@@ -512,22 +515,7 @@ impl<P: Platform> App<P> {
             return; // skip decode — fast turnaround
         }
 
-        // To the codec thread. Its audio comes back as an event of its own
-        // (on_decoded): waiting for it here, the app couldn't keep the
-        // speaker fed, playback fell behind and the backlog filled the heap
-        let mut payload = [0u8; PAYLOAD_BYTES];
-        payload.copy_from_slice(&rx_pkt.data[HEADER_BYTES..]);
-        if self.rx.playing_txid != Some(txid) {
-            self.rx.playout.reset();
-            self.rx.playing_txid = Some(txid);
-        }
-        match self
-            .codec_tx
-            .try_send(CodecRequest::decode(txid, packet, payload))
-        {
-            Ok(()) => self.rx.playout.decoding(),
-            Err(_) => log::warn!("RX packet={} dropped: the codec is behind", packet),
-        }
+        self.decode(txid, packet, &rx_pkt.data[HEADER_BYTES..]);
 
         log::info!(
             "RX [{}B] txid={} packet={} hops={} rssi={} snr={}",
@@ -540,6 +528,75 @@ impl<P: Platform> App<P> {
         );
 
         self.show(Activity::Receiving);
+    }
+
+    /// A packet's audio to the codec thread. It comes back as an event of its
+    /// own (on_decoded): waiting for it here, the app couldn't keep the
+    /// speaker fed, playback fell behind and the backlog filled the heap
+    fn decode(&mut self, txid: u8, packet: i64, audio: &[u8]) {
+        let mut payload = [0u8; PAYLOAD_BYTES];
+        payload.copy_from_slice(audio);
+        if self.rx.playing_txid != Some(txid) {
+            self.rx.playout.reset();
+            self.rx.playing_txid = Some(txid);
+        }
+        match self
+            .codec_tx
+            .try_send(CodecRequest::decode(txid, packet, payload))
+        {
+            Ok(()) => self.rx.playout.decoding(),
+            Err(_) => log::warn!("RX packet={} dropped: the codec is behind", packet),
+        }
+    }
+
+    /// A packet whose CRC failed, played in place of a silence
+    /// (config::PLAY_GARBLED): Codec2 makes most corrupted audio intelligible.
+    /// Only when the conveyor can say which packet it was, and it's the last
+    /// copy of it that can come (Transmission::garbled_packet). Its length
+    /// came from its header, so a wrong one can't be audio. An echo station
+    /// records it, to go out again in the replay; a repeater never relays
+    /// what it can't vouch for
+    fn play_garbled(&mut self, rx_pkt: &RxPacket) {
+        if rx_pkt.data.len() != PACKET_BYTES {
+            return;
+        }
+        let Some(transmission) = &mut self.rx.transmission else {
+            return;
+        };
+        let Some(packet) = transmission.garbled_packet(rx_pkt.end_us, rx_pkt.timing_ok) else {
+            return;
+        };
+        let txid = transmission.txid;
+        let audio = &rx_pkt.data[HEADER_BYTES..];
+        match mode::get() {
+            Mode::Repeater => {}
+            Mode::Echo => {
+                if self.echo.record(txid, packet, audio) {
+                    log::info!(
+                        "ECHO rec txid={} packet={} garbled rssi={} snr={}",
+                        txid,
+                        packet,
+                        rx_pkt.rssi,
+                        rx_pkt.snr
+                    );
+                }
+            }
+            Mode::Normal => {
+                if !transmission.first_copy(packet) {
+                    return;
+                }
+                self.decode(txid, packet, audio);
+                log::info!(
+                    "RX [{}B] txid={} packet={} garbled, played rssi={} snr={}",
+                    rx_pkt.data.len(),
+                    txid,
+                    packet,
+                    rx_pkt.rssi,
+                    rx_pkt.snr
+                );
+                self.show(Activity::Receiving);
+            }
+        }
     }
 
     /// A packet's audio, back from the codec: on to the speaker, in order,
@@ -1163,7 +1220,7 @@ async fn relay(rx_pkt: &RxPacket, preamble: Option<u16>, channel: u8) -> Option<
     let _ = data.extend_from_slice(&rx_pkt.data[HEADER_BYTES..]);
     // A wake-up's long preamble takes the same air as a voice packet (air.rs)
     let heard_started_us =
-        rx_pkt.end_us - air::packet_us(air::PREAMBLE_SYMBOLS, PACKET_BYTES) as i64;
+        rx_pkt.end_us - air::packet_us(air::preamble_symbols(), PACKET_BYTES) as i64;
     TX_CHAN
         .send(TxRequest {
             data,

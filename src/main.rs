@@ -63,13 +63,14 @@ fn main() {
     logger::init(|| unsafe { esp_idf_svc::sys::esp_log_timestamp() });
     log::info!("open-oswst starting...");
 
-    // Logs also go to a file per boot. Without storage we still log to serial
-    let log_dir = Path::new(storage::ROOT).join("log");
-    match storage::init().map(|()| logger::open_file(&log_dir, storage::usage)) {
-        Ok(Ok(path)) => log::info!("Logging to {}", path.display()),
-        Ok(Err(e)) => log::warn!("No log file ({}), serial only", e),
-        Err(e) => log::warn!("Storage unavailable ({}), serial only", e),
-    }
+    // The settings (and the log files) live on the storage
+    let storage_ok = match storage::init() {
+        Ok(()) => true,
+        Err(e) => {
+            log::warn!("Storage unavailable ({}), serial only", e);
+            false
+        }
+    };
 
     let board = board::take();
     let _fem = fem::init(board.fem);
@@ -78,6 +79,19 @@ fn main() {
     // After storage: the settings are a file on it
     let settings = settings::init();
     config::load(Some(&settings));
+
+    // Logs also go to a file per boot, unless log_to_flash is off: then
+    // nothing from logging ever writes the flash. Opened only now that the
+    // settings say; the lines logged before wait in the RAM buffer
+    if storage_ok && config::LOG_TO_FLASH.is_on() {
+        let log_dir = Path::new(storage::ROOT).join("log");
+        match logger::open_file(&log_dir, storage::usage) {
+            Ok(path) => log::info!("Logging to {}", path.display()),
+            Err(e) => log::warn!("No log file ({}), serial only", e),
+        }
+    } else if storage_ok {
+        log::info!("Not logging to flash (log_to_flash off): serial only");
+    }
     let wifi_networks = settings.wifi_networks();
     log::info!("Config: {} WiFi network(s)", wifi_networks.len());
     let settings = Some(settings);

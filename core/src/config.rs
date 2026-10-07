@@ -54,14 +54,27 @@ pub static RX_HOPS: Setting = Setting::number("rx_hops", 1, 207, 1).must_match()
 /// Only 0 is allowed yet: transmitters don't hop
 pub static TX_HOPS: Setting = Setting::number("tx_hops", 0, 0, 0).must_match();
 
-/// The SX1262's output power, dBm: -9 to 15 (the FEM adds ~13 dB). The
-/// radio driver caps it whatever this says (src/devices/radio.rs
-/// MAX_TX_POWER_DBM). Lower it for radios sitting next to each other on the
-/// desk: at full power each transmitter leaks a copy onto the other channels
-/// that a radio inches away decodes, 10 dB down with its timing true (bench
-/// 2026-10-05), and a transmission can then be followed on the wrong
-/// channels
-pub static TX_POWER_DBM: Setting = Setting::number("tx_power_dbm", -9, 15, 15).live();
+/// The SX1262's output power, dBm: -9 to 22 (the chip's own range). Nothing
+/// caps it: set it for the hardware. The FEM adds ~13 dB, so 15 gives ~28
+/// dBm at the antenna with no external amp (the FEM's most). WARNING: with an Air
+/// Buddy amp fitted set 6 or less: ~19 dBm reaches the amp, whose input
+/// takes 20 dBm at most (more damages it), and it puts out ~30 dBm.
+/// (The amps came out 2026-10-06 and may go back for comparisons, so this
+/// is switched by hand rather than capped in the driver.) Lower it for
+/// radios sitting next to each other on the desk: at full power each
+/// transmitter leaks a copy onto the other channels that a radio inches
+/// away decodes, 10 dB down with its timing true (bench 2026-10-05), and a
+/// transmission can then be followed on the wrong channels
+pub static TX_POWER_DBM: Setting = Setting::number("tx_power_dbm", -9, 22, 15).live();
+
+/// Preamble length in symbols, sent and expected: every radio must agree,
+/// so it's read at boot (the radio is set up with it once). 12 since
+/// 2026-10-03 (air::preamble_symbols has the story: missed detections on
+/// the walk of that day, and a relay still fitting the slot); 8 before,
+/// which is what the walk-5 baseline (2026-10-03 AM) ran. A shorter
+/// preamble shortens every packet (8: 61.7 ms, 12: 65.8 ms) and widens the
+/// guard either side of it in its bin (air::guard_us)
+pub static PREAMBLE_SYMBOLS: Setting = Setting::number("preamble_symbols", 8, 16, 12).must_match();
 
 pub static SETTINGS: &[&Setting] = &[
     &MODE,
@@ -71,6 +84,7 @@ pub static SETTINGS: &[&Setting] = &[
     &RX_HOPS,
     &TX_HOPS,
     &TX_POWER_DBM,
+    &PREAMBLE_SYMBOLS,
 ];
 
 /// This radio's friendly name, sent in every end packet (packet::Ident)
@@ -93,7 +107,50 @@ pub static WAKE_PREAMBLE: Setting = Setting::bool("wake_preamble", false).live()
 /// next channel (rx_hops). We still start transmissions on the start slot
 pub static SWEEP: Setting = Setting::bool("sweep", false);
 
-pub static FLAGS: &[&Setting] = &[&WAKE_PREAMBLE, &SWEEP];
+/// Play a packet whose CRC failed, rather than a silence in its place, when
+/// the conveyor can say which packet it was: it landed on the belt of the
+/// transmission being heard (its bin gives its number; its header can't be
+/// trusted). Only the last copy of a packet that can still come is played
+/// (conveyor.rs Transmission::garbled_packet), so a good copy is never
+/// lost to a garbled one. An echo station records it as well, so it goes
+/// out again in the replay.
+///
+/// Why (2026-10-06): before our own CRC (10-04) corrupted packets reached
+/// the speaker, and Codec2 makes most of them intelligible: the walks then
+/// sounded better at the edge, where now those packets are dropped (the
+/// CONVEYOR line counts them: "garbled on the belt"). Off: dropped, as now
+pub static PLAY_GARBLED: Setting = Setting::bool("play_garbled", false).live();
+
+/// Keep a log file on the flash (/data/log, one per boot). Off: the file
+/// is never opened and nothing is ever flushed, so logging never writes the
+/// flash at all; lines still go to the serial console. A flash write stalls
+/// both cores for up to ~18 ms (the radio task included), which is why the
+/// app only flushes once the air has been quiet a while.
+///
+/// Read at boot. Was tied to the role until 2026-10-06 (a repeater never
+/// flushed, every other radio did); now it's this flag's to say, so (WARNING) a
+/// repeater needs `log_to_flash = false` in its file to keep not logging
+pub static LOG_TO_FLASH: Setting = Setting::bool("log_to_flash", true);
+
+/// Log every packet's bytes as hex, CRC included: "PKT TX" for each one
+/// sent, after it's on the air (so the line never delays a send), and
+/// "PKT RX" for each one received, good or not (crc=ok/bad), with its end
+/// time, RSSI and SNR. Turned on at both ends of a link (a handheld and the
+/// echo station), the two logs say bit for bit what each garbled packet
+/// lost: pair each "crc=bad" with the closest "PKT TX" of the same
+/// transmission and XOR. That sizes any FEC (how many bits, where, in
+/// bursts or not), and shows how much Codec2 tolerates (play_garbled).
+/// ~90 bytes of log per packet: a 6 s transmission is ~3-7 KB, inside the
+/// 16 KB log buffer. Off by default
+pub static LOG_PACKETS: Setting = Setting::bool("log_packets", false).live();
+
+pub static FLAGS: &[&Setting] = &[
+    &WAKE_PREAMBLE,
+    &SWEEP,
+    &PLAY_GARBLED,
+    &LOG_TO_FLASH,
+    &LOG_PACKETS,
+];
 
 /// A setting that's text: up to packet::NAME_BYTES of UTF-8, read at boot
 /// (a change applies after a reboot)

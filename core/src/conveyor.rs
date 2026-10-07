@@ -220,6 +220,30 @@ impl Transmission {
         landing.on_belt()
     }
 
+    /// A garbled packet worth playing in place of a silence
+    /// (config::PLAY_GARBLED): which of the talker's packets it is, or None.
+    /// Its header can't be trusted, so its bin says which: the talker's copy
+    /// of packet n is in bin 2n, a repeater's in bin 2n + 1 (one repeater at
+    /// most: with more, an odd bin could hold any of their copies). And only
+    /// the last copy that can still come is played: the repeater's once one
+    /// has been heard in this transmission, otherwise the talker's own. An
+    /// earlier copy is left for a good one to replace. Call heard_garbled
+    /// first: this only reads where it landed
+    pub fn garbled_packet(&self, end_us: i64, timing_ok: bool) -> Option<i64> {
+        if !timing_ok || !self.anchored {
+            return None;
+        }
+        let landing = self.conveyor.landing(end_us, None);
+        if !landing.on_belt() {
+            return None;
+        }
+        let last_hops = if self.tally.relayed > 0 { 1 } else { 0 };
+        if landing.bin.rem_euclid(2) != last_hops {
+            return None;
+        }
+        Some((landing.bin - last_hops) / 2)
+    }
+
     /// Where to listen, bin by bin (climb.rs): the hold's channel in its
     /// bins, seeking one on and one back in the others (a repeater: the
     /// hold's in all). None until the belt's time is trusted
@@ -351,7 +375,7 @@ fn guard_us() -> i64 {
 
 /// A voice packet's air time, 65.8 ms. A wake-up packet takes the same (air.rs)
 fn packet_air_us() -> i64 {
-    air::packet_us(air::PREAMBLE_SYMBOLS, PACKET_BYTES) as i64
+    air::packet_us(air::preamble_symbols(), PACKET_BYTES) as i64
 }
 
 /// `value` / `divisor` to the nearest whole number (halves round up).
@@ -559,6 +583,21 @@ mod tests {
         let (transmission, _) = Transmission::start(42, 1, arrival(FIRST_END, 2, 0, true));
         assert_eq!(transmission.channel_of(0), Some(0));
         assert_eq!(transmission.channel_of(3), Some(0));
+    }
+
+    #[test]
+    fn a_garbled_packet_plays_only_as_the_last_copy_that_can_come() {
+        let (mut transmission, _) = Transmission::start(7, 1, arrival(ends(0, 0), 0, 0, true));
+        // No repeater heard: the talker's copy is the last, in even bins
+        assert_eq!(transmission.garbled_packet(ends(4, 2_000), true), Some(2));
+        assert_eq!(transmission.garbled_packet(ends(5, 0), true), None);
+        // Off the belt, or timing not to be trusted: no telling
+        assert_eq!(transmission.garbled_packet(ends(4, 30_000), true), None);
+        assert_eq!(transmission.garbled_packet(ends(4, 0), false), None);
+        // Once a repeater's copy is heard, its odd bins hold the last copies
+        transmission.heard(arrival(ends(7, 0), 1, 0, true));
+        assert_eq!(transmission.garbled_packet(ends(8, 0), true), None);
+        assert_eq!(transmission.garbled_packet(ends(9, 0), true), Some(4));
     }
 
     #[test]

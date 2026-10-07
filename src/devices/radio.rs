@@ -24,15 +24,6 @@ pub use open_oswst_core::devices::radio::{
 
 type Radio = LoRa<Sx126x<RadioSpi, radio_bus::Interface, Sx1262>, embassy_time::Delay>;
 
-/// The most SX1262 output power we ever ask for: every TX here is capped at
-/// it, whatever the tx_power_dbm setting says. The FEM (KCT8103L) adds ~13
-/// dB, so this gives ~28 dBm at the antenna: the FEM's saturated output
-/// (28.0 dBm at 3.3 V, KCT's catalog in docs/); asking for more only costs
-/// current. ~30 dBm EIRP on our ~2 dBi whips.
-/// No external amp since 2026-10-06. 🚨 Don't run this with an Air Buddy
-/// fitted: ~28 dBm into its 20 dBm max input damages it (it was 6 then)
-pub const MAX_TX_POWER_DBM: i32 = 15;
-
 /// Random wait (0..this ms) before each TX, so repeaters that heard the same
 /// packet don't all relay at once. OFF (0) for now: with only 3 radios built
 /// it just complicates testing. It comes back if N repeaters need to take
@@ -50,9 +41,6 @@ const PREPARE_US: i64 = 5_000;
 /// Getting a packet ready takes ~2.4 ms: with less than this left before the
 /// latest it may start (its send time plus the guard), it's dropped
 const PREPARE_AT_LEAST_US: i64 = 3_000;
-
-/// Preamble length in symbols, TX and RX alike: why 12 is in air.rs
-const PREAMBLE_SYMBOLS: u16 = air::PREAMBLE_SYMBOLS;
 
 /// A detected preamble is only a maybe: if no valid header follows within
 /// this, it wasn't a packet (e.g. we started listening mid-packet and the
@@ -84,7 +72,9 @@ const TCXO_WAKEUP_US: u32 = 2_000;
 /// next packet gets its chance. Logged "no header after the hit", as on
 /// every walk before
 fn false_alarm_wait() -> Duration {
-    Duration::from_micros((air::slot_us() + air::packet_us(PREAMBLE_SYMBOLS, PACKET_BYTES)) as u64)
+    Duration::from_micros(
+        (air::slot_us() + air::packet_us(air::preamble_symbols(), PACKET_BYTES)) as u64,
+    )
 }
 
 /// Locked on a hit with no good packet yet, each sign of a transmission (a
@@ -168,13 +158,15 @@ pub async fn init(
         )
         .unwrap();
 
+    // The preamble setting is read once, here: every radio must agree on it
+    // (config::PREAMBLE_SYMBOLS, air::preamble_symbols)
     let tx_params = lora
         // LoRa's CRC off: we send and check our own (open_oswst_core::crc)
-        .create_tx_packet_params(PREAMBLE_SYMBOLS, false, false, false, &mdltn)
+        .create_tx_packet_params(air::preamble_symbols(), false, false, false, &mdltn)
         .unwrap();
 
     let rx_params = lora
-        .create_rx_packet_params(PREAMBLE_SYMBOLS, false, 255, false, false, &mdltn)
+        .create_rx_packet_params(air::preamble_symbols(), false, 255, false, false, &mdltn)
         .unwrap();
 
     let sweep: Vec<ModulationParams> = sweep_hz
@@ -652,6 +644,19 @@ impl Driver {
         // bytes are garbage, but it was on the air, and the app uses that
         // for timing
         let (packet, crc_ok) = crc::split(&self.rx_buf[..len as usize]);
+        // Every packet as it came off the air, CRC included, to compare with
+        // what was sent (config::LOG_PACKETS)
+        if config::LOG_PACKETS.is_on() {
+            log::info!(
+                "PKT RX [{}B] crc={} at={}us rssi={} snr={} {}",
+                len,
+                if crc_ok { "ok" } else { "bad" },
+                irq_us,
+                status.rssi,
+                status.snr,
+                Hex(&self.rx_buf[..len as usize])
+            );
+        }
         // The header's IRQ comes before the end's: if this task got here too
         // late, DIO1's stamp may be the header's (41 ms early), or there was
         // no stamp at all. Then we don't know when the packet ended
@@ -805,7 +810,7 @@ impl Driver {
 
     /// Send one packet, then go back to listening. Each step is timed: a
     /// relay has to fit in the talker's gap, so every ms of turnaround counts.
-    /// `preamble`: symbols, if not PREAMBLE_SYMBOLS. `send_at_us`: when to
+    /// `preamble`: symbols, if not the usual (air::preamble_symbols). `send_at_us`: when to
     /// start (µs since boot): we keep listening until just before it, get
     /// the packet ready, then send at that microsecond. So late it would
     /// leave its bin, it's dropped: a packet out of its bin is worse than none
@@ -863,7 +868,14 @@ impl Driver {
         }
         self.tx_buf[..data.len()].copy_from_slice(data);
         self.tx_buf[data.len()..framed].copy_from_slice(&crc::crc16(data).to_be_bytes());
-        let tx_power_dbm = config::TX_POWER_DBM.get().min(MAX_TX_POWER_DBM);
+        // Not capped: config::TX_POWER_DBM says what the hardware takes.
+        // WARNING: AN AIR BUDDY AMP FITTED NEEDS tx_power_dbm = 6 OR LESS.
+        // The FEM adds ~13 dB, and the amp's input takes 20 dBm at most: the
+        // default (15) puts ~28 dBm into it and destroys it. No amp: 15
+        // (~28 dBm out). The cap that enforced this came out on 2026-10-06
+        // so amps can be swapped in and out for comparisons: set it by hand
+        // every time
+        let tx_power_dbm = config::TX_POWER_DBM.get();
         TX_SINCE_MS.store(uptime_ms(), Ordering::Relaxed);
         let start = Instant::now();
         self.lora.enter_standby().await.unwrap();
@@ -918,6 +930,16 @@ impl Driver {
             Preamble(preamble),
             Channel(channel)
         );
+        // After the send, never before: a log line also goes out on the
+        // serial console, which can take milliseconds
+        if config::LOG_PACKETS.is_on() {
+            log::info!(
+                "PKT TX [{}B] at={}us {}",
+                framed,
+                uptime_us(),
+                Hex(&self.tx_buf[..framed])
+            );
+        }
         TX_SINCE_MS.store(0, Ordering::Relaxed);
     }
 
@@ -1164,6 +1186,18 @@ impl core::fmt::Display for Channel {
 /// (2026-10-06 desk test): the stamp stays on time, the task doesn't
 fn stamp_is_its(task_late_us: Option<i64>, gap_us: u32) -> bool {
     task_late_us.is_some_and(|late_us| late_us < gap_us as i64)
+}
+
+/// For the PKT log lines: bytes as hex, two digits each, no separators
+struct Hex<'a>(&'a [u8]);
+
+impl core::fmt::Display for Hex<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        for byte in self.0 {
+            write!(f, "{:02x}", byte)?;
+        }
+        Ok(())
+    }
 }
 
 /// For the RX log: how long after the DIO1 interrupt the radio task got to

@@ -6,6 +6,7 @@
 //! or must match them). They move into the config as we go.
 
 use crate::codec::{FRAMES_PER_PACKET, HEADER_BYTES, PACKET_BYTES};
+use crate::config;
 
 /// LoRa spreading factor. radio.rs sets SpreadingFactor::_7: keep in step
 pub const SPREADING_FACTOR: u32 = 7;
@@ -22,7 +23,11 @@ pub const CODING_RATE: u32 = 1;
 /// plus a repeater's relay of it overran the 160ms slot on the desk, and
 /// playback underran. 12 costs 4 symbols = 4.1ms per packet at SF7/125k
 /// (61.7 -> 65.8ms) and leaves a single repeater ~17ms of slack.
-pub const PREAMBLE_SYMBOLS: u16 = 12;
+/// The setting config::PREAMBLE_SYMBOLS (default 12) says which: 8 runs the
+/// walk-5 baseline again
+pub fn preamble_symbols() -> u16 {
+    config::PREAMBLE_SYMBOLS.get() as u16
+}
 
 /// The sync word after the preamble: 4.25 symbols, in quarter symbols so it
 /// stays whole. Fixed by LoRa, at any SF or bandwidth
@@ -96,7 +101,7 @@ impl SplitMix64 {
 /// relay slot like any packet. 42 at SF7/125k (12 + 48 - 18)
 pub fn wake_preamble_symbols() -> u16 {
     let extra = payload_symbols(PACKET_BYTES) - payload_symbols(HEADER_BYTES);
-    PREAMBLE_SYMBOLS + extra as u16
+    preamble_symbols() + extra as u16
 }
 
 /// One packet's audio, and so the time from one packet to the next: 160ms
@@ -116,7 +121,7 @@ pub fn bin_us() -> u32 {
 /// in the middle and a radio switching channels at the bin's edges has this
 /// much room either side
 pub fn guard_us() -> u32 {
-    (bin_us() - packet_us(PREAMBLE_SYMBOLS, PACKET_BYTES)) / 2
+    (bin_us() - packet_us(preamble_symbols(), PACKET_BYTES)) / 2
 }
 
 /// 2^SF / bandwidth: 1024us at SF7/125k
@@ -172,7 +177,7 @@ mod tests {
     #[test]
     fn voice_packet_is_65_8ms() {
         assert_eq!(symbol_us(), 1_024);
-        assert_eq!(packet_us(PREAMBLE_SYMBOLS, PACKET_BYTES), 65_792);
+        assert_eq!(packet_us(preamble_symbols(), PACKET_BYTES), 65_792);
     }
 
     #[test]
@@ -219,7 +224,7 @@ mod tests {
         assert_eq!(bin_us(), 80_000);
         assert_eq!(guard_us(), 7_104);
         assert_eq!(
-            2 * guard_us() + packet_us(PREAMBLE_SYMBOLS, PACKET_BYTES),
+            2 * guard_us() + packet_us(preamble_symbols(), PACKET_BYTES),
             bin_us()
         );
     }
@@ -229,7 +234,7 @@ mod tests {
         assert_eq!(wake_preamble_symbols(), 42);
         assert_eq!(
             packet_us(wake_preamble_symbols(), HEADER_BYTES),
-            packet_us(PREAMBLE_SYMBOLS, PACKET_BYTES)
+            packet_us(preamble_symbols(), PACKET_BYTES)
         );
     }
 }

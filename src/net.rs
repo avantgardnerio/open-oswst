@@ -5,7 +5,7 @@
 //! radio on the network.
 //!
 //! With no networks in config.toml, WiFi never starts: no heap spent, and
-//! nothing transmitted. ⚠️ WiFi beacons and probes are easy to
+//! nothing transmitted. WARNING: WiFi beacons and probes are easy to
 //! direction-find. It's on whenever networks are configured, by choice,
 //! until the menus come back to switch it (see the wifi-ota plan).
 //!
