@@ -1,5 +1,5 @@
-//! Rotary encoder with push switch. Hands out turn and click events; knows
-//! nothing about what they mean.
+//! Rotary encoder with push switch. Hands out turn, press and release events;
+//! knows nothing about what they mean.
 //!
 //! `next()` is cancel-safe: all state lives in the struct, and each call first
 //! catches up on anything that changed while nobody was awaiting it, so it can
@@ -53,7 +53,7 @@ pub fn init(p: Peripherals) -> Encoder {
 }
 
 impl Encoder {
-    /// Wait for the next turn (one detent) or click.
+    /// Wait for the next turn (one detent), press or release.
     pub async fn next(&mut self) -> Event {
         loop {
             if let Some(event) = self.update_quadrature() {
@@ -94,7 +94,8 @@ impl Encoder {
         }
     }
 
-    /// Wait until the switch holds steady, then report a click on a new press.
+    /// Wait until the switch holds steady, then report a press or release if
+    /// it changed.
     async fn debounce_switch(&mut self) -> Option<Event> {
         // Each edge restarts the stability window
         while let Either::First(_) = select(
@@ -108,7 +109,11 @@ impl Encoder {
             return None;
         }
         self.pressed = pressed;
-        pressed.then_some(Event::Click)
+        Some(if pressed {
+            Event::Press
+        } else {
+            Event::Release
+        })
     }
 }
 

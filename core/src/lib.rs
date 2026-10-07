@@ -10,6 +10,7 @@ pub mod config;
 pub mod conveyor;
 pub mod crc;
 pub mod devices;
+pub mod double_click;
 pub mod echo;
 pub mod fec;
 pub mod logger;

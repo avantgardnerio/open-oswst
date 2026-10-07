@@ -32,6 +32,7 @@ use crate::codec::{
 };
 use crate::config;
 use crate::conveyor::{Arrival, Landing, Transmission};
+use crate::double_click::DoubleClick;
 use crate::echo::{self, Recorder};
 use crate::menu::{Action, Menu, Outcome, Setting};
 use crate::mode::{self, Mode};
@@ -145,6 +146,7 @@ pub async fn init<P: Platform>(
         },
         echo: Recorder::new(silence),
         locked: false,
+        menu_click: DoubleClick::default(),
         ptt_refused: false,
         logs: LogTimes {
             last_activity: Instant::now(),
@@ -165,9 +167,10 @@ struct App<P: Platform> {
     display: Display,
     rx: Receiving,
     sounds: Sounds,
-    echo: Recorder,    // only used in echo mode
-    locked: bool,      // PTT ignored; the menu still opens, so it can be unlocked
-    ptt_refused: bool, // a PTT press refused (someone else talking): ignored until let go
+    echo: Recorder,          // only used in echo mode
+    locked: bool,            // PTT ignored; the menu still opens, so it can be unlocked
+    menu_click: DoubleClick, // the knob's double click that opens the menu
+    ptt_refused: bool,       // a PTT press refused (someone else talking): ignored until let go
     logs: LogTimes,
     swept_after: Option<Instant>, // the quiet we last told the radio to sweep in
 }
@@ -221,7 +224,14 @@ impl<P: Platform> App<P> {
                 AppEvent::Ptt => self.on_ptt().await,
                 AppEvent::PttReleased => self.ptt_refused = false,
                 AppEvent::Decoded(decoded) => self.on_decoded(decoded),
-                AppEvent::Knob(Knob::Click) => self.run_menu().await,
+                // The menu opens on a quick double click, so a stray one
+                // (a knob bumped in a pocket) can't
+                AppEvent::Knob(Knob::Press) => self.menu_click.press(Instant::now()),
+                AppEvent::Knob(Knob::Release) => {
+                    if self.menu_click.release(Instant::now()) {
+                        self.run_menu().await;
+                    }
+                }
                 AppEvent::Knob(Knob::Cw) => self.change_volume(1),
                 AppEvent::Knob(Knob::Ccw) => self.change_volume(-1),
                 AppEvent::Tick => self.housekeeping().await,
@@ -1046,7 +1056,8 @@ impl<P: Platform> App<P> {
             match self.devices.knob.next().await {
                 Knob::Cw => menu.rotate(1),
                 Knob::Ccw => menu.rotate(-1),
-                Knob::Click => match menu.click() {
+                Knob::Release => {} // a press is a click, in here
+                Knob::Press => match menu.click() {
                     Outcome::Stay => {}
                     Outcome::Exit => break,
                     Outcome::Set(setting, value) => self.apply(setting, value),
