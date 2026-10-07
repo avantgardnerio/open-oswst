@@ -1,15 +1,9 @@
-//! Encoder bringup test — reads the VOL rotary encoder on GPIO1/2/3 and
-//! shows live A/B/SW state plus a quadrature counter and click count on the OLED.
+//! Encoder bringup test — reads the VOL rotary encoder and shows live A/B/SW
+//! state plus a quadrature counter and click count on the OLED.
 //!
-//! Wiring (VOL JST on the board):
-//!   A   -> GPIO3
-//!   B   -> GPIO2
-//!   SW  -> GPIO1
-//!   GND -> encoder common + button common
-//!
-//! NOTE: GPIO1 is also the Heltec V4's VBAT_Read pin (onboard battery divider,
-//! gated by ADC_Ctrl/GPIO37) and GPIO2 is FEM_EN. This test exists to find out
-//! whether either fights the encoder — if so, that's a rev5 design fix.
+//! Pins from board.rs, like the app (on PCB rev `4468800`: A = GPIO3,
+//! B = GPIO6, SW = GPIO45; a rev `dbc0ed0` board has SW on GPIO1). GND goes
+//! to the encoder common and the button common.
 //!
 //! Build & flash: cargo build --bin encoder_test && espflash flash -p <PORT> --partition-table target/xtensa-esp32s3-espidf/debug/partition-table.bin target/xtensa-esp32s3-espidf/debug/encoder_test
 
@@ -19,42 +13,18 @@ use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
 use embedded_graphics::text::Text;
 use esp_idf_svc::hal::gpio::{PinDriver, Pull};
-use esp_idf_svc::hal::i2c::config::Config as I2cConfig;
-use esp_idf_svc::hal::i2c::I2cDriver;
-use esp_idf_svc::hal::peripherals::Peripherals;
-use ssd1306::prelude::*;
-use ssd1306::{I2CDisplayInterface, Ssd1306};
+use open_oswst::board;
+use open_oswst::devices::screen;
 use std::thread;
 use std::time::{Duration, Instant};
 
 fn main() {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
-    log::info!("Encoder test starting (VOL on GPIO3/2/1)");
+    log::info!("Encoder test starting (VOL pins from board.rs)");
 
-    let p = Peripherals::take().unwrap();
-
-    // Vext power on (GPIO36 LOW) so the OLED comes up.
-    let mut vext = PinDriver::output(p.pins.gpio36).unwrap();
-    vext.set_low().unwrap();
-    thread::sleep(Duration::from_millis(50));
-
-    // OLED reset (GPIO21).
-    let mut oled_rst = PinDriver::output(p.pins.gpio21).unwrap();
-    oled_rst.set_low().unwrap();
-    thread::sleep(Duration::from_millis(50));
-    oled_rst.set_high().unwrap();
-    thread::sleep(Duration::from_millis(50));
-
-    let i2c = I2cDriver::new(p.i2c0, p.pins.gpio17, p.pins.gpio18, &I2cConfig::default()).unwrap();
-    let mut display = Ssd1306::new(
-        I2CDisplayInterface::new(i2c),
-        DisplaySize128x64,
-        DisplayRotation::Rotate0,
-    )
-    .into_buffered_graphics_mode();
-    display.init().unwrap();
-    display.set_brightness(Brightness::BRIGHTEST).unwrap();
+    let board = board::take();
+    let screen = screen::init(board.screen);
 
     let style = MonoTextStyleBuilder::new()
         .font(&FONT_9X18)
@@ -62,11 +32,9 @@ fn main() {
         .build();
 
     // VOL encoder inputs with internal pull-ups (common ties to GND).
-    let a = PinDriver::input(p.pins.gpio3, Pull::Up).unwrap();
-    let b = PinDriver::input(p.pins.gpio2, Pull::Up).unwrap();
-    let sw = PinDriver::input(p.pins.gpio1, Pull::Up).unwrap();
-
-    let _oled_rst = oled_rst;
+    let a = PinDriver::input(board.vol.a, Pull::Up).unwrap();
+    let b = PinDriver::input(board.vol.b, Pull::Up).unwrap();
+    let sw = PinDriver::input(board.vol.sw, Pull::Up).unwrap();
 
     let mut last_ab = (a.is_high(), b.is_high());
     let mut last_sw = sw.is_high();
@@ -140,17 +108,17 @@ fn main() {
             let line2 = format!("rot {:>4} ({})", detents, quad_count);
             let line3 = format!("clk {}", clicks);
 
-            display.clear_buffer();
+            let mut frame = screen.frame();
             Text::new(&line1, Point::new(2, 16), style)
-                .draw(&mut display)
+                .draw(&mut frame)
                 .unwrap();
             Text::new(&line2, Point::new(2, 36), style)
-                .draw(&mut display)
+                .draw(&mut frame)
                 .unwrap();
             Text::new(&line3, Point::new(2, 56), style)
-                .draw(&mut display)
+                .draw(&mut frame)
                 .unwrap();
-            display.flush().unwrap();
+            screen.show(frame);
             last_flush = Instant::now();
         }
 
