@@ -59,7 +59,11 @@ PERF_W = 70
 PERF_L = 50
 PERF_HOLE_FROM_LR = 5      # mm from left & right edges of board
 PERF_HOLE_FROM_TB = 2.5    # mm from top & bottom edges of board
-PERF_POST_HEIGHT = 11
+# The Heltec hangs under our board in female header sockets (#47) instead of being soldered on, so
+# our board rides the sockets' height higher while the Heltec's screen stays flush in the floor
+# window. 11 was the post height with the Heltec soldered on
+HELTEC_SOCKET_H = 8.5
+PERF_POST_HEIGHT = 11 + HELTEC_SOCKET_H
 PERF_GAP_FROM_AMP = 28     # mm below lower amp post
 
 perf_center_y = post_y2 - PERF_GAP_FROM_AMP - PERF_L / 2
@@ -110,12 +114,12 @@ SLIDER_W = 7    # along X (slide direction) — just the slider nub
 SLIDER_H = 3.5  # along Z
 slider_center_x = ant_right_x + 20 / 2 + 5  # shifted 5mm toward encoders
 
-# Encoder holes: 7mm dia, 15mm knobs, 3mm gap between knobs
+# Encoder hole: 7mm dia, 15mm knob, 3mm gap from the power switch's screwdowns. One encoder only:
+# the second one, farther from the switch, was dropped
 ENCODER_DIA = 7.2
 KNOB_DIA = 15
 KNOB_GAP = 3
-enc1_center_x = ant_right_x + 20 + KNOB_GAP + KNOB_DIA / 2
-enc2_center_x = enc1_center_x + KNOB_DIA / 2 + KNOB_GAP + KNOB_DIA / 2
+encoder_center_x = ant_right_x + 20 + KNOB_GAP + KNOB_DIA / 2
 
 # Cut slider
 slider_z = controls_z - 3  # shifted 3mm toward bed
@@ -159,12 +163,11 @@ for sx in [-1, +1]:
     )
     bottom = bottom - screw
 
-# Cut encoder holes
-for enc_x in [enc1_center_x, enc2_center_x]:
-    enc_hole = Pos(enc_x, LENGTH / 2, controls_z) * Rot(90, 0, 0) * Cylinder(
-        radius=ENCODER_DIA / 2, height=WALL * 3
-    )
-    bottom = bottom - enc_hole
+# Cut encoder hole
+enc_hole = Pos(encoder_center_x, LENGTH / 2, controls_z) * Rot(90, 0, 0) * Cylinder(
+    radius=ENCODER_DIA / 2, height=WALL * 3
+)
+bottom = bottom - enc_hole
 
 # PTT button hole through right wall (positive X), 13mm from top wall
 PTT_DIA = 16.5
@@ -198,8 +201,8 @@ bottom = bottom - kenwood_recess
 
 # USB-C hole through right wall (positive X) — centred on the Heltec's receptacle.
 #
-# Z: the Heltec's PCB front face sits at floor_z + PERF_POST_HEIGHT - 2.50 (its header plastic,
-# trapped between the boards) - 1.60 (its own PCB) = -8.10, and the receptacle hangs below that
+# Z: the Heltec's PCB front face sits at floor_z + PERF_POST_HEIGHT - HELTEC_SOCKET_H - 2.50 (its
+# header plastic, on top of the socket) - 1.60 (its own PCB) = -8.10, and the receptacle hangs below that
 # on the component side, so its centre is a further 1.60 down. ⚠️ The 3.20mm receptacle height
 # is a standard USB-C figure, not measured off this board.
 #
@@ -212,7 +215,7 @@ bottom = bottom - kenwood_recess
 # around -14.0).
 USBC_W = 15.0   # along Y — 11.2 overmold + 1.9 per side
 USBC_H = 8.5    # along Z — 6.0 overmold + 1.25 per side
-usbc_center_z = floor_z + PERF_POST_HEIGHT - 2.50 - 1.60 - 1.60
+usbc_center_z = floor_z + PERF_POST_HEIGHT - HELTEC_SOCKET_H - 2.50 - 1.60 - 1.60
 usbc_center_y = perf_top_post_y - 18.5
 usbc_hole = Pos(WIDTH / 2, usbc_center_y, usbc_center_z) * Box(
     WALL * 3, USBC_W, USBC_H  # oversized in X to cut clean through
@@ -278,7 +281,8 @@ bottom = bottom + grille
 # + 1: at WALL alone the cone sat flush on the grille and touched it at high volume, so it needs
 # room to travel.
 SPEAKER_CONE_TRAVEL = 1
-SPEAKER_POST_HEIGHT = PERF_POST_HEIGHT - WALL - 4 + WALL + SPEAKER_CONE_TRAVEL  # shortened for speaker fit
+# The speaker mounts to the floor, not our board: the Heltec sockets don't move it
+SPEAKER_POST_HEIGHT = PERF_POST_HEIGHT - HELTEC_SOCKET_H - WALL - 4 + WALL + SPEAKER_CONE_TRAVEL  # shortened for speaker fit
 for sx in [-18.5, 18.5]:
     px = speaker_center_x + sx
     py = speaker_center_y
@@ -380,40 +384,8 @@ for sx, sy in [(+1, +1), (+1, -1), (-1, +1), (-1, -1)]:
             tab = chamfer(bottom_edges, length=GUIDE_CHAMFER)
         guides = tab if guides is None else (guides + tab)
 
-# Battery cradle on lid interior — centered over perfboard
-BATT_W = 55   # X (across width, matching perfboard landscape)
-BATT_L = 35   # Y (along length)
-BATT_H = 12   # Z thickness
-BATT_WALL = 1.5  # retaining wall thickness
-BATT_WALL_H = 8   # retaining wall height (enough to hold battery, not full height)
-
-batt_x = perf_center_x
-batt_y = perf_center_y - 15  # shifted 15mm down
-BATT_WALL_EMBED = 1  # mm walls extend into lid for strong bond
-batt_cradle_z = lid_inner_z - BATT_WALL_H / 2 + BATT_WALL_EMBED / 2  # embedded into lid
-
-# Four retaining walls around the battery pocket
-for dx, dy, ww, wl in [
-    (-(BATT_W / 2 + BATT_WALL / 2), 0, BATT_WALL, BATT_L - 14),  # left
-    (+(BATT_W / 2 + BATT_WALL / 2), 0, BATT_WALL, BATT_L - 14),  # right
-    (0, -(BATT_L / 2 + BATT_WALL / 2), BATT_W - 14, BATT_WALL),  # bottom
-    (0, +(BATT_L / 2 + BATT_WALL / 2), BATT_W - 14, BATT_WALL),  # top
-]:
-    wall = Pos(batt_x + dx, batt_y + dy, batt_cradle_z) * Box(ww, wl, BATT_WALL_H + BATT_WALL_EMBED)
-    lid = lid + wall
-
-# Inward-facing clips on X-axis (left/right) walls to retain battery
-CLIP_DEPTH = 2.5   # how far clip protrudes inward (X)
-CLIP_H = 1.5       # clip height (Z), protrudes below wall bottom
-clip_len = BATT_L - 14  # same Y length as the X-axis walls
-wall_bottom_z = lid_inner_z - BATT_WALL_H
-clip_z = wall_bottom_z - CLIP_H / 2  # hangs below wall
-
-for sign in [-1, +1]:
-    # overlap wall horizontally so clip is connected
-    clip_x = batt_x + sign * (BATT_W / 2 - CLIP_DEPTH / 2 + BATT_WALL / 2)
-    clip = Pos(clip_x, batt_y, clip_z) * Box(CLIP_DEPTH + BATT_WALL, clip_len, CLIP_H)
-    lid = lid + clip
+# No battery cradle: the battery is taped in behind the speaker, at an angle not worth modelling.
+# The old cradle sat behind our board, where a socketed Heltec needs the room (#47)
 
 lid = lid + guides
 
