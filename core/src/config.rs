@@ -144,12 +144,20 @@ pub static LOG_TO_FLASH: Setting = Setting::bool("log_to_flash", true);
 /// 16 KB log buffer. Off by default
 pub static LOG_PACKETS: Setting = Setting::bool("log_packets", false).live();
 
+/// Put our GPS position in the end packet of each transmission we send (the
+/// talker's end, or an echo station's replay end). Off: the end packet still
+/// goes out, with our name and "no fix" (packet::Ident). Never anywhere else:
+/// a radio never beacons its position, and only sends it when its user has
+/// chosen to. Off by default
+pub static SEND_POSITION: Setting = Setting::bool("send_position", false).live();
+
 pub static FLAGS: &[&Setting] = &[
     &WAKE_PREAMBLE,
     &SWEEP,
     &PLAY_GARBLED,
     &LOG_TO_FLASH,
     &LOG_PACKETS,
+    &SEND_POSITION,
 ];
 
 /// A setting that's text: up to packet::NAME_BYTES of UTF-8, read at boot

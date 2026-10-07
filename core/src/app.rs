@@ -1008,11 +1008,17 @@ impl<P: Platform> App<P> {
         }
     }
 
-    /// Us, for our end packets: our name, and where we are now
+    /// Us, for our end packets: our name, and where we are now if our user
+    /// has chosen to send it (config::SEND_POSITION)
     fn ident(&self) -> Ident {
+        let position = if config::SEND_POSITION.is_on() {
+            self.devices.gps.latest().and_then(|fix| fix.position)
+        } else {
+            None
+        };
         Ident {
             name: self.display.name.clone(),
-            position: self.devices.gps.latest().and_then(|fix| fix.position),
+            position,
         }
     }
 
