@@ -4,6 +4,7 @@
 //! LittleFS rather than FAT because it survives a power cut mid-write, and a
 //! battery radio gets switched off whenever its owner feels like it.
 
+use core::sync::atomic::{AtomicBool, Ordering};
 use esp_idf_svc::sys::{
     esp, esp_littlefs_info, esp_vfs_littlefs_conf_t, esp_vfs_littlefs_register, EspError,
 };
@@ -13,6 +14,13 @@ pub const ROOT: &str = "/data";
 
 const LABEL: &core::ffi::CStr = c"storage";
 
+/// Set once the filesystem is mounted
+static MOUNTED: AtomicBool = AtomicBool::new(false);
+
+pub fn mounted() -> bool {
+    MOUNTED.load(Ordering::Relaxed)
+}
+
 pub fn init() -> Result<(), EspError> {
     let mut conf = esp_vfs_littlefs_conf_t {
         base_path: c"/data".as_ptr(),
@@ -21,6 +29,7 @@ pub fn init() -> Result<(), EspError> {
     };
     conf.set_format_if_mount_failed(1); // a fresh board's partition is blank
     esp!(unsafe { esp_vfs_littlefs_register(&conf) })?;
+    MOUNTED.store(true, Ordering::Relaxed);
 
     let (used, total) = usage();
     log::info!(

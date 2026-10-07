@@ -4,7 +4,7 @@ use crate::devices::mic::Mic;
 use crate::devices::network::Network;
 use crate::devices::ptt::Ptt;
 use crate::devices::radio::{Listen, Rotation, RxPacket, TxRequest, LISTEN, RX_CHAN, TX_CHAN};
-use crate::devices::screen::Screen;
+use crate::devices::screen::{Screen, Snapshot};
 use crate::devices::speaker::{self, MAX_VOLUME, SPK_AUDIO};
 use crate::logger;
 use crate::platform::Platform;
@@ -20,6 +20,7 @@ use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
 use embedded_graphics::text::{Baseline, Text};
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -32,7 +33,7 @@ use crate::codec::{
 use crate::config;
 use crate::conveyor::{Arrival, Landing, Transmission};
 use crate::echo::{self, Recorder};
-use crate::menu::{Menu, Outcome, Setting};
+use crate::menu::{Action, Menu, Outcome, Setting};
 use crate::mode::{self, Mode};
 use crate::packet::{self, Header, Ident, PacketType, NAME_BYTES};
 use crate::playout::{Play, Playout};
@@ -124,6 +125,7 @@ pub async fn init<P: Platform>(
             shown_network: Network::Off,
             shown_time: (0, 0),
             shown_activity: Activity::Idle,
+            shown_screen: Snapshot::default(),
         },
         rx: Receiving {
             playout: Playout::default(),
@@ -180,6 +182,7 @@ struct Display {
     shown_network: Network,             // likewise
     shown_time: (u8, u8),               // likewise: the clock's hh:mm
     shown_activity: Activity,           // likewise
+    shown_screen: Snapshot,             // the radio screen last drawn: what a screenshot saves
 }
 
 /// The transmission we're hearing
@@ -1047,12 +1050,33 @@ impl<P: Platform> App<P> {
                     Outcome::Stay => {}
                     Outcome::Exit => break,
                     Outcome::Set(setting, value) => self.apply(setting, value),
+                    Outcome::ExitAndDo(Action::Screenshot) => {
+                        self.save_screenshot();
+                        break;
+                    }
                 },
             }
         }
         // Drop whatever arrived while we were menuing
         while RX_CHAN.try_receive().is_ok() {}
         self.draw_screen(Activity::Idle);
+    }
+
+    /// The radio screen as it was when the menu opened, to
+    /// <data>/screenshots as a BMP (pull it over WebDAV). The menu draws only
+    /// on its own frames, so the last radio screen drawn is the one it covered.
+    /// The flash write stalls both cores a few ms: fine here, menuing has
+    /// already stopped RX
+    fn save_screenshot(&self) {
+        let Some(data_dir) = P::data_dir() else {
+            log::warn!("Screenshot not saved: no storage");
+            return;
+        };
+        let dir = data_dir.join("screenshots");
+        match save_numbered(&dir, "bmp", &self.display.shown_screen.bmp()) {
+            Ok(path) => log::info!("Screenshot saved to {}", path.display()),
+            Err(e) => log::warn!("Screenshot not saved: {}", e),
+        }
     }
 
     fn apply(&mut self, setting: Setting, value: u8) {
@@ -1117,6 +1141,7 @@ impl<P: Platform> App<P> {
                 .draw(&mut frame)
                 .unwrap();
         }
+        self.display.shown_screen.copy(&frame);
         self.devices.screen.show(frame);
         self.display.shown_fix = fix;
         self.display.shown_network = network;
@@ -1163,6 +1188,26 @@ impl<P: Platform> App<P> {
         }
         self.devices.screen.show(frame);
     }
+}
+
+/// Write `bytes` to `dir` as the next number up: 0001.<extension>, 0002...
+/// (one past the highest there, so a deleted file's number isn't reused
+/// unless it was the last). Makes `dir` if it isn't there yet
+fn save_numbered(dir: &Path, extension: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let mut highest = 0u32;
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|found| found == extension) {
+            let number = path
+                .file_stem()
+                .and_then(|stem| stem.to_str()?.parse().ok());
+            highest = highest.max(number.unwrap_or(0));
+        }
+    }
+    let path = dir.join(format!("{:04}.{}", highest + 1, extension));
+    std::fs::write(&path, bytes)?;
+    Ok(path)
 }
 
 /// Generate 160ms squelch tail (white noise with fade-out), packet-sized.
@@ -1358,5 +1403,32 @@ impl core::fmt::Display for SendTiming {
             self.least_room_us / 1000,
             self.late
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saved_files_number_up_from_the_highest() {
+        let dir = std::env::temp_dir().join(format!("oswst-screenshots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            save_numbered(&dir, "bmp", b"one").unwrap(),
+            dir.join("0001.bmp")
+        );
+        assert_eq!(
+            save_numbered(&dir, "bmp", b"two").unwrap(),
+            dir.join("0002.bmp")
+        );
+        // A deleted earlier one leaves its number free; the next still goes past the highest
+        std::fs::remove_file(dir.join("0001.bmp")).unwrap();
+        assert_eq!(
+            save_numbered(&dir, "bmp", b"three").unwrap(),
+            dir.join("0003.bmp")
+        );
+        assert_eq!(std::fs::read(dir.join("0003.bmp")).unwrap(), b"three");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

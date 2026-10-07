@@ -10,7 +10,7 @@ use open_oswst::{board, firmware, net, thread};
 use open_oswst_core::devices::network::Network;
 use open_oswst_core::platform::Platform;
 use open_oswst_core::{air, app, codec, config, logger};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The radio thread's priority: above the codec's (5), so the codec can't
 /// delay a TX or an IRQ, and below the hal's IsrReactor (11), which wakes it.
@@ -42,6 +42,10 @@ impl Platform for Esp {
 
     fn network() -> Network {
         net::state()
+    }
+
+    fn data_dir() -> Option<PathBuf> {
+        storage::mounted().then(|| PathBuf::from(storage::ROOT))
     }
 }
 

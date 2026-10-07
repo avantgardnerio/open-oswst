@@ -4,6 +4,7 @@
 
 use crate::devices::network::Network;
 use crate::devices::{gps::Gps, knob::Knob, mic::Mic, ptt::Ptt, settings::Settings};
+use std::path::PathBuf;
 
 pub trait Platform {
     type Mic: Mic;
@@ -19,4 +20,8 @@ pub trait Platform {
 
     /// The WiFi, for the screen
     fn network() -> Network;
+
+    /// Where the app may keep files (the board's /data), or None without
+    /// storage
+    fn data_dir() -> Option<PathBuf>;
 }

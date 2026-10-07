@@ -76,6 +76,72 @@ impl DrawTarget for Frame {
     }
 }
 
+/// A copy of a frame's pixels, kept after the frame goes back to the pool:
+/// the screen as it was, for a screenshot.
+pub struct Snapshot(Box<[u8; FRAME_BYTES]>);
+
+impl Default for Snapshot {
+    fn default() -> Self {
+        Snapshot(Box::new([0; FRAME_BYTES]))
+    }
+}
+
+impl Snapshot {
+    /// Take the frame's pixels, in place: no allocation per copy
+    pub fn copy(&mut self, frame: &Frame) {
+        self.0.copy_from_slice(&frame.0[..]);
+    }
+
+    pub fn pixel(&self, x: usize, y: usize) -> bool {
+        self.0[(y / 8) * WIDTH + x] & (1 << (y % 8)) != 0
+    }
+
+    /// As a 1-bit BMP file, 1086 bytes: lit pixels white on black, as the
+    /// panel shows them. BMP stores rows bottom-up, each pixel one bit with
+    /// the leftmost in the top bit; 128 pixels make a 16-byte row, already
+    /// the 4-byte multiple BMP rows must be.
+    pub fn bmp(&self) -> Vec<u8> {
+        const HEADERS: u32 = 14 + 40 + 8; // file header, info header, 2-colour palette
+        const ROW_BYTES: usize = WIDTH / 8;
+        let image_bytes = (ROW_BYTES * HEIGHT) as u32;
+
+        let mut bmp = Vec::with_capacity((HEADERS + image_bytes) as usize);
+        // File header
+        bmp.extend_from_slice(b"BM");
+        bmp.extend_from_slice(&(HEADERS + image_bytes).to_le_bytes());
+        bmp.extend_from_slice(&0u32.to_le_bytes()); // reserved
+        bmp.extend_from_slice(&HEADERS.to_le_bytes()); // where the pixels start
+                                                       // Info header
+        bmp.extend_from_slice(&40u32.to_le_bytes());
+        bmp.extend_from_slice(&(WIDTH as i32).to_le_bytes());
+        bmp.extend_from_slice(&(HEIGHT as i32).to_le_bytes()); // positive: bottom-up
+        bmp.extend_from_slice(&1u16.to_le_bytes()); // planes
+        bmp.extend_from_slice(&1u16.to_le_bytes()); // bits per pixel
+        bmp.extend_from_slice(&0u32.to_le_bytes()); // no compression
+        bmp.extend_from_slice(&image_bytes.to_le_bytes());
+        bmp.extend_from_slice(&2835i32.to_le_bytes()); // 72 dpi across
+        bmp.extend_from_slice(&2835i32.to_le_bytes()); // and down
+        bmp.extend_from_slice(&2u32.to_le_bytes()); // colours in the palette
+        bmp.extend_from_slice(&0u32.to_le_bytes()); // all of them matter
+                                                    // Palette, blue-green-red-unused: 0 = off = black, 1 = lit = white
+        bmp.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        bmp.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0x00]);
+        // Pixels
+        for y in (0..HEIGHT).rev() {
+            for byte_x in 0..ROW_BYTES {
+                let mut byte = 0u8;
+                for bit in 0..8 {
+                    if self.pixel(byte_x * 8 + bit, y) {
+                        byte |= 0x80 >> bit;
+                    }
+                }
+                bmp.push(byte);
+            }
+        }
+        bmp
+    }
+}
+
 /// Frames circulate FREE → caller draws → READY → driver shows → FREE.
 /// Two frames total. The driver holds at most one, so as long as the caller
 /// holds at most one too, the other is always in FREE or READY.
@@ -126,4 +192,29 @@ pub async fn next_to_show() -> Frame {
 /// Driver side: done with a frame, back to the pool.
 pub fn shown(frame: Frame) {
     let _ = FREE.try_send(frame);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_snapshot_is_a_1bit_bmp_of_the_frame() {
+        let mut frame = Frame::new();
+        frame.set_pixel(0, 0, true); // top left
+        frame.set_pixel(127, 63, true); // bottom right
+        let mut snapshot = Snapshot::default();
+        snapshot.copy(&frame);
+
+        let bmp = snapshot.bmp();
+        assert_eq!(bmp.len(), 1086);
+        assert_eq!(&bmp[0..2], b"BM");
+        assert_eq!(u32::from_le_bytes(bmp[2..6].try_into().unwrap()), 1086);
+        assert_eq!(u32::from_le_bytes(bmp[10..14].try_into().unwrap()), 62);
+        let pixels = &bmp[62..];
+        // Bottom-up: the first row stored is the screen's bottom one
+        assert_eq!(pixels[15], 0x01); // bottom right, the row's last bit
+        assert_eq!(pixels[16 * 63], 0x80); // top left, the last row's first bit
+        assert_eq!(pixels.iter().filter(|&&byte| byte != 0).count(), 2);
+    }
 }

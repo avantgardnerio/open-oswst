@@ -10,12 +10,20 @@ pub enum Setting {
     Mode, // a mode::Mode as u8
 }
 
+/// Something done once, rather than a setting to choose a value for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Screenshot, // save the screen as it was when the menu opened
+}
+
 pub enum Item {
     Submenu(&'static str, &'static [Item]),
     Choice(&'static str, Setting, u8),
+    Action(&'static str, Action), // closes the whole menu, then it's done
 }
 
 static ROOT: &[Item] = &[
+    Item::Action("Screenshot", Action::Screenshot),
     Item::Submenu(
         "Lock",
         &[
@@ -40,6 +48,7 @@ pub enum Outcome {
     Stay,
     Exit,
     Set(Setting, u8),
+    ExitAndDo(Action),
 }
 
 #[derive(Clone, Copy)]
@@ -103,6 +112,10 @@ impl Menu {
                 }
                 Outcome::Set(*setting, *value)
             }
+            Item::Action(_, action) => {
+                self.stack.clear();
+                Outcome::ExitAndDo(*action)
+            }
         }
     }
 
@@ -122,6 +135,7 @@ impl Menu {
             rows.push(match item {
                 Item::Submenu(label, _) => (*label, false),
                 Item::Choice(label, setting, value) => (*label, current(*setting, *value)),
+                Item::Action(label, _) => (*label, false),
             });
         }
         rows
@@ -133,5 +147,21 @@ impl Menu {
 
     fn level_mut(&mut self) -> &mut Level {
         self.stack.last_mut().unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screenshot_closes_the_menu_and_asks_for_one() {
+        let mut menu = Menu::new();
+        assert_eq!(menu.rows(|_, _| false)[1].0, "Screenshot");
+        menu.rotate(1);
+        assert!(matches!(
+            menu.click(),
+            Outcome::ExitAndDo(Action::Screenshot)
+        ));
     }
 }
