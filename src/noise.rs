@@ -9,7 +9,7 @@ use snow::params::{CipherChoice, DHChoice, HashChoice};
 use snow::resolvers::CryptoResolver;
 use snow::types::{Cipher, Dh, Hash, Random};
 
-pub const PATTERN: &str = "Noise_XK_25519_AESGCM_SHA256";
+pub use open_oswst_core::management::PATTERN;
 
 const KEY_LEN: usize = 32;
 const TAG_LEN: usize = 16;
@@ -364,6 +364,20 @@ impl Hash for Sha256 {
     fn result(&mut self, out: &mut [u8]) {
         unsafe { mbedtls_sha256_finish(&mut *self.0, out.as_mut_ptr()) };
     }
+}
+
+/// A new X25519 private key, from the hardware RNG
+pub fn generate_private_key() -> [u8; KEY_LEN] {
+    let mut key = [0u8; KEY_LEN];
+    unsafe { esp_fill_random(key.as_mut_ptr().cast(), KEY_LEN) };
+    key
+}
+
+/// The public key of an X25519 private key
+pub fn public_key(private: &[u8; KEY_LEN]) -> [u8; KEY_LEN] {
+    let mut dh = X25519::default();
+    dh.set(private);
+    dh.public
 }
 
 /// For src/bin/noise_test.rs: known answers for each primitive, then a whole

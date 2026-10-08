@@ -41,6 +41,7 @@ use open_oswst_core::devices::management::{ANSWERS, REQUESTS};
 use open_oswst_core::devices::network::Network;
 use open_oswst_core::devices::wifi::{self, Seen};
 
+use crate::devices::secrets;
 use crate::devices::settings::{self, WifiNetwork};
 use crate::{clock, http, management, thread};
 
@@ -113,6 +114,8 @@ fn run(modem: Modem<'static>, mac: String) {
     loop {
         set_state(Network::Searching);
         wifi.start().unwrap();
+        // Now the RNG is truly random: our key for the management server
+        secrets::make_key();
         let mdns = announce(&name, &mac);
         let mut http = HttpApi::new(&name, &mac, off_tx.clone());
         // Sets the clock once a network with internet is joined (it retries)

@@ -13,8 +13,10 @@
 //!   MOVE      rename (some clients save by uploading under a temporary name)
 //!   OPTIONS   says the above
 //!
-//! One rule on top: a write that lands on config.toml must pass the settings
-//! check, or it's refused and the old file stays.
+//! Two rules on top: a write that lands on config.toml must pass the settings
+//! check, or it's refused and the old file stays; and secrets.toml
+//! (devices/secrets.rs) isn't here at all: left out of listings, and no
+//! method reaches it (local_path). /api/management (http.rs) is its way in.
 //!
 //! No LOCK: Linux clients don't need it, but Finder and Windows Explorer may
 //! refuse to write. Modification dates are listed only when they're real:
@@ -32,7 +34,7 @@ use esp_idf_svc::sys::EspError;
 
 use open_oswst_core::utc;
 
-use crate::devices::{settings, storage};
+use crate::devices::{secrets, settings, storage};
 
 type Req<'a, 'r> = Request<&'a mut EspHttpConnection<'r>>;
 type Result<T = ()> = std::result::Result<T, anyhow::Error>;
@@ -84,6 +86,9 @@ fn propfind(req: Req) -> Result {
     response.write_all(entry(&path, &meta).as_bytes())?;
     if meta.is_dir() && !depth_0 {
         for item in fs::read_dir(&path)?.flatten() {
+            if secrets::is_secret(&item.path()) {
+                continue;
+            }
             if let Ok(meta) = item.metadata() {
                 response.write_all(entry(&item.path(), &meta).as_bytes())?;
             }
@@ -211,6 +216,10 @@ fn move_to(req: Req) -> Result {
     if !from.exists() {
         return reply(req, 404, "not found");
     }
+    // The secrets would go with it, and be reachable at the new name
+    if from == Path::new(storage::ROOT) {
+        return reply(req, 403, "not the whole storage");
+    }
     let existed = to.exists();
     if existed && req.header("Overwrite") == Some("F") {
         return reply(req, 412, "destination exists");
@@ -281,7 +290,8 @@ fn last_modified(meta: &fs::Metadata) -> String {
 }
 
 /// The file or folder a URL path names, under storage::ROOT. None if it isn't
-/// under PREFIX, isn't valid once decoded, or tries to climb out with `..`
+/// under PREFIX, isn't valid once decoded, tries to climb out with `..`, or
+/// is a secret: every method finds its path here, a MOVE's destination too
 fn local_path(uri: &str) -> Option<PathBuf> {
     let path = uri.split('?').next()?;
     let rest = path.strip_prefix(PREFIX)?;
@@ -296,7 +306,7 @@ fn local_path(uri: &str) -> Option<PathBuf> {
         }
         local.push(segment);
     }
-    Some(local)
+    (!secrets::is_secret(&local)).then_some(local)
 }
 
 /// The URL path for a local path: PREFIX, then each part percent-encoded,

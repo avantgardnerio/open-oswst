@@ -8,16 +8,11 @@
 //! [[wifi]]
 //! ssid = "Starlink"
 //! password = "..."
-//!
-//! [server]
-//! host = "..."
-//! port = 3101
 //! ```
 //!
 //! The settings and flags (`get` / `set`) are declared in core's config.rs.
 //! The WiFi networks are for the firmware (`wifi_networks`), tried in order;
-//! the menu adds and forgets them. [server] is the management server
-//! (`server`), read at boot; none, and the radio never dials one.
+//! the menu adds and forgets them.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -60,16 +55,7 @@ pub fn init() -> Settings {
     };
     let settings = Settings { table };
     settings.publish_wifi();
-    *SERVER.lock().unwrap() = settings.read_server();
     settings
-}
-
-/// The management server, as [server] said at boot
-static SERVER: Mutex<Option<(String, u16)>> = Mutex::new(None);
-
-/// The management server's host and port, if config.toml names one
-pub fn server() -> Option<(String, u16)> {
-    SERVER.lock().unwrap().clone()
 }
 
 /// The WiFi networks as last saved, for the network code (net.rs), which
@@ -112,8 +98,6 @@ pub fn check(text: &str) -> Result<(), String> {
 const FLAGS: &str = "flags";
 /// The WiFi networks: the firmware's, not a setting
 const WIFI: &str = "wifi";
-/// The management server: the firmware's, not a setting
-const SERVER_TABLE: &str = "server";
 
 impl Settings {
     /// The [[wifi]] entries. Malformed ones are skipped and logged.
@@ -134,20 +118,6 @@ impl Settings {
                 }
             })
             .collect()
-    }
-
-    /// [server]'s host and port. Missing or malformed: none (logged)
-    fn read_server(&self) -> Option<(String, u16)> {
-        let table = self.table.get(SERVER_TABLE)?;
-        let host = table.get("host").and_then(|v| v.as_str());
-        let port = table.get("port").and_then(|v| v.as_integer());
-        match (host, port.and_then(|port| u16::try_from(port).ok())) {
-            (Some(host), Some(port)) => Some((host.into(), port)),
-            _ => {
-                log::warn!("Config: [server] needs host and port (1-65535)");
-                None
-            }
-        }
     }
 
     fn publish_wifi(&self) {
@@ -252,7 +222,7 @@ impl open_oswst_core::devices::settings::Settings for Settings {
         let mut keys = Vec::new();
         for (key, value) in &self.table {
             match (key.as_str(), value) {
-                (WIFI, _) | (SERVER_TABLE, _) => {}
+                (WIFI, _) => {}
                 (FLAGS, toml::Value::Table(flags)) => {
                     keys.extend(flags.keys().map(|flag| format!("{}.{}", FLAGS, flag)))
                 }

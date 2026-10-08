@@ -9,6 +9,7 @@ pub mod ptt;
 pub mod radio;
 pub mod radio_bus;
 pub mod screen;
+pub mod secrets;
 pub mod settings;
 pub mod speaker;
 pub mod storage;

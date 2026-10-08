@@ -6,7 +6,9 @@ description = "The management server radios dial out to (issue #34): firmware up
 
 [dependencies]
 open-oswst-core = { path = "../core" }
-serde = "1"
+serde = { version = "1", features = ["derive"] }
+snow = "0.10"
+toml = "0.8"
 
 # Its own workspace, separate from the firmware's: different target. Shares
 # core/ (and so the protocol, core/src/management.rs) by path.

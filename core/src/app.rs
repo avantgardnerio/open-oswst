@@ -1255,9 +1255,10 @@ impl<P: Platform> App<P> {
             Either::First(Ok(Response::Echo(_))) => {
                 format!("Server: {} ms", started.elapsed().as_millis())
             }
-            Either::First(Ok(other)) => {
-                log::warn!("Update: unexpected answer {:?}", other);
-                "Server: odd answer".into()
+            // Few words, meant for this screen ("Not allowed")
+            Either::First(Ok(Response::Error(e))) => {
+                log::warn!("Update: the server says {}", e);
+                e
             }
             Either::First(Err(e)) => {
                 log::warn!("Update: {}", e);

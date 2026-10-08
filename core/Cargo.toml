@@ -14,11 +14,13 @@ heapless = "0.8"
 codec2 = "0.3.0"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
+snow = { version = "0.10", default-features = false }
 
 [dev-dependencies]
 # The embassy channels need a critical-section implementation to link. The
 # firmware's comes from esp-idf-svc, the desktop's from this.
 critical-section = { version = "1", features = ["std"] }
+snow = "0.10"
 
 # Its own workspace, so `cd core && cargo test` runs the tests on this PC. The
 # firmware and desktop use it by path.
