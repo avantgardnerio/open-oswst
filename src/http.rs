@@ -9,6 +9,7 @@
 //!                         checked, then reboot. It must run a minute or the
 //!                         old one comes back (firmware.rs)
 //!   GET  /api/firmware    download the app image running
+//!   GET  /api/screenshot  the screen as it is now, menus and all (1-bit BMP)
 //!   POST /api/reboot
 //!   POST /api/wifi/off    WiFi off until the next reboot (net.rs)
 //!   /fs/...               the storage (/data) as a WebDAV folder, read and
@@ -24,6 +25,7 @@ use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::http::server::{Configuration, EspHttpConnection, EspHttpServer, Request};
 use esp_idf_svc::http::Method;
 use esp_idf_svc::io::Write;
+use open_oswst_core::devices::screen;
 use open_oswst_core::{config, mode};
 
 use crate::devices::storage;
@@ -54,6 +56,7 @@ pub fn start(name: &str, mac: &str, wifi_off: Sender<()>) -> Option<EspHttpServe
         })
         .and_then(|s| s.fn_handler("/api/ota", Method::Post, ota))
         .and_then(|s| s.fn_handler("/api/firmware", Method::Get, download_firmware))
+        .and_then(|s| s.fn_handler("/api/screenshot", Method::Get, screenshot))
         .and_then(|s| s.fn_handler("/api/reboot", Method::Post, reboot))
         .and_then(|s| {
             s.fn_handler("/api/wifi/off", Method::Post, move |req| {
@@ -164,6 +167,15 @@ fn download_firmware(req: Req) -> Result {
         response.write_all(&buf[..n])?;
         offset += n;
     }
+    Ok(())
+}
+
+/// The frame on the panel now, as a BMP. Unlike the menu's Screenshot (which
+/// saves the radio screen under the menu), this catches the menus too
+fn screenshot(req: Req) -> Result {
+    let bmp = screen::on_panel().bmp();
+    req.into_response(200, None, &[("Content-Type", "image/bmp")])?
+        .write_all(&bmp)?;
     Ok(())
 }
 

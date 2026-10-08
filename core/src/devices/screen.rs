@@ -12,6 +12,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
+use std::sync::Mutex;
 use std::thread;
 
 pub const WIDTH: usize = 128;
@@ -189,9 +190,27 @@ pub async fn next_to_show() -> Frame {
     READY.receive().await
 }
 
+/// What the panel shows right now, menus and all: the driver copies each
+/// frame in as it goes back to the pool. Static, so no allocation; the lock
+/// is held only for a 1 KB copy
+static ON_PANEL: Mutex<[u8; FRAME_BYTES]> = Mutex::new([0; FRAME_BYTES]);
+
 /// Driver side: done with a frame, back to the pool.
 pub fn shown(frame: Frame) {
+    if let Ok(mut on_panel) = ON_PANEL.lock() {
+        on_panel.copy_from_slice(&frame.0[..]);
+    }
     let _ = FREE.try_send(frame);
+}
+
+/// The frame on the panel now, for a screenshot from outside the app (the
+/// HTTP API)
+pub fn on_panel() -> Snapshot {
+    let mut snapshot = Snapshot::default();
+    if let Ok(on_panel) = ON_PANEL.lock() {
+        snapshot.0.copy_from_slice(&on_panel[..]);
+    }
+    snapshot
 }
 
 #[cfg(test)]
