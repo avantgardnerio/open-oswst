@@ -96,15 +96,31 @@ pub fn running_sha256() -> Option<[u8; 32]> {
     Some(sha)
 }
 
-/// The build's version string (its git hash, -dirty if built with
-/// uncommitted changes)
-pub fn version() -> String {
-    unsafe {
-        let app = &*esp_app_get_description();
-        core::ffi::CStr::from_ptr(app.version.as_ptr())
-            .to_string_lossy()
-            .into_owned()
+/// This build's version: its git hash, -dirty if built with uncommitted
+/// changes (build.rs). Kept where ESP-IDF keeps a custom app description:
+/// right after its own, at a fixed place in every image (byte 288 of an
+/// image file), where the management server reads it. ESP-IDF's own
+/// version (esp_app_desc) goes stale: it's only worked out when its CMake
+/// step reruns, which Rust changes don't make it do
+#[used]
+#[link_section = ".rodata_custom_desc"]
+static VERSION: [u8; 32] = version_bytes(env!("OSWST_VERSION"));
+
+/// `text` in 32 bytes, NUL-padded: 31 at most, so it always ends in a NUL
+const fn version_bytes(text: &str) -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    let text = text.as_bytes();
+    let mut i = 0;
+    while i < text.len() && i < 31 {
+        bytes[i] = text[i];
+        i += 1;
     }
+    bytes
+}
+
+pub fn version() -> String {
+    let len = VERSION.iter().position(|byte| *byte == 0).unwrap_or(32);
+    String::from_utf8_lossy(&VERSION[..len]).into_owned()
 }
 
 /// Reboot after a moment, so a reply (HTTP, the screen) gets out first

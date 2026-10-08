@@ -96,13 +96,11 @@ pub fn start(name: &str, mac: &str, wifi_off: Sender<()>) -> Option<EspHttpServe
 fn status(req: Req, name: &str, mac: &str) -> Result {
     let (firmware, slot, uptime_s, heap_free, heap_min) = unsafe {
         use esp_idf_svc::sys::*;
-        let app = &*esp_app_get_description();
-        let version = core::ffi::CStr::from_ptr(app.version.as_ptr()).to_string_lossy();
         // Which app partition is running: ota_0 or ota_1
         let running = &*esp_ota_get_running_partition();
         let slot = core::ffi::CStr::from_ptr(running.label.as_ptr()).to_string_lossy();
         (
-            version.into_owned(),
+            firmware::version(),
             slot.into_owned(),
             esp_timer_get_time() / 1_000_000,
             esp_get_free_heap_size(),

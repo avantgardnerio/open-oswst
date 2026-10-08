@@ -68,7 +68,9 @@ fn main() {
     esp_idf_svc::sys::link_patches();
     // Same clock as ESP-IDF's own log lines
     logger::init(|| unsafe { esp_idf_svc::sys::esp_log_timestamp() });
-    log::info!("open-oswst starting...");
+    // ESP-IDF's own boot lines print its version, which goes stale
+    // (firmware.rs VERSION): this one is the build's
+    log::info!("open-oswst {} starting...", firmware::version());
 
     // The settings (and the log files) live on the storage
     let storage_ok = match storage::init() {

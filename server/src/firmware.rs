@@ -69,11 +69,12 @@ fn parse(bytes: Vec<u8>) -> Result<Image, String> {
     // The image header: magic 0xE9, and at 23 whether a SHA-256 is appended
     const HASH_APPENDED: usize = 23;
     // The app description: after the image header (24 B) and the first
-    // segment's header (8 B). Its version follows magic, secure_version
-    // and two reserved words
+    // segment's header (8 B), 256 B long. Then the custom one, which holds
+    // our version (the firmware's firmware.rs VERSION): ESP-IDF's own goes
+    // stale
     const APP_DESC: usize = 32;
     const APP_DESC_MAGIC: u32 = 0xABCD_5432;
-    const VERSION: usize = APP_DESC + 16;
+    const VERSION: usize = APP_DESC + 256;
 
     if bytes.len() < VERSION + 32 + 32 || bytes[0] != 0xE9 {
         return Err("not an ESP app image".into());
