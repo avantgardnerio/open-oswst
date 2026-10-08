@@ -15,6 +15,9 @@
 //! stays that way across reboots. `POST /wifi/off` stops it until the next
 //! reboot (or the menu) only, for field tests: WiFi on core 0 costs the
 //! audio its timing.
+//!
+//! The HTTP API runs while WiFi does, unless config::HTTP_API_ON is off
+//! (the menu, Privacy): it stops or starts within ON_CHECK.
 
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
@@ -24,6 +27,7 @@ use std::time::{Duration, Instant};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::hal::modem::Modem;
+use esp_idf_svc::http::server::EspHttpServer;
 use esp_idf_svc::mdns::EspMdns;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::wifi::{
@@ -33,11 +37,12 @@ use esp_idf_svc::wifi::{
 use std::sync::Mutex;
 
 use open_oswst_core::config;
+use open_oswst_core::devices::management::{ANSWERS, REQUESTS};
 use open_oswst_core::devices::network::Network;
 use open_oswst_core::devices::wifi::{self, Seen};
 
 use crate::devices::settings::{self, WifiNetwork};
-use crate::{clock, http, thread};
+use crate::{clock, http, management, thread};
 
 /// Where the WiFi is at, for the screen (Platform::network). Off until
 /// `start` finds networks configured.
@@ -109,11 +114,11 @@ fn run(modem: Modem<'static>, mac: String) {
         set_state(Network::Searching);
         wifi.start().unwrap();
         let mdns = announce(&name, &mac);
-        let http = http::start(&name, &mac, off_tx.clone());
+        let mut http = HttpApi::new(&name, &mac, off_tx.clone());
         // Sets the clock once a network with internet is joined (it retries)
         let ntp = clock::start_ntp();
 
-        let stop = stay_joined(&mut wifi, &off_rx);
+        let stop = stay_joined(&mut wifi, &off_rx, &mut http);
 
         // Give /wifi/off's reply time to get out, then stop everything
         sleep(Duration::from_millis(500));
@@ -140,15 +145,60 @@ fn run(modem: Modem<'static>, mac: String) {
     }
 }
 
-/// Join a network and rejoin when it's lost, and scan for the menu while it
-/// wants, until WiFi is to stop
-fn stay_joined(wifi: &mut BlockingWifi<EspWifi<'static>>, off_rx: &mpsc::Receiver<()>) -> Stop {
+/// The HTTP API (http.rs), running or not as config::HTTP_API_ON says
+/// (the menu, Privacy)
+struct HttpApi {
+    name: String,
+    mac: String,
+    wifi_off: mpsc::Sender<()>,
+    on: bool, // the setting as last followed: running, unless it failed to start
+    server: Option<EspHttpServer<'static>>,
+}
+
+impl HttpApi {
+    fn new(name: &str, mac: &str, wifi_off: mpsc::Sender<()>) -> HttpApi {
+        let mut http = HttpApi {
+            name: name.into(),
+            mac: mac.into(),
+            wifi_off,
+            on: false,
+            server: None,
+        };
+        http.follow_setting();
+        http
+    }
+
+    /// Start or stop the server if the setting changed
+    fn follow_setting(&mut self) {
+        let on = config::HTTP_API_ON.is_on();
+        if on == self.on {
+            return;
+        }
+        self.on = on;
+        if on {
+            self.server = http::start(&self.name, &self.mac, self.wifi_off.clone());
+        } else {
+            self.server = None;
+            log::info!("HTTP API: off (http_api_on = false)");
+        }
+    }
+}
+
+/// Join a network and rejoin when it's lost, scan for the menu while it
+/// wants, send the menu's requests to the management server, and keep the
+/// HTTP API as its setting says, until WiFi is to stop
+fn stay_joined(
+    wifi: &mut BlockingWifi<EspWifi<'static>>,
+    off_rx: &mpsc::Receiver<()>,
+    http: &mut HttpApi,
+) -> Stop {
     // Logged only when it changes: away from the networks, every scan would
     // say the same "none joined" (~every 20s on a walk), and each line in
     // the log costs a flash write that stalls both cores
     let mut joined: Option<String> = None;
     let mut searching_logged = false;
     loop {
+        http.follow_setting();
         // Read each time round: the menu adds and forgets them
         let networks = settings::wifi_networks();
         let scan_wanted = wifi::SCAN_WANTED.load(Ordering::Relaxed);
@@ -196,7 +246,7 @@ fn stay_joined(wifi: &mut BlockingWifi<EspWifi<'static>>, off_rx: &mpsc::Receive
                 Err(e) => log::warn!("WiFi: scan failed: {}", e),
             }
         }
-        if let Some(stop) = wait(off_rx) {
+        if let Some(stop) = wait(off_rx, http.on) {
             return stop;
         }
     }
@@ -218,10 +268,12 @@ fn wait_for_wanted() {
     }
 }
 
-/// Wait out CHECK_EVERY, or not at all while the menu wants scans (they go
-/// back to back). Some if WiFi is to stop: /wifi/off (a message on
-/// `off_rx`) or config::WIFI_ON switched off (checked every ON_CHECK)
-fn wait(off_rx: &mpsc::Receiver<()>) -> Option<Stop> {
+/// Wait out CHECK_EVERY, or less: not at all while the menu wants scans
+/// (they go back to back), or once the HTTP API's setting differs from
+/// `http_on`. Some if WiFi is to stop: /wifi/off (a message on `off_rx`) or
+/// config::WIFI_ON switched off (checked every ON_CHECK). The menu's
+/// requests to the management server are sent from here, as they come
+fn wait(off_rx: &mpsc::Receiver<()>, http_on: bool) -> Option<Stop> {
     let started = Instant::now();
     loop {
         if off_rx.try_recv().is_ok() {
@@ -230,7 +282,13 @@ fn wait(off_rx: &mpsc::Receiver<()>) -> Option<Stop> {
         if !config::WIFI_ON.is_on() {
             return Some(Stop::SwitchedOff);
         }
-        if wifi::SCAN_WANTED.load(Ordering::Relaxed) || started.elapsed() >= CHECK_EVERY {
+        if let Ok(request) = REQUESTS.try_receive() {
+            ANSWERS.signal(management::call(&request));
+        }
+        if wifi::SCAN_WANTED.load(Ordering::Relaxed)
+            || config::HTTP_API_ON.is_on() != http_on
+            || started.elapsed() >= CHECK_EVERY
+        {
             return None;
         }
         if off_rx.recv_timeout(ON_CHECK).is_ok() {

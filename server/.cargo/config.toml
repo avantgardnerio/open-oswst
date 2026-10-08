@@ -1,0 +1,6 @@
+# Overrides the firmware settings in ../.cargo/config.toml, which Cargo also
+# reads from here: build for this PC. (The inherited build-std can't be switched
+# off: Cargo merges lists across config files. It just means std for the PC is
+# compiled from source once, then cached.)
+[build]
+target = "x86_64-unknown-linux-gnu"

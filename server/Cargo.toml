@@ -1,0 +1,13 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition = "2021"
+description = "The management server radios dial out to (issue #34): firmware updates, then anything else"
+
+[dependencies]
+open-oswst-core = { path = "../core" }
+serde = "1"
+
+# Its own workspace, separate from the firmware's: different target. Shares
+# core/ (and so the protocol, core/src/management.rs) by path.
+[workspace]

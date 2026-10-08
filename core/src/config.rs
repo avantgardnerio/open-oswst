@@ -39,6 +39,11 @@ pub static MODE: Setting = Setting::choice("mode", &mode::NAMES, 0).live();
 /// (set_until_reboot), not saved
 pub static WIFI_ON: Setting = Setting::bool("wifi_on", true).live();
 
+/// The radio's own HTTP API (http.rs: status, OTA, WebDAV) while WiFi is
+/// up. Saved: switched off or on in the menu (Privacy), it stops or starts
+/// within a second (net.rs). Off: nothing on the radio listens at all
+pub static HTTP_API_ON: Setting = Setting::bool("http_api_on", true).live();
+
 /// The channel to start on: a slot round the band (air::slots). 103 = 915
 /// MHz. The last slot is 206 at 125 kHz (a test keeps this in step)
 pub static START_SLOT: Setting = Setting::number("start_slot", 0, 206, 103).must_match();
@@ -80,6 +85,7 @@ pub static PREAMBLE_SYMBOLS: Setting = Setting::number("preamble_symbols", 8, 16
 pub static SETTINGS: &[&Setting] = &[
     &MODE,
     &WIFI_ON,
+    &HTTP_API_ON,
     &START_SLOT,
     &HOP_SEED,
     &RX_HOPS,

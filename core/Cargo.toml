@@ -12,6 +12,8 @@ embassy-futures = "0.1"
 embedded-graphics = "0.8"
 heapless = "0.8"
 codec2 = "0.3.0"
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 # The embassy channels need a critical-section implementation to link. The

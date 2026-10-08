@@ -12,6 +12,10 @@
 //!   GET  /api/screenshot  the screen as it is now, menus and all (1-bit BMP)
 //!   POST /api/reboot
 //!   POST /api/wifi/off    WiFi off until the next reboot (net.rs)
+//!   POST /api/management/echo?bytes=N
+//!                         N bytes (default 16, at most 4096) to the
+//!                         management server and back, timed (JSON):
+//!                         does this radio reach it (management.rs)
 //!   /fs/...               the storage (/data) as a WebDAV folder, read and
 //!                         write: config.toml, log/, anything (webdav.rs)
 //!
@@ -26,10 +30,11 @@ use esp_idf_svc::http::server::{Configuration, EspHttpConnection, EspHttpServer,
 use esp_idf_svc::http::Method;
 use esp_idf_svc::io::Write;
 use open_oswst_core::devices::screen;
+use open_oswst_core::management::{self as protocol, Response};
 use open_oswst_core::{config, mode};
 
 use crate::devices::storage;
-use crate::{firmware, webdav};
+use crate::{firmware, management, webdav};
 
 /// Files go through this much at a time
 const CHUNK: usize = 4096;
@@ -58,6 +63,7 @@ pub fn start(name: &str, mac: &str, wifi_off: Sender<()>) -> Option<EspHttpServe
         .and_then(|s| s.fn_handler("/api/firmware", Method::Get, download_firmware))
         .and_then(|s| s.fn_handler("/api/screenshot", Method::Get, screenshot))
         .and_then(|s| s.fn_handler("/api/reboot", Method::Post, reboot))
+        .and_then(|s| s.fn_handler("/api/management/echo", Method::Post, management_echo))
         .and_then(|s| {
             s.fn_handler("/api/wifi/off", Method::Post, move |req| {
                 switch_wifi_off(req, &wifi_off)
@@ -191,6 +197,66 @@ fn reboot_soon() {
         std::thread::sleep(Duration::from_millis(500));
         unsafe { esp_idf_svc::sys::esp_restart() };
     });
+}
+
+/// The most /api/management/echo sends: its copy and the answer are both on
+/// the heap at once
+const ECHO_MAX: usize = 4096;
+
+/// Echo through the management server: ?bytes=N there and back, timed.
+/// Blocks this handler (the server's own task) for up to its timeouts
+fn management_echo(req: Req) -> Result {
+    let size = req
+        .uri()
+        .split_once("?bytes=")
+        .and_then(|(_, n)| n.parse::<usize>().ok())
+        .unwrap_or(16)
+        .min(ECHO_MAX);
+    let sent: Vec<u8> = (0..size).map(|i| i as u8).collect();
+    let started = std::time::Instant::now();
+    let answer = management::call(&protocol::Request::Echo(sent.clone()));
+    let round_trip_ms = started.elapsed().as_millis() as u64;
+    let (code, reply) = match answer {
+        Ok(Response::Echo(got)) if got == sent => (200, EchoReply::ok(size, round_trip_ms)),
+        Ok(Response::Echo(_)) => (502, EchoReply::failed("came back different", round_trip_ms)),
+        Ok(Response::Error(e)) => (502, EchoReply::failed(&e, round_trip_ms)),
+        Err(e) => (502, EchoReply::failed(&e, round_trip_ms)),
+    };
+    log::info!("Management echo, {} B: {:?}", size, reply);
+    let mut body = serde_json::to_vec(&reply)?;
+    body.push(b'\n');
+    req.into_response(code, None, &[("Content-Type", "application/json")])?
+        .write_all(&body)?;
+    Ok(())
+}
+
+/// What POST /api/management/echo answers, as JSON
+#[derive(serde::Serialize, Debug)]
+struct EchoReply {
+    ok: bool,
+    bytes: usize,
+    round_trip_ms: u64,
+    error: Option<String>,
+}
+
+impl EchoReply {
+    fn ok(bytes: usize, round_trip_ms: u64) -> EchoReply {
+        EchoReply {
+            ok: true,
+            bytes,
+            round_trip_ms,
+            error: None,
+        }
+    }
+
+    fn failed(error: &str, round_trip_ms: u64) -> EchoReply {
+        EchoReply {
+            ok: false,
+            bytes: 0,
+            round_trip_ms,
+            error: Some(error.into()),
+        }
+    }
 }
 
 /// Ask the net thread to switch WiFi off. It waits for this reply to go out

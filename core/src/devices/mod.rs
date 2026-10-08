@@ -4,6 +4,7 @@
 pub mod battery;
 pub mod gps;
 pub mod knob;
+pub mod management;
 pub mod mic;
 pub mod network;
 pub mod ptt;

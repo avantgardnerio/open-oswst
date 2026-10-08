@@ -3,6 +3,7 @@ pub mod clock;
 pub mod devices;
 pub mod firmware;
 pub mod http;
+pub mod management;
 pub mod net;
 pub mod noise;
 pub mod thread;

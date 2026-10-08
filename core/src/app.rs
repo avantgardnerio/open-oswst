@@ -1,6 +1,7 @@
 use crate::devices::battery::Battery;
 use crate::devices::gps::{Fix, Gps};
 use crate::devices::knob::{Event as Knob, Knob as _};
+use crate::devices::management;
 use crate::devices::mic::Mic;
 use crate::devices::network::Network;
 use crate::devices::ptt::Ptt;
@@ -38,6 +39,7 @@ use crate::config;
 use crate::conveyor::{Arrival, Landing, Transmission};
 use crate::double_click::DoubleClick;
 use crate::echo::{self, Recorder};
+use crate::management::{Request, Response};
 use crate::menu::{Action, Menu, Outcome, Page, Setting, BACK};
 use crate::mode::{self, Mode};
 use crate::packet::{self, Header, Ident, PacketType, NAME_BYTES};
@@ -55,6 +57,10 @@ use crate::utc;
 /// PTT press, so packet n's bin, 2(n + 1), starts this long after its capture
 /// ends
 const ENCODE_DEADLINE: embassy_time::Duration = embassy_time::Duration::from_millis(150);
+
+/// How long the menu's Update waits for the management server: the
+/// firmware's own timeouts (connect, then the answer) come first
+const UPDATE_TIMEOUT: embassy_time::Duration = embassy_time::Duration::from_secs(25);
 
 /// How often the battery is read, while idle (never while we transmit: the
 /// mic has the ADC then). Its last reading goes on each GPS log line
@@ -1107,6 +1113,7 @@ impl<P: Platform> App<P> {
                     }
                     Outcome::Open(Page::AddWifi) => self.run_add_wifi().await,
                     Outcome::Open(Page::ForgetWifi) => self.run_forget_wifi().await,
+                    Outcome::Open(Page::Update) => self.run_update().await,
                 },
             }
         }
@@ -1230,6 +1237,37 @@ impl<P: Platform> App<P> {
         }
     }
 
+    /// Ask the management server. For now an Echo, to show the link works
+    /// and its round trip; the firmware update comes next
+    async fn run_update(&mut self) {
+        if !matches!(P::network(), Network::Joined { .. }) {
+            self.pick("Not on a network", &[]).await;
+            return;
+        }
+        self.draw_list("Update: asking...", &[], 0);
+        // Nothing left over from a request that timed out
+        while management::REQUESTS.try_receive().is_ok() {}
+        management::ANSWERS.reset();
+        let _ = management::REQUESTS.try_send(Request::Echo(vec![0; 16]));
+        let started = Instant::now();
+        let answer = select(management::ANSWERS.wait(), Timer::after(UPDATE_TIMEOUT)).await;
+        let title = match answer {
+            Either::First(Ok(Response::Echo(_))) => {
+                format!("Server: {} ms", started.elapsed().as_millis())
+            }
+            Either::First(Ok(other)) => {
+                log::warn!("Update: unexpected answer {:?}", other);
+                "Server: odd answer".into()
+            }
+            Either::First(Err(e)) => {
+                log::warn!("Update: {}", e);
+                e
+            }
+            Either::Second(()) => "Server: no answer".into(),
+        };
+        self.pick(&title, &[]).await;
+    }
+
     /// A list to pick from, Back first (where the cursor starts): the index
     /// into `labels` of the one clicked, or None for Back
     async fn pick(&mut self, title: &str, labels: &[String]) -> Option<usize> {
@@ -1270,6 +1308,9 @@ impl<P: Platform> App<P> {
             Setting::Lock => self.locked = value != 0,
             Setting::Mode => config::MODE.set(value as i32, self.devices.settings.as_mut()),
             Setting::Wifi => config::WIFI_ON.set(value as i32, self.devices.settings.as_mut()),
+            Setting::HttpApi => {
+                config::HTTP_API_ON.set(value as i32, self.devices.settings.as_mut())
+            }
             Setting::SendPosition => {
                 config::SEND_POSITION.set(value as i32, self.devices.settings.as_mut())
             }
@@ -1284,6 +1325,7 @@ impl<P: Platform> App<P> {
             Setting::Lock => self.locked as u8,
             Setting::Mode => mode::get() as u8,
             Setting::Wifi => config::WIFI_ON.get() as u8,
+            Setting::HttpApi => config::HTTP_API_ON.get() as u8,
             Setting::SendPosition => config::SEND_POSITION.get() as u8,
             Setting::LogToFlash => config::LOG_TO_FLASH.get() as u8,
         }

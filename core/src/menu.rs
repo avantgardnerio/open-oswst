@@ -9,6 +9,7 @@ pub enum Setting {
     Lock,         // 0 = off, 1 = on
     Mode,         // a mode::Mode as u8
     Wifi,         // config::WIFI_ON, 0 or 1
+    HttpApi,      // config::HTTP_API_ON, 0 or 1
     SendPosition, // config::SEND_POSITION, 0 or 1
     LogToFlash,   // config::LOG_TO_FLASH, 0 or 1
 }
@@ -25,6 +26,7 @@ pub enum Action {
 pub enum Page {
     AddWifi,    // networks in range, then the password
     ForgetWifi, // the saved networks
+    Update,     // ask the management server
 }
 
 pub enum Item {
@@ -64,6 +66,13 @@ static ROOT: &[Item] = &[
                 ],
             ),
             Item::Submenu(
+                "HTTP API",
+                &[
+                    Item::Choice("on", Setting::HttpApi, 1),
+                    Item::Choice("off", Setting::HttpApi, 0),
+                ],
+            ),
+            Item::Submenu(
                 "Send position",
                 &[
                     Item::Choice("on", Setting::SendPosition, 1),
@@ -86,6 +95,7 @@ static ROOT: &[Item] = &[
             Item::Page("Forget", Page::ForgetWifi),
         ],
     ),
+    Item::Page("Update", Page::Update),
 ];
 
 pub const BACK: &str = "Back";

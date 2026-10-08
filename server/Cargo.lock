@@ -257,7 +257,6 @@ name = "open-oswst-core"
 version = "0.1.0"
 dependencies = [
  "codec2",
- "critical-section",
  "embassy-futures",
  "embassy-sync",
  "embassy-time",
@@ -326,6 +325,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "server"
+version = "0.1.0"
+dependencies = [
+ "open-oswst-core",
+ "serde",
 ]
 
 [[package]]
