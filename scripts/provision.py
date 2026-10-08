@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Set boards up over USB: the firmware, and a fresh storage partition holding
-that board's /data/config.toml (its mode, and the WiFi networks to join).
+that board's /data/config.toml (its mode, any other settings and flags its
+entry gives, and the WiFi networks to join).
 
 Each board's settings come from boards.toml in the repo root, kept out of git
 because it holds WiFi passwords (copy boards.example.toml to start). Every
@@ -12,6 +13,14 @@ network under [all] goes on every board, first; a board's own come after:
 
     ["A4:CB:8F:A2:0F:5C"]
     mode = "repeater"
+
+    ["F8:5B:1B:A2:C6:2C"]
+    mode = "normal"
+    name = "handheld"
+    tx_power_dbm = 6          # any setting in core/src/config.rs, copied as-is
+
+    ["F8:5B:1B:A2:C6:2C".flags]
+    send_position = true      # and its [flags]
 
 A board missing from boards.toml gets mode "normal" and the [all] networks.
 
@@ -72,6 +81,16 @@ def config_toml(boards, mac):
         sys.exit(f"{mac}: mode {mode!r} isn't one of {MODES}")
     networks = boards.get("all", {}).get("wifi", []) + board.get("wifi", [])
     lines = [f"mode = {json.dumps(mode)}"]
+    # Any other setting the entry gives (name, tx_power_dbm...), as-is: the
+    # firmware checks them. JSON writes strings, numbers and true/false the
+    # way TOML reads them
+    for key, value in board.items():
+        if key not in ("mode", "wifi", "flags"):
+            lines.append(f"{key} = {json.dumps(value)}")
+    flags = board.get("flags", {})
+    if flags:
+        lines += ["", "[flags]"]
+        lines += [f"{key} = {json.dumps(value)}" for key, value in flags.items()]
     for net in networks:
         lines += ["", "[[wifi]]",
                   f"ssid = {json.dumps(net['ssid'])}",
