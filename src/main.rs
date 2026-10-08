@@ -99,8 +99,10 @@ fn main() {
     } else if storage_ok {
         log::info!("Not logging to flash (log_to_flash off): serial only");
     }
-    let wifi_networks = settings.wifi_networks();
-    log::info!("Config: {} WiFi network(s)", wifi_networks.len());
+    log::info!(
+        "Config: {} WiFi network(s)",
+        settings::wifi_networks().len()
+    );
     let settings = Some(settings);
 
     // Get MAC for display
@@ -125,9 +127,9 @@ fn main() {
 
     let (start_hz, sweep_hz) = channels();
     spawn_radio(board.radio, start_hz, sweep_hz);
-    // WiFi and the HTTP API, on core 0 at a low priority (only if networks
-    // are configured)
-    net::start(board.modem, wifi_networks, mac_str.to_string());
+    // WiFi and the HTTP API, on core 0 at a low priority (only once networks
+    // are saved, or the menu scans for one)
+    net::start(board.modem, mac_str.to_string());
     firmware::confirm_later();
 
     unsafe { esp_idf_svc::sys::vTaskPrioritySet(core::ptr::null_mut(), APP_PRIORITY as u32) };

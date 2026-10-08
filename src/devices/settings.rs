@@ -11,10 +11,12 @@
 //! ```
 //!
 //! The settings and flags (`get` / `set`) are declared in core's config.rs.
-//! The WiFi networks are for the firmware (`wifi_networks`), tried in order.
+//! The WiFi networks are for the firmware (`wifi_networks`), tried in order;
+//! the menu adds and forgets them.
 
 use std::fs;
 use std::io::ErrorKind;
+use std::sync::Mutex;
 
 use open_oswst_core::config;
 
@@ -27,6 +29,7 @@ pub struct Settings {
 }
 
 /// One network the board may join
+#[derive(Clone)]
 pub struct WifiNetwork {
     pub ssid: String,
     pub password: String,
@@ -50,7 +53,23 @@ pub fn init() -> Settings {
             toml::Table::new()
         }
     };
-    Settings { table }
+    let settings = Settings { table };
+    settings.publish_wifi();
+    settings
+}
+
+/// The WiFi networks as last saved, for the network code (net.rs), which
+/// runs on its own thread: set when the file is read, and again whenever
+/// the menu changes them
+static NETWORKS: Mutex<Vec<WifiNetwork>> = Mutex::new(Vec::new());
+
+/// The WiFi networks to try, in the order saved
+pub fn wifi_networks() -> Vec<WifiNetwork> {
+    NETWORKS.lock().unwrap().clone()
+}
+
+pub fn has_wifi_networks() -> bool {
+    !NETWORKS.lock().unwrap().is_empty()
 }
 
 /// Where the config file is
@@ -81,9 +100,8 @@ const FLAGS: &str = "flags";
 const WIFI: &str = "wifi";
 
 impl Settings {
-    /// The WiFi networks to try, in the order listed. Malformed entries are
-    /// skipped and logged.
-    pub fn wifi_networks(&self) -> Vec<WifiNetwork> {
+    /// The [[wifi]] entries. Malformed ones are skipped and logged.
+    fn read_wifi(&self) -> Vec<WifiNetwork> {
         let Some(entries) = self.table.get(WIFI).and_then(|wifi| wifi.as_array()) else {
             return Vec::new();
         };
@@ -100,6 +118,18 @@ impl Settings {
                 }
             })
             .collect()
+    }
+
+    fn publish_wifi(&self) {
+        *NETWORKS.lock().unwrap() = self.read_wifi();
+    }
+
+    /// The [[wifi]] entries, made if there are none yet
+    fn wifi_entries(&mut self) -> Option<&mut toml::value::Array> {
+        self.table
+            .entry(WIFI)
+            .or_insert_with(|| toml::Value::Array(Vec::new()))
+            .as_array_mut()
     }
 
     fn save(&self) {
@@ -146,6 +176,46 @@ impl open_oswst_core::devices::settings::Settings for Settings {
             }
         }
         self.save();
+    }
+
+    fn wifi_ssids(&self) -> Vec<String> {
+        self.read_wifi()
+            .into_iter()
+            .map(|network| network.ssid)
+            .collect()
+    }
+
+    fn add_wifi(&mut self, ssid: &str, password: &str) {
+        let Some(entries) = self.wifi_entries() else {
+            log::warn!("Config: wifi isn't a list of [[wifi]] entries; not saved");
+            return;
+        };
+        let is_it = |entry: &toml::Value| entry.get("ssid").and_then(|v| v.as_str()) == Some(ssid);
+        match entries.iter_mut().find(|entry| is_it(entry)) {
+            Some(toml::Value::Table(entry)) => {
+                entry.insert("password".into(), password.into());
+            }
+            _ => {
+                let mut entry = toml::Table::new();
+                entry.insert("ssid".into(), ssid.into());
+                entry.insert("password".into(), password.into());
+                entries.push(toml::Value::Table(entry));
+            }
+        }
+        self.save();
+        self.publish_wifi();
+    }
+
+    fn forget_wifi(&mut self, ssid: &str) {
+        let Some(entries) = self.wifi_entries() else {
+            return;
+        };
+        entries.retain(|entry| entry.get("ssid").and_then(|v| v.as_str()) != Some(ssid));
+        if entries.is_empty() {
+            self.table.remove(WIFI);
+        }
+        self.save();
+        self.publish_wifi();
     }
 
     fn keys(&self) -> Vec<String> {

@@ -19,10 +19,19 @@ pub enum Action {
     Screenshot, // save the screen as it was when the menu opened
 }
 
+/// A screen of its own, opened from the menu; the menu is where it was
+/// when the page is left
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Page {
+    AddWifi,    // networks in range, then the password
+    ForgetWifi, // the saved networks
+}
+
 pub enum Item {
     Submenu(&'static str, &'static [Item]),
     Choice(&'static str, Setting, u8),
     Action(&'static str, Action), // closes the whole menu, then it's done
+    Page(&'static str, Page),
 }
 
 static ROOT: &[Item] = &[
@@ -70,6 +79,13 @@ static ROOT: &[Item] = &[
             ),
         ],
     ),
+    Item::Submenu(
+        "WiFi networks",
+        &[
+            Item::Page("Add", Page::AddWifi),
+            Item::Page("Forget", Page::ForgetWifi),
+        ],
+    ),
 ];
 
 pub const BACK: &str = "Back";
@@ -80,6 +96,7 @@ pub enum Outcome {
     Exit,
     Set(Setting, u8),
     ExitAndDo(Action),
+    Open(Page),
 }
 
 #[derive(Clone, Copy)]
@@ -147,6 +164,7 @@ impl Menu {
                 self.stack.clear();
                 Outcome::ExitAndDo(*action)
             }
+            Item::Page(_, page) => Outcome::Open(*page),
         }
     }
 
@@ -166,7 +184,7 @@ impl Menu {
             rows.push(match item {
                 Item::Submenu(label, _) => (*label, false),
                 Item::Choice(label, setting, value) => (*label, current(*setting, *value)),
-                Item::Action(label, _) => (*label, false),
+                Item::Action(label, _) | Item::Page(label, _) => (*label, false),
             });
         }
         rows
@@ -207,5 +225,16 @@ mod tests {
         menu.rotate(2); // on, off
         assert!(matches!(menu.click(), Outcome::Set(Setting::Wifi, 0)));
         assert_eq!(menu.title(), "Privacy"); // back to the list it came from
+    }
+
+    #[test]
+    fn a_page_opens_and_the_menu_stays_put() {
+        let mut menu = Menu::new();
+        menu.rotate(5); // Back, Screenshot, Lock, Mode, Privacy, WiFi networks
+        assert!(matches!(menu.click(), Outcome::Stay));
+        menu.rotate(1); // Add
+        assert!(matches!(menu.click(), Outcome::Open(Page::AddWifi)));
+        assert_eq!(menu.title(), "WiFi networks");
+        assert_eq!(menu.cursor(), 1);
     }
 }

@@ -11,3 +11,4 @@ pub mod radio;
 pub mod screen;
 pub mod settings;
 pub mod speaker;
+pub mod wifi;

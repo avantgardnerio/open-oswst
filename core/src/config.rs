@@ -459,6 +459,11 @@ mod tests {
         fn keys(&self) -> Vec<String> {
             self.0.keys().cloned().collect()
         }
+        fn wifi_ssids(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn add_wifi(&mut self, _ssid: &str, _password: &str) {}
+        fn forget_wifi(&mut self, _ssid: &str) {}
     }
 
     fn file(pairs: &[(&str, &str)]) -> File {

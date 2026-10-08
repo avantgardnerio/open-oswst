@@ -5,7 +5,7 @@ use core::fmt::Write as _;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Network {
-    /// No networks configured: WiFi never starts
+    /// Not running: switched off, or no networks saved
     Off,
     /// Configured, but not on a network (yet, or any more)
     Searching,

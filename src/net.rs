@@ -4,9 +4,11 @@
 //! last 4 hex digits) and announces `_oswst._tcp`, so scripts can find every
 //! radio on the network.
 //!
-//! With no networks in config.toml, WiFi never starts: no heap spent, and
-//! nothing transmitted. WARNING: WiFi beacons and probes are easy to
-//! direction-find.
+//! With no networks in config.toml, WiFi doesn't start: no heap spent, and
+//! nothing transmitted. Until the menu's Add list scans for one: while that
+//! list is on the screen (core's devices::wifi::SCAN_WANTED), it scans back
+//! to back and the menu gets every scan. WARNING: WiFi beacons and probes
+//! are easy to direction-find.
 //!
 //! The setting config::WIFI_ON says whether it runs, and it's saved: switched
 //! off or on in the menu (Privacy), WiFi stops or starts within ON_CHECK and
@@ -14,23 +16,27 @@
 //! reboot (or the menu) only, for field tests: WiFi on core 0 costs the
 //! audio its timing.
 
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::hal::modem::Modem;
 use esp_idf_svc::mdns::EspMdns;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
-use esp_idf_svc::wifi::{AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi};
+use esp_idf_svc::wifi::{
+    AccessPointInfo, AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi,
+};
 
 use std::sync::Mutex;
 
 use open_oswst_core::config;
 use open_oswst_core::devices::network::Network;
+use open_oswst_core::devices::wifi::{self, Seen};
 
-use crate::devices::settings::WifiNetwork;
+use crate::devices::settings::{self, WifiNetwork};
 use crate::{clock, http, thread};
 
 /// Where the WiFi is at, for the screen (Platform::network). Off until
@@ -47,32 +53,44 @@ fn set_state(network: Network) {
 
 /// How often to check the connection, and rejoin if it's gone
 const CHECK_EVERY: Duration = Duration::from_secs(10);
-/// How soon WiFi stops or starts once config::WIFI_ON changes (the menu)
-const ON_CHECK: Duration = Duration::from_secs(1);
+/// How soon WiFi stops or starts once config::WIFI_ON changes (the menu),
+/// and how soon the menu's scans start
+const ON_CHECK: Duration = Duration::from_millis(250);
 /// Below the codec (5) and far below the radio (10, on the other core)
 const PRIORITY: u8 = 3;
 
-/// Start WiFi and the HTTP server on their own thread, if any networks are
-/// configured. `mac` is the board's, as printed (AA:BB:CC:DD:EE:FF).
-pub fn start(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
-    if networks.is_empty() {
-        log::info!("WiFi: no networks in config.toml, staying off");
-        return;
-    }
+/// Start WiFi and the HTTP server on their own thread. `mac` is the
+/// board's, as printed (AA:BB:CC:DD:EE:FF).
+pub fn start(modem: Modem<'static>, mac: String) {
     thread::spawn(c"net", 8192, Some(PRIORITY), Some(Core::Core0), move || {
-        run(modem, networks, mac)
+        run(modem, mac)
     });
 }
 
-/// WiFi on and off as config::WIFI_ON says, for as long as the radio runs.
-/// While it's off, nothing is transmitted; until it's first on, nothing of
-/// the WiFi driver is even set up (no heap spent)
-fn run(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
+/// Why WiFi stopped
+enum Stop {
+    SwitchedOff, // config::WIFI_ON off (the menu)
+    OffMessage,  // /wifi/off
+    Unneeded,    // no networks saved, and the menu isn't scanning
+}
+
+/// WiFi is wanted: switched on, with a network to join or the menu scanning
+fn wanted() -> bool {
+    config::WIFI_ON.is_on()
+        && (settings::has_wifi_networks() || wifi::SCAN_WANTED.load(Ordering::Relaxed))
+}
+
+/// WiFi on and off as wanted, for as long as the radio runs. While it's
+/// off, nothing is transmitted; until it's first on, nothing of the WiFi
+/// driver is even set up (no heap spent)
+fn run(modem: Modem<'static>, mac: String) {
     let name = hostname(&mac);
     if !config::WIFI_ON.is_on() {
         log::info!("WiFi: off (wifi_on = false) until switched on");
-        wait_for_on();
+    } else if !settings::has_wifi_networks() {
+        log::info!("WiFi: no networks saved, off until one is (or the menu scans)");
     }
+    wait_for_wanted();
     let sys_loop = EspSystemEventLoop::take().unwrap();
     // ESP-IDF's own NVS partition, for the PHY's calibration data. Not given
     // to the WiFi driver: then it never writes its config to flash by itself
@@ -95,7 +113,7 @@ fn run(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
         // Sets the clock once a network with internet is joined (it retries)
         let ntp = clock::start_ntp();
 
-        stay_joined(&mut wifi, &networks, &off_rx);
+        let stop = stay_joined(&mut wifi, &off_rx);
 
         // Give /wifi/off's reply time to get out, then stop everything
         sleep(Duration::from_millis(500));
@@ -106,82 +124,127 @@ fn run(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
             log::warn!("WiFi: stop failed: {}", e);
         }
         set_state(Network::Off);
-        if config::WIFI_ON.is_on() {
-            // /wifi/off: the menu's choice (the file's) comes back at the reboot
-            config::WIFI_ON.set_until_reboot(0);
-            log::info!("WiFi: off until the next reboot or the menu (/wifi/off)");
-        } else {
-            log::info!("WiFi: off (wifi_on = false)");
+        match stop {
+            Stop::OffMessage => {
+                // The menu's choice (the file's) comes back at the reboot
+                config::WIFI_ON.set_until_reboot(0);
+                log::info!("WiFi: off until the next reboot or the menu (/wifi/off)");
+            }
+            Stop::SwitchedOff => log::info!("WiFi: off (wifi_on = false)"),
+            Stop::Unneeded => log::info!("WiFi: off (no networks saved)"),
         }
         while off_rx.try_recv().is_ok() {} // a /wifi/off that came twice
 
-        wait_for_on();
+        wait_for_wanted();
         log::info!("WiFi: on again");
     }
 }
 
-/// Join a network and rejoin when it's lost, until WiFi is to stop
-fn stay_joined(
-    wifi: &mut BlockingWifi<EspWifi<'static>>,
-    networks: &[WifiNetwork],
-    off_rx: &mpsc::Receiver<()>,
-) {
+/// Join a network and rejoin when it's lost, and scan for the menu while it
+/// wants, until WiFi is to stop
+fn stay_joined(wifi: &mut BlockingWifi<EspWifi<'static>>, off_rx: &mpsc::Receiver<()>) -> Stop {
     // Logged only when it changes: away from the networks, every scan would
     // say the same "none joined" (~every 20s on a walk), and each line in
     // the log costs a flash write that stalls both cores
-    let mut joined = false;
+    let mut joined: Option<String> = None;
     let mut searching_logged = false;
     loop {
-        if !wifi.is_connected().unwrap_or(false) {
-            if joined {
+        // Read each time round: the menu adds and forgets them
+        let networks = settings::wifi_networks();
+        let scan_wanted = wifi::SCAN_WANTED.load(Ordering::Relaxed);
+        if networks.is_empty() && !scan_wanted {
+            return Stop::Unneeded;
+        }
+
+        let mut connected = wifi.is_connected().unwrap_or(false);
+        if let Some(ssid) = &joined {
+            if !connected {
                 log::info!("WiFi: lost the network");
-            }
-            set_state(Network::Searching);
-            joined = join(wifi, networks);
-            if joined {
-                searching_logged = false;
-            } else if !searching_logged {
-                log::info!(
-                    "WiFi: none of the {} configured networks joined; still looking",
-                    networks.len()
-                );
-                searching_logged = true;
+                joined = None;
+            } else if !networks.iter().any(|network| network.ssid == *ssid) {
+                log::info!("WiFi: leaving {:?}, forgotten", ssid);
+                let _ = wifi.disconnect();
+                set_state(Network::Searching);
+                joined = None;
+                connected = false;
             }
         }
-        if wait_for_off(off_rx) {
-            return;
+        let to_join = !connected && !networks.is_empty();
+        if to_join {
+            set_state(Network::Searching);
+        }
+
+        if scan_wanted || to_join {
+            match wifi.scan() {
+                Ok(in_range) => {
+                    if scan_wanted {
+                        wifi::SCANS.signal(in_range.iter().map(seen).collect());
+                    }
+                    if to_join {
+                        joined = join(wifi, &networks, &in_range);
+                        if joined.is_some() {
+                            searching_logged = false;
+                        } else if !searching_logged {
+                            log::info!(
+                                "WiFi: none of the {} saved networks joined; still looking",
+                                networks.len()
+                            );
+                            searching_logged = true;
+                        }
+                    }
+                }
+                Err(e) => log::warn!("WiFi: scan failed: {}", e),
+            }
+        }
+        if let Some(stop) = wait(off_rx) {
+            return stop;
         }
     }
 }
 
-/// Wait until config::WIFI_ON is on (the menu), checking every ON_CHECK
-fn wait_for_on() {
-    while !config::WIFI_ON.is_on() {
+/// For the menu: what a scan saw
+fn seen(ap: &AccessPointInfo) -> Seen {
+    Seen {
+        ssid: ap.ssid.as_str().try_into().unwrap_or_default(),
+        rssi_dbm: ap.signal_strength,
+        open: ap.auth_method == Some(AuthMethod::None),
+    }
+}
+
+/// Wait until WiFi is wanted, checking every ON_CHECK
+fn wait_for_wanted() {
+    while !wanted() {
         sleep(ON_CHECK);
     }
 }
 
-/// Wait out CHECK_EVERY, or less if WiFi is to stop: /wifi/off (a message on
+/// Wait out CHECK_EVERY, or not at all while the menu wants scans (they go
+/// back to back). Some if WiFi is to stop: /wifi/off (a message on
 /// `off_rx`) or config::WIFI_ON switched off (checked every ON_CHECK)
-fn wait_for_off(off_rx: &mpsc::Receiver<()>) -> bool {
-    let started = std::time::Instant::now();
-    while started.elapsed() < CHECK_EVERY {
-        if off_rx.recv_timeout(ON_CHECK).is_ok() || !config::WIFI_ON.is_on() {
-            return true;
+fn wait(off_rx: &mpsc::Receiver<()>) -> Option<Stop> {
+    let started = Instant::now();
+    loop {
+        if off_rx.try_recv().is_ok() {
+            return Some(Stop::OffMessage);
+        }
+        if !config::WIFI_ON.is_on() {
+            return Some(Stop::SwitchedOff);
+        }
+        if wifi::SCAN_WANTED.load(Ordering::Relaxed) || started.elapsed() >= CHECK_EVERY {
+            return None;
+        }
+        if off_rx.recv_timeout(ON_CHECK).is_ok() {
+            return Some(Stop::OffMessage);
         }
     }
-    false
 }
 
-/// Join the first configured network that's in range. False if none
-fn join(wifi: &mut BlockingWifi<EspWifi<'static>>, networks: &[WifiNetwork]) -> bool {
-    let in_range = match wifi.scan() {
-        Ok(found) => found,
-        Err(e) => {
-            log::warn!("WiFi: scan failed: {}", e);
-            return false;
-        }
-    };
+/// Join the first saved network that's in range: its name, or None if none
+fn join(
+    wifi: &mut BlockingWifi<EspWifi<'static>>,
+    networks: &[WifiNetwork],
+    in_range: &[AccessPointInfo],
+) -> Option<String> {
     for network in networks {
         let Some(ap) = in_range.iter().find(|ap| ap.ssid.as_str() == network.ssid) else {
             continue;
@@ -217,7 +280,7 @@ fn join(wifi: &mut BlockingWifi<EspWifi<'static>>, networks: &[WifiNetwork]) -> 
                     ssid: network.ssid.as_str().try_into().unwrap_or_default(),
                     ip: ip.map(|ip| ip.octets()).unwrap_or_default(),
                 });
-                return true;
+                return Some(network.ssid.clone());
             }
             Err(e) => {
                 log::warn!("WiFi: joining {:?} failed: {}", network.ssid, e);
@@ -225,7 +288,7 @@ fn join(wifi: &mut BlockingWifi<EspWifi<'static>>, networks: &[WifiNetwork]) -> 
             }
         }
     }
-    false
+    None
 }
 
 /// mDNS: answer as NAME.local, and announce the HTTP API as `_oswst._tcp`.

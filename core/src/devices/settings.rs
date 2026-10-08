@@ -11,4 +11,14 @@ pub trait Settings {
 
     /// Every setting in the file, as `get` takes them
     fn keys(&self) -> Vec<String>;
+
+    /// The saved WiFi networks' names, in the order they're tried
+    fn wifi_ssids(&self) -> Vec<String>;
+
+    /// Save a WiFi network, last in the order; one saved already keeps its
+    /// place and gets the new password. Best effort, like `set`
+    fn add_wifi(&mut self, ssid: &str, password: &str);
+
+    /// Drop a saved WiFi network. Best effort, like `set`
+    fn forget_wifi(&mut self, ssid: &str);
 }

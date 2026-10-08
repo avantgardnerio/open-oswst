@@ -6,7 +6,9 @@ use crate::devices::network::Network;
 use crate::devices::ptt::Ptt;
 use crate::devices::radio::{Listen, Rotation, RxPacket, TxRequest, LISTEN, RX_CHAN, TX_CHAN};
 use crate::devices::screen::{Screen, Snapshot};
+use crate::devices::settings::Settings as _;
 use crate::devices::speaker::{self, MAX_VOLUME, SPK_AUDIO};
+use crate::devices::wifi;
 use crate::logger;
 use crate::platform::Platform;
 use crate::playback_timing::PlaybackTiming;
@@ -22,6 +24,7 @@ use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
 use embedded_graphics::text::{Baseline, Text};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -35,10 +38,12 @@ use crate::config;
 use crate::conveyor::{Arrival, Landing, Transmission};
 use crate::double_click::DoubleClick;
 use crate::echo::{self, Recorder};
-use crate::menu::{Action, Menu, Outcome, Setting};
+use crate::menu::{Action, Menu, Outcome, Page, Setting, BACK};
 use crate::mode::{self, Mode};
 use crate::packet::{self, Header, Ident, PacketType, NAME_BYTES};
+use crate::password_entry::{Click, PasswordEntry};
 use crate::playout::{Play, Playout};
+use crate::scan_list::ScanList;
 use crate::screen_text::{self, Activity, Heard};
 use crate::utc;
 
@@ -1100,12 +1105,146 @@ impl<P: Platform> App<P> {
                         self.save_screenshot();
                         break;
                     }
+                    Outcome::Open(Page::AddWifi) => self.run_add_wifi().await,
+                    Outcome::Open(Page::ForgetWifi) => self.run_forget_wifi().await,
                 },
             }
         }
         // Drop whatever arrived while we were menuing
         while RX_CHAN.try_receive().is_ok() {}
         self.draw_screen(Activity::Idle);
+    }
+
+    /// The networks in range, from scans back to back while this list is on
+    /// the screen (and only then: scans transmit). Append only, so a row
+    /// never moves under the cursor. Picking one asks its password (an open
+    /// network has none) and saves it; the radio joins it when it's next
+    /// looking for a network. Saved ones get a *
+    async fn run_add_wifi(&mut self) {
+        let Some(settings) = self.devices.settings.as_ref() else {
+            self.pick("No storage to save to", &[]).await;
+            return;
+        };
+        // Refused rather than switched on for a scan: off is a choice made
+        // for privacy (a scan's probes can be direction-found)
+        if !config::WIFI_ON.is_on() {
+            self.pick("WiFi is off", &[]).await;
+            return;
+        }
+        let saved = settings.wifi_ssids();
+        let mut list = ScanList::default();
+        let mut cursor = 0; // 0 = Back, 1.. = the list's rows
+        wifi::SCANS.reset();
+        wifi::SCAN_WANTED.store(true, Ordering::Relaxed);
+        loop {
+            let title = match (list.rows().is_empty(), list.scanned()) {
+                (true, false) => "Add WiFi: scanning",
+                (true, true) => "Add WiFi: none seen",
+                (false, _) => "Add WiFi (dBm)",
+            };
+            let labels: Vec<String> = list.rows().iter().map(|row| row.label()).collect();
+            let mut rows = vec![(BACK, false)];
+            for (row, label) in list.rows().iter().zip(&labels) {
+                rows.push((
+                    label.as_str(),
+                    saved.iter().any(|ssid| ssid.as_str() == row.ssid.as_str()),
+                ));
+            }
+            self.draw_list(title, &rows, cursor);
+
+            match select(self.devices.knob.next(), wifi::SCANS.wait()).await {
+                Either::Second(found) => list.add_scan(&found),
+                Either::First(Knob::Cw) => cursor = (cursor + 1).min(list.rows().len()),
+                Either::First(Knob::Ccw) => cursor = cursor.saturating_sub(1),
+                Either::First(Knob::Release) => {}
+                Either::First(Knob::Press) => {
+                    if cursor == 0 {
+                        break;
+                    }
+                    let row = &list.rows()[cursor - 1];
+                    let ssid = row.ssid.to_string();
+                    // No scans while typing: the list isn't on the screen
+                    wifi::SCAN_WANTED.store(false, Ordering::Relaxed);
+                    let password = if row.open {
+                        Some(String::new())
+                    } else {
+                        self.run_password(&ssid).await
+                    };
+                    if let (Some(password), Some(settings)) =
+                        (password, self.devices.settings.as_mut())
+                    {
+                        settings.add_wifi(&ssid, &password);
+                        log::info!("Menu: WiFi network {:?} saved", ssid);
+                        break;
+                    }
+                    wifi::SCAN_WANTED.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        wifi::SCAN_WANTED.store(false, Ordering::Relaxed);
+    }
+
+    /// Type a password on the knob's wheel (password_entry.rs). None if
+    /// given up on (DEL with nothing typed)
+    async fn run_password(&mut self, ssid: &str) -> Option<String> {
+        let mut entry = PasswordEntry::new();
+        loop {
+            self.draw_password(ssid, &entry);
+            match self.devices.knob.next().await {
+                Knob::Cw => entry.rotate(1),
+                Knob::Ccw => entry.rotate(-1),
+                Knob::Release => {}
+                Knob::Press => match entry.click() {
+                    Click::Typing => {}
+                    Click::Done(password) => return Some(password),
+                    Click::Cancel => return None,
+                },
+            }
+        }
+    }
+
+    /// The saved networks; picking one asks first, then forgets it. If it's
+    /// the one joined, the radio leaves it
+    async fn run_forget_wifi(&mut self) {
+        let Some(settings) = self.devices.settings.as_ref() else {
+            self.pick("No storage", &[]).await;
+            return;
+        };
+        let ssids = settings.wifi_ssids();
+        let title = if ssids.is_empty() {
+            "None saved"
+        } else {
+            "Forget"
+        };
+        let Some(picked) = self.pick(title, &ssids).await else {
+            return;
+        };
+        let ssid = &ssids[picked];
+        let question = format!("Forget {}?", ssid);
+        if self.pick(&question, &["Yes".into()]).await.is_none() {
+            return;
+        }
+        if let Some(settings) = self.devices.settings.as_mut() {
+            settings.forget_wifi(ssid);
+            log::info!("Menu: WiFi network {:?} forgotten", ssid);
+        }
+    }
+
+    /// A list to pick from, Back first (where the cursor starts): the index
+    /// into `labels` of the one clicked, or None for Back
+    async fn pick(&mut self, title: &str, labels: &[String]) -> Option<usize> {
+        let mut cursor = 0;
+        loop {
+            let mut rows = vec![(BACK, false)];
+            rows.extend(labels.iter().map(|label| (label.as_str(), false)));
+            self.draw_list(title, &rows, cursor);
+            match self.devices.knob.next().await {
+                Knob::Cw => cursor = (cursor + 1).min(labels.len()),
+                Knob::Ccw => cursor = cursor.saturating_sub(1),
+                Knob::Release => {}
+                Knob::Press => return cursor.checked_sub(1),
+            }
+        }
     }
 
     /// The radio screen as it was when the menu opened, to
@@ -1207,31 +1346,33 @@ impl<P: Platform> App<P> {
         self.display.shown_battery_cv = self.display.battery_mv.map(|mv| mv / 10);
     }
 
-    /// Title, then up to 4 rows; the cursor row is inverted, current values get a *.
     fn draw_menu(&self, menu: &Menu) {
+        let rows = menu.rows(|setting, value| self.setting(setting) == value);
+        self.draw_list(menu.title(), &rows, menu.cursor());
+    }
+
+    /// Title, then up to 4 rows; the cursor row is inverted, rows marked
+    /// true get a * (a setting's current value, a saved network).
+    fn draw_list(&self, title: &str, rows: &[(&str, bool)], cursor: usize) {
         const TOP: i32 = 13;
         const ROW_H: i32 = 11;
         const VISIBLE: usize = 4;
 
         let mut frame = self.devices.screen.frame();
-        Text::new(menu.title(), Point::new(1, 9), self.display.style)
+        let title: String = title.chars().take(screen_text::WIDTH).collect();
+        Text::new(&title, Point::new(1, 9), self.display.style)
             .draw(&mut frame)
             .unwrap();
 
-        let inverted = MonoTextStyleBuilder::new()
-            .font(&FONT_6X10)
-            .text_color(BinaryColor::Off)
-            .build();
-        let rows = menu.rows(|setting, value| self.setting(setting) == value);
-        let first = menu.cursor().saturating_sub(VISIBLE - 1);
+        let first = cursor.saturating_sub(VISIBLE - 1);
         for (i, (label, current)) in rows.iter().enumerate().skip(first).take(VISIBLE) {
             let y = TOP + (i - first) as i32 * ROW_H;
-            let style = if i == menu.cursor() {
+            let style = if i == cursor {
                 Rectangle::new(Point::new(0, y), Size::new(128, ROW_H as u32))
                     .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
                     .draw(&mut frame)
                     .unwrap();
-                inverted
+                self.inverted_style()
             } else {
                 self.display.style
             };
@@ -1245,6 +1386,63 @@ impl<P: Platform> App<P> {
             }
         }
         self.devices.screen.show(frame);
+    }
+
+    /// The network's name, what's typed with the cursor after it, and the
+    /// wheel: the stop a click would type inverted, its neighbours either
+    /// side (password_entry.rs)
+    fn draw_password(&self, ssid: &str, entry: &PasswordEntry) {
+        const CHAR_W: i32 = 6; // FONT_6X10
+        const WHEEL_TOP: i32 = 44;
+        const ROW_H: i32 = 11;
+
+        let mut frame = self.devices.screen.frame();
+        let title: String = ssid.chars().take(screen_text::WIDTH).collect();
+        Text::new(&title, Point::new(1, 9), self.display.style)
+            .draw(&mut frame)
+            .unwrap();
+        Text::new(
+            &entry.typed_line(screen_text::WIDTH),
+            Point::new(1, 28),
+            self.display.style,
+        )
+        .draw(&mut frame)
+        .unwrap();
+
+        let (wheel, start, len) = entry.wheel_line(screen_text::WIDTH);
+        Text::with_baseline(
+            &wheel,
+            Point::new(1, WHEEL_TOP + 1),
+            self.display.style,
+            Baseline::Top,
+        )
+        .draw(&mut frame)
+        .unwrap();
+        let x = 1 + start as i32 * CHAR_W;
+        Rectangle::new(
+            Point::new(x, WHEEL_TOP),
+            Size::new((len as i32 * CHAR_W) as u32, ROW_H as u32),
+        )
+        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+        .draw(&mut frame)
+        .unwrap();
+        Text::with_baseline(
+            &wheel[start..start + len],
+            Point::new(x, WHEEL_TOP + 1),
+            self.inverted_style(),
+            Baseline::Top,
+        )
+        .draw(&mut frame)
+        .unwrap();
+        self.devices.screen.show(frame);
+    }
+
+    /// Dark text, for on a lit row
+    fn inverted_style(&self) -> MonoTextStyle<'static, BinaryColor> {
+        MonoTextStyleBuilder::new()
+            .font(&FONT_6X10)
+            .text_color(BinaryColor::Off)
+            .build()
     }
 }
 
