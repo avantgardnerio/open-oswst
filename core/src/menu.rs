@@ -6,8 +6,11 @@ use crate::mode::Mode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setting {
-    Lock, // 0 = off, 1 = on
-    Mode, // a mode::Mode as u8
+    Lock,         // 0 = off, 1 = on
+    Mode,         // a mode::Mode as u8
+    Wifi,         // config::WIFI_ON, 0 or 1
+    SendPosition, // config::SEND_POSITION, 0 or 1
+    LogToFlash,   // config::LOG_TO_FLASH, 0 or 1
 }
 
 /// Something done once, rather than a setting to choose a value for.
@@ -37,6 +40,34 @@ static ROOT: &[Item] = &[
             Item::Choice("Normal", Setting::Mode, Mode::Normal as u8),
             Item::Choice("Repeater", Setting::Mode, Mode::Repeater as u8),
             Item::Choice("Echo", Setting::Mode, Mode::Echo as u8),
+        ],
+    ),
+    // What the radio gives away: RF that can be direction-found, where we
+    // are, and what a captured radio would hold. Each choice is saved
+    Item::Submenu(
+        "Privacy",
+        &[
+            Item::Submenu(
+                "WiFi",
+                &[
+                    Item::Choice("on", Setting::Wifi, 1),
+                    Item::Choice("off", Setting::Wifi, 0),
+                ],
+            ),
+            Item::Submenu(
+                "Send position",
+                &[
+                    Item::Choice("on", Setting::SendPosition, 1),
+                    Item::Choice("off", Setting::SendPosition, 0),
+                ],
+            ),
+            Item::Submenu(
+                "Log to flash",
+                &[
+                    Item::Choice("on", Setting::LogToFlash, 1),
+                    Item::Choice("off", Setting::LogToFlash, 0),
+                ],
+            ),
         ],
     ),
 ];
@@ -163,5 +194,18 @@ mod tests {
             menu.click(),
             Outcome::ExitAndDo(Action::Screenshot)
         ));
+    }
+
+    #[test]
+    fn privacy_switches_wifi_off() {
+        let mut menu = Menu::new();
+        menu.rotate(4); // Back, Screenshot, Lock, Mode, Privacy
+        assert!(matches!(menu.click(), Outcome::Stay));
+        assert_eq!(menu.title(), "Privacy");
+        menu.rotate(1); // WiFi
+        assert!(matches!(menu.click(), Outcome::Stay));
+        menu.rotate(2); // on, off
+        assert!(matches!(menu.click(), Outcome::Set(Setting::Wifi, 0)));
+        assert_eq!(menu.title(), "Privacy"); // back to the list it came from
     }
 }

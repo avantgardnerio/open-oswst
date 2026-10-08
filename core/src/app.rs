@@ -1095,6 +1095,13 @@ impl<P: Platform> App<P> {
         match setting {
             Setting::Lock => self.locked = value != 0,
             Setting::Mode => config::MODE.set(value as i32, self.devices.settings.as_mut()),
+            Setting::Wifi => config::WIFI_ON.set(value as i32, self.devices.settings.as_mut()),
+            Setting::SendPosition => {
+                config::SEND_POSITION.set(value as i32, self.devices.settings.as_mut())
+            }
+            Setting::LogToFlash => {
+                config::LOG_TO_FLASH.set(value as i32, self.devices.settings.as_mut())
+            }
         }
     }
 
@@ -1102,6 +1109,9 @@ impl<P: Platform> App<P> {
         match setting {
             Setting::Lock => self.locked as u8,
             Setting::Mode => mode::get() as u8,
+            Setting::Wifi => config::WIFI_ON.get() as u8,
+            Setting::SendPosition => config::SEND_POSITION.get() as u8,
+            Setting::LogToFlash => config::LOG_TO_FLASH.get() as u8,
         }
     }
 

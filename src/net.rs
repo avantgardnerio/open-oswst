@@ -6,14 +6,13 @@
 //!
 //! With no networks in config.toml, WiFi never starts: no heap spent, and
 //! nothing transmitted. WARNING: WiFi beacons and probes are easy to
-//! direction-find. It's on whenever networks are configured, by choice,
-//! until the menus come back to switch it (see the wifi-ota plan).
+//! direction-find.
 //!
-//! `POST /wifi/off` switches it off until the next reboot, for field tests:
-//! WiFi on core 0 costs the audio its timing. Nothing is saved, so a reboot
-//! always brings WiFi back (and with it, a way to reach the radio). The
-//! setting config::WIFI_ON says which it is; `wifi_on = false` in the file
-//! keeps WiFi off from boot.
+//! The setting config::WIFI_ON says whether it runs, and it's saved: switched
+//! off or on in the menu (Privacy), WiFi stops or starts within ON_CHECK and
+//! stays that way across reboots. `POST /wifi/off` stops it until the next
+//! reboot (or the menu) only, for field tests: WiFi on core 0 costs the
+//! audio its timing.
 
 use std::sync::mpsc;
 use std::thread::sleep;
@@ -31,7 +30,7 @@ use std::sync::Mutex;
 use open_oswst_core::config;
 use open_oswst_core::devices::network::Network;
 
-use crate::devices::settings::{Settings, WifiNetwork};
+use crate::devices::settings::WifiNetwork;
 use crate::{clock, http, thread};
 
 /// Where the WiFi is at, for the screen (Platform::network). Off until
@@ -48,6 +47,8 @@ fn set_state(network: Network) {
 
 /// How often to check the connection, and rejoin if it's gone
 const CHECK_EVERY: Duration = Duration::from_secs(10);
+/// How soon WiFi stops or starts once config::WIFI_ON changes (the menu)
+const ON_CHECK: Duration = Duration::from_secs(1);
 /// Below the codec (5) and far below the radio (10, on the other core)
 const PRIORITY: u8 = 3;
 
@@ -58,18 +59,20 @@ pub fn start(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
         log::info!("WiFi: no networks in config.toml, staying off");
         return;
     }
-    if !config::WIFI_ON.is_on() {
-        log::info!("WiFi: wifi_on = false in config.toml, staying off");
-        return;
-    }
-    set_state(Network::Searching);
     thread::spawn(c"net", 8192, Some(PRIORITY), Some(Core::Core0), move || {
         run(modem, networks, mac)
     });
 }
 
+/// WiFi on and off as config::WIFI_ON says, for as long as the radio runs.
+/// While it's off, nothing is transmitted; until it's first on, nothing of
+/// the WiFi driver is even set up (no heap spent)
 fn run(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
     let name = hostname(&mac);
+    if !config::WIFI_ON.is_on() {
+        log::info!("WiFi: off (wifi_on = false) until switched on");
+        wait_for_on();
+    }
     let sys_loop = EspSystemEventLoop::take().unwrap();
     // ESP-IDF's own NVS partition, for the PHY's calibration data. Not given
     // to the WiFi driver: then it never writes its config to flash by itself
@@ -80,16 +83,49 @@ fn run(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
     let mut wifi = BlockingWifi::wrap(driver, sys_loop).unwrap();
     wifi.set_configuration(&Configuration::Client(ClientConfiguration::default()))
         .unwrap();
-    wifi.start().unwrap();
 
     // /wifi/off sends on this. We keep a sender too, so the channel never
     // closes even if the HTTP server failed to start
     let (off_tx, off_rx) = mpsc::channel();
-    let mdns = announce(&name, &mac);
-    let http = http::start(&name, &mac, off_tx.clone());
-    // Sets the clock once a network with internet is joined (it retries)
-    let ntp = clock::start_ntp();
+    loop {
+        set_state(Network::Searching);
+        wifi.start().unwrap();
+        let mdns = announce(&name, &mac);
+        let http = http::start(&name, &mac, off_tx.clone());
+        // Sets the clock once a network with internet is joined (it retries)
+        let ntp = clock::start_ntp();
 
+        stay_joined(&mut wifi, &networks, &off_rx);
+
+        // Give /wifi/off's reply time to get out, then stop everything
+        sleep(Duration::from_millis(500));
+        drop(ntp);
+        drop(http);
+        drop(mdns);
+        if let Err(e) = wifi.stop() {
+            log::warn!("WiFi: stop failed: {}", e);
+        }
+        set_state(Network::Off);
+        if config::WIFI_ON.is_on() {
+            // /wifi/off: the menu's choice (the file's) comes back at the reboot
+            config::WIFI_ON.set_until_reboot(0);
+            log::info!("WiFi: off until the next reboot or the menu (/wifi/off)");
+        } else {
+            log::info!("WiFi: off (wifi_on = false)");
+        }
+        while off_rx.try_recv().is_ok() {} // a /wifi/off that came twice
+
+        wait_for_on();
+        log::info!("WiFi: on again");
+    }
+}
+
+/// Join a network and rejoin when it's lost, until WiFi is to stop
+fn stay_joined(
+    wifi: &mut BlockingWifi<EspWifi<'static>>,
+    networks: &[WifiNetwork],
+    off_rx: &mpsc::Receiver<()>,
+) {
     // Logged only when it changes: away from the networks, every scan would
     // say the same "none joined" (~every 20s on a walk), and each line in
     // the log costs a flash write that stalls both cores
@@ -101,7 +137,7 @@ fn run(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
                 log::info!("WiFi: lost the network");
             }
             set_state(Network::Searching);
-            joined = join(&mut wifi, &networks);
+            joined = join(wifi, networks);
             if joined {
                 searching_logged = false;
             } else if !searching_logged {
@@ -112,23 +148,29 @@ fn run(modem: Modem<'static>, networks: Vec<WifiNetwork>, mac: String) {
                 searching_logged = true;
             }
         }
-        if off_rx.recv_timeout(CHECK_EVERY).is_ok() {
-            break;
+        if wait_for_off(off_rx) {
+            return;
         }
     }
+}
 
-    // Give /wifi/off's reply time to get out, then stop everything
-    sleep(Duration::from_millis(500));
-    drop(ntp);
-    drop(http);
-    drop(mdns);
-    if let Err(e) = wifi.stop() {
-        log::warn!("WiFi: stop failed: {}", e);
+/// Wait until config::WIFI_ON is on (the menu), checking every ON_CHECK
+fn wait_for_on() {
+    while !config::WIFI_ON.is_on() {
+        sleep(ON_CHECK);
     }
-    set_state(Network::Off);
-    config::WIFI_ON.set(0, None::<&mut Settings>);
-    log::info!("WiFi: off until the next reboot (/wifi/off)");
-    drop(off_tx);
+}
+
+/// Wait out CHECK_EVERY, or less if WiFi is to stop: /wifi/off (a message on
+/// `off_rx`) or config::WIFI_ON switched off (checked every ON_CHECK)
+fn wait_for_off(off_rx: &mpsc::Receiver<()>) -> bool {
+    let started = std::time::Instant::now();
+    while started.elapsed() < CHECK_EVERY {
+        if off_rx.recv_timeout(ON_CHECK).is_ok() || !config::WIFI_ON.is_on() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Join the first configured network that's in range. False if none

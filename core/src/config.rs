@@ -33,10 +33,11 @@ use crate::mode;
 /// What the radio does with what it hears: a mode::Mode
 pub static MODE: Setting = Setting::choice("mode", &mode::NAMES, 0).live();
 
-/// WiFi on at boot (when networks are configured). /api/wifi/off turns it
-/// off until a reboot, and that's never saved: with the menus gone, a reboot
-/// must always bring WiFi back, the only way left to reach the radio
-pub static WIFI_ON: Setting = Setting::bool("wifi_on", true).live().unsaved();
+/// WiFi (when networks are configured). Saved: switched off or on in the
+/// menu (Privacy), it stays that way across reboots, and takes effect within
+/// a second (net.rs). /api/wifi/off turns it off until a reboot only
+/// (set_until_reboot), not saved
+pub static WIFI_ON: Setting = Setting::bool("wifi_on", true).live();
 
 /// The channel to start on: a slot round the band (air::slots). 103 = 915
 /// MHz. The last slot is 206 at 125 kHz (a test keeps this in step)
@@ -121,16 +122,19 @@ pub static SWEEP: Setting = Setting::bool("sweep", false);
 /// CONVEYOR line counts them: "garbled on the belt"). Off: dropped, as now
 pub static PLAY_GARBLED: Setting = Setting::bool("play_garbled", false).live();
 
-/// Keep a log file on the flash (/data/log, one per boot). Off: the file
-/// is never opened and nothing is ever flushed, so logging never writes the
-/// flash at all; lines still go to the serial console. A flash write stalls
-/// both cores for up to ~18 ms (the radio task included), which is why the
-/// app only flushes once the air has been quiet a while.
+/// Keep a log file on the flash (/data/log, one per boot). Off: nothing is
+/// flushed, so logging never writes the flash at all; lines still go to the
+/// serial console. A flash write stalls both cores for up to ~18 ms (the
+/// radio task included), which is why the app only flushes once the air has
+/// been quiet a while.
 ///
-/// Read at boot. Was tied to the role until 2026-10-06 (a repeater never
-/// flushed, every other radio did); now it's this flag's to say, so (WARNING) a
-/// repeater needs `log_to_flash = false` in its file to keep not logging
-pub static LOG_TO_FLASH: Setting = Setting::bool("log_to_flash", true);
+/// In the menu (Privacy). Off takes effect at once: nothing more reaches the
+/// file. The file itself is opened at boot, so on, after booting with it
+/// off, starts a file at the next boot. Was tied to the role until
+/// 2026-10-06 (a repeater never flushed, every other radio did); now it's
+/// this flag's to say, so (WARNING) a repeater needs `log_to_flash = false`
+/// in its file to keep not logging
+pub static LOG_TO_FLASH: Setting = Setting::bool("log_to_flash", true).live();
 
 /// Log every packet's bytes as hex, CRC included: "PKT TX" for each one
 /// sent, after it's on the air (so the line never delays a send), and
@@ -295,6 +299,17 @@ impl Setting {
             Applies::Live => log::info!("Config: {} = {}", self.name, text),
             Applies::Boot => log::info!("Config: {} = {} after a reboot", self.name, text),
         }
+    }
+
+    /// Change the value for now only, never saved: back to the file's at the
+    /// next boot. For a live setting
+    pub fn set_until_reboot(&self, value: i32) {
+        self.value.store(value, Ordering::Relaxed);
+        log::info!(
+            "Config: {} = {} until a reboot",
+            self.name,
+            self.text(value)
+        );
     }
 
     /// Its key in the file: flags are in [flags]
