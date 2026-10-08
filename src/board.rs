@@ -7,7 +7,7 @@ use esp_idf_svc::hal::peripherals::Peripherals;
 use std::thread;
 use std::time::Duration;
 
-use crate::devices::{encoder, fem, gps, irq_pin, mic, radio, screen, speaker};
+use crate::devices::{battery, encoder, fem, gps, irq_pin, mic, radio, screen, speaker};
 
 pub struct Board {
     pub fem: fem::Peripherals,
@@ -16,6 +16,7 @@ pub struct Board {
     pub speaker: speaker::Peripherals,
     pub screen: screen::Peripherals,
     pub mic: mic::Peripherals,
+    pub battery: battery::Peripherals,
     pub vol: encoder::Peripherals,
     pub ptt: AnyIOPin<'static>,
     /// WiFi (net.rs)
@@ -78,6 +79,11 @@ pub fn take() -> Board {
         mic: mic::Peripherals {
             adc: p.adc1,
             pin: p.pins.gpio4,
+        },
+        // The Heltec's own battery divider (needs PCB rev 4468800: GPIO1 free)
+        battery: battery::Peripherals {
+            pin: p.pins.gpio1,
+            enable: p.pins.gpio37.into(), // ADC_CTRL
         },
         vol: encoder::Peripherals {
             a: p.pins.gpio3.into(),

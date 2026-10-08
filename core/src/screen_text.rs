@@ -7,12 +7,14 @@
 //! Bob            1.24km     the last transmission heard to its end:
 //! 14:11Z -87dBm via rpt       who, how far, when, how strong, how
 //! koldendeco      .0.240    WiFi (devices::network)
-//! V7 RX  14:11Z   NORMAL    volume, what we're doing, the time, mode
+//! V7 RX 14:11Z    3.91V    volume, what we're doing, the time, battery
+//!                           (with the mode first if not normal: RPT 3.9V)
 //! ```
 
 use core::fmt::Write as _;
 
 use crate::devices::gps::{bearing_deg, compass_point, distance_m};
+use crate::mode::Mode;
 use crate::packet::Ident;
 
 pub const WIDTH: usize = 21;
@@ -108,7 +110,8 @@ pub fn status(
     locked: bool,
     activity: Activity,
     time: Option<(u8, u8)>,
-    mode: &str,
+    mode: Mode,
+    battery_mv: Option<u32>,
 ) -> Row {
     let mut left = Row::new();
     let lock = if locked { "*" } else { " " };
@@ -117,13 +120,19 @@ pub fn status(
         Some((h, m)) => write!(left, " {:02}:{:02}Z", h, m),
         None => write!(left, " --:--Z"),
     };
-    let room = WIDTH.saturating_sub(left.chars().count() + 1);
-    let mode: heapless::String<12> = mode
-        .chars()
-        .take(room)
-        .map(|c| c.to_ascii_uppercase())
-        .collect();
-    spread(&left, &mode)
+    // The battery in volts: a LiPo's percent under load is a guess. Normal
+    // mode isn't shown, so the volts get two decimals; another mode is worth
+    // seeing at a glance, and takes one of them
+    let mut right = Row::new();
+    let _ = match (mode, battery_mv) {
+        (Mode::Normal, Some(mv)) => write!(right, "{}.{:02}V", mv / 1000, mv % 1000 / 10),
+        (Mode::Normal, None) => write!(right, "-.--V"),
+        (Mode::Repeater, Some(mv)) => write!(right, "RPT {}.{}V", mv / 1000, mv % 1000 / 100),
+        (Mode::Repeater, None) => write!(right, "RPT -.-V"),
+        (Mode::Echo, Some(mv)) => write!(right, "ECH {}.{}V", mv / 1000, mv % 1000 / 100),
+        (Mode::Echo, None) => write!(right, "ECH -.-V"),
+    };
+    spread(&left, &right)
 }
 
 #[cfg(test)]
@@ -151,18 +160,46 @@ mod tests {
             "a-name-too-l A2:C6:2C"
         );
         assert_eq!(
-            status(7, false, Activity::Receiving, Some((14, 11)), "normal"),
-            "V7 RX 14:11Z   NORMAL"
+            status(
+                7,
+                false,
+                Activity::Receiving,
+                Some((14, 11)),
+                Mode::Normal,
+                Some(3_912)
+            ),
+            "V7 RX 14:11Z    3.91V"
         );
         assert_eq!(
-            status(7, true, Activity::Repeating, None, "repeater"),
-            "V7*RP --:--Z REPEATER"
+            status(7, false, Activity::Idle, Some((14, 11)), Mode::Normal, None),
+            "V7    14:11Z    -.--V"
         );
         assert_eq!(
-            status(10, false, Activity::Repeating, Some((9, 5)), "repeater"),
-            "V10 RP 09:05Z REPEATE"
+            status(
+                7,
+                true,
+                Activity::Repeating,
+                None,
+                Mode::Repeater,
+                Some(4_187)
+            ),
+            "V7*RP --:--Z RPT 4.1V"
         );
-        for row in [us("x", "y"), status(10, true, Activity::Idle, None, "echo")] {
+        assert_eq!(
+            status(
+                10,
+                false,
+                Activity::Repeating,
+                Some((9, 5)),
+                Mode::Echo,
+                Some(3_650)
+            ),
+            "V10 RP 09:05 ECH 3.6V" // the battery stays whole; the time gives way
+        );
+        for row in [
+            us("x", "y"),
+            status(10, true, Activity::Idle, None, Mode::Echo, None),
+        ] {
             assert_eq!(row.chars().count(), WIDTH);
         }
     }

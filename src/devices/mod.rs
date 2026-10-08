@@ -1,3 +1,5 @@
+pub mod adc1;
+pub mod battery;
 pub mod encoder;
 pub mod fem;
 pub mod gps;

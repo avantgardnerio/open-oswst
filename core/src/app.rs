@@ -1,3 +1,4 @@
+use crate::devices::battery::Battery;
 use crate::devices::gps::{Fix, Gps};
 use crate::devices::knob::{Event as Knob, Knob as _};
 use crate::devices::mic::Mic;
@@ -50,6 +51,10 @@ use crate::utc;
 /// ends
 const ENCODE_DEADLINE: embassy_time::Duration = embassy_time::Duration::from_millis(150);
 
+/// How often the battery is read, while idle (never while we transmit: the
+/// mic has the ADC then). Its last reading goes on each GPS log line
+const BATTERY_EVERY: Duration = Duration::from_secs(60);
+
 /// How often `housekeeping()` runs
 const HOUSEKEEPING_PERIOD: embassy_time::Duration = embassy_time::Duration::from_millis(250);
 /// Nothing heard or sent for this long, with no transmission on the conveyor
@@ -87,6 +92,7 @@ enum AppEvent {
 /// The already-started devices the app runs on
 pub struct Devices<P: Platform> {
     pub mic: P::Mic,
+    pub battery: P::Battery,
     pub ptt: P::Ptt,
     pub knob: P::Knob,
     pub screen: Screen,
@@ -127,6 +133,9 @@ pub async fn init<P: Platform>(
             shown_time: (0, 0),
             shown_activity: Activity::Idle,
             shown_screen: Snapshot::default(),
+            battery_mv: None,
+            battery_read_at: None,
+            shown_battery_cv: None,
         },
         rx: Receiving {
             playout: Playout::default(),
@@ -186,6 +195,9 @@ struct Display {
     shown_time: (u8, u8),               // likewise: the clock's hh:mm
     shown_activity: Activity,           // likewise
     shown_screen: Snapshot,             // the radio screen last drawn: what a screenshot saves
+    battery_mv: Option<u32>,            // the last battery reading
+    battery_read_at: Option<Instant>,   // when; None until the first
+    shown_battery_cv: Option<u32>,      // what the screen shows, in hundredths of a volt
 }
 
 /// The transmission we're hearing
@@ -322,14 +334,16 @@ impl<P: Platform> App<P> {
             self.swept_after = Some(quiet_since);
         }
 
+        self.read_battery().await;
         self.log_gps();
 
-        // Idle: keep the clock and position on screen current
+        // Idle: keep the clock, position and battery on screen current
         let receiving = self.rx.transmission.is_some() || self.echo.txid().is_some();
         if !receiving
             && (self.devices.gps.latest() != self.display.shown_fix
                 || P::network() != self.display.shown_network
-                || utc::now_hm() != self.display.shown_time)
+                || utc::now_hm() != self.display.shown_time
+                || self.display.battery_mv.map(|mv| mv / 10) != self.display.shown_battery_cv)
         {
             self.draw_screen(Activity::Idle);
         }
@@ -349,7 +363,7 @@ impl<P: Platform> App<P> {
         }
     }
 
-    /// Log the fix every GPS_LOG_PERIOD, and straight away when a position
+    /// Log the fix (and the battery) every GPS_LOG_PERIOD, and straight away when a position
     /// is gained or lost. These lines tie the log to real time and place.
     fn log_gps(&mut self) {
         let fix = self.devices.gps.latest();
@@ -361,9 +375,11 @@ impl<P: Platform> App<P> {
             }
         };
         if due {
+            // The battery rides along: one line every GPS_LOG_PERIOD
+            let battery = BatteryLog(self.display.battery_mv);
             match fix {
-                Some(fix) => log::info!("GPS {}", fix),
-                None => log::info!("GPS not responding"),
+                Some(fix) => log::info!("GPS {} {}", fix, battery),
+                None => log::info!("GPS not responding {}", battery),
             }
             self.logs.last_gps_log = Some((Instant::now(), has_position));
         }
@@ -895,7 +911,9 @@ impl<P: Platform> App<P> {
 
         self.draw_screen(Activity::Transmitting);
 
-        self.devices.mic.drain(); // discard stale
+        // The mic has the ADC only while we talk; the battery reading has it
+        // the rest of the time
+        self.devices.mic.start();
 
         // Half-duplex: anything heard while we talk can't be played, so throw
         // it away as it comes. Left in the queue it fills up, and the radio
@@ -904,6 +922,7 @@ impl<P: Platform> App<P> {
             Either::First(packets) => packets,
             Either::Second(()) => unreachable!("discard_rx never returns"),
         };
+        self.devices.mic.stop();
 
         log::info!("PTT released — {} packets sent + EOT", packets);
         self.rx.own_txid_until = Instant::now() + OWN_RELAYS_FOR;
@@ -1019,6 +1038,22 @@ impl<P: Platform> App<P> {
                 return txid;
             }
         }
+    }
+
+    /// The battery, every BATTERY_EVERY. Logged on the GPS line (log_gps),
+    /// so a run's log is its discharge curve: the way to a percent that
+    /// means "how long will my radio keep working". Housekeeping never runs
+    /// while we transmit, so the mic never has the ADC here
+    async fn read_battery(&mut self) {
+        let due = self
+            .display
+            .battery_read_at
+            .is_none_or(|read_at| read_at.elapsed() >= BATTERY_EVERY);
+        if !due {
+            return;
+        }
+        self.display.battery_read_at = Some(Instant::now());
+        self.display.battery_mv = self.devices.battery.millivolts().await;
     }
 
     /// Us, for our end packets: our name, and where we are now if our user
@@ -1153,7 +1188,8 @@ impl<P: Platform> App<P> {
             self.locked,
             activity,
             Some(utc::now_hm()),
-            mode::get().name(),
+            mode::get(),
+            self.display.battery_mv,
         );
 
         let mut frame = self.devices.screen.frame();
@@ -1168,6 +1204,7 @@ impl<P: Platform> App<P> {
         self.display.shown_network = network;
         self.display.shown_time = utc::now_hm();
         self.display.shown_activity = activity;
+        self.display.shown_battery_cv = self.display.battery_mv.map(|mv| mv / 10);
     }
 
     /// Title, then up to 4 rows; the cursor row is inverted, current values get a *.
@@ -1208,6 +1245,18 @@ impl<P: Platform> App<P> {
             }
         }
         self.devices.screen.show(frame);
+    }
+}
+
+/// For the GPS log line: the last battery reading
+struct BatteryLog(Option<u32>);
+
+impl core::fmt::Display for BatteryLog {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        match self.0 {
+            Some(mv) => write!(f, "battery={}mV", mv),
+            None => write!(f, "battery=none"),
+        }
     }
 }
 

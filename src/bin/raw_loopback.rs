@@ -55,13 +55,14 @@ fn main() {
                 // --- Record ---
                 log::info!("Recording...");
                 show_status(&screen, style, "LISTENING");
-                mic.drain();
+                mic.start();
                 let mut rec_len: usize = 0;
                 while button.is_low() && rec_len < MAX_SAMPLES {
                     mic.read(&mut rec_buf[rec_len..rec_len + FRAME_SAMPLES])
                         .await;
                     rec_len += FRAME_SAMPLES;
                 }
+                mic.stop();
                 log::info!("Recorded {} samples ({}ms)", rec_len, rec_len / 8);
 
                 // --- Play back raw ---

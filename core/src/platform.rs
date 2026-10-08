@@ -3,11 +3,14 @@
 //! driven by whoever owns that hardware.
 
 use crate::devices::network::Network;
-use crate::devices::{gps::Gps, knob::Knob, mic::Mic, ptt::Ptt, settings::Settings};
+use crate::devices::{
+    battery::Battery, gps::Gps, knob::Knob, mic::Mic, ptt::Ptt, settings::Settings,
+};
 use std::path::PathBuf;
 
 pub trait Platform {
     type Mic: Mic;
+    type Battery: Battery;
     type Ptt: Ptt;
     type Knob: Knob;
     type Gps: Gps;

@@ -72,7 +72,7 @@ fn main() {
                 // --- Record (whole packets) ---
                 log::info!("Recording...");
                 show_status(&screen, style, "LISTENING");
-                mic.drain();
+                mic.start();
                 let mut num_packets = 0;
                 while button.is_low() && num_packets < MAX_PACKETS {
                     for i in 0..FRAMES_PER_PACKET {
@@ -81,6 +81,7 @@ fn main() {
                     }
                     num_packets += 1;
                 }
+                mic.stop();
                 log::info!("Recorded {} packets ({}ms)", num_packets, num_packets * 160);
                 if num_packets == 0 {
                     continue;
