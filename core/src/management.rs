@@ -31,6 +31,25 @@ use std::io::{self, Read, Write};
 pub enum Request {
     /// Bytes to send straight back: proves the link works, and at what size
     Echo(Vec<u8>),
+    /// What we run: is there other firmware for us? Answered UpToDate or
+    /// Offer. The server holds THE firmware, and radios take whatever it
+    /// holds when it differs from theirs (so publishing an older image
+    /// rolls them back)
+    Hello {
+        mac: [u8; 6],
+        /// The running image's own SHA-256: the one ESP-IDF appends to
+        /// every app image, its last 32 bytes
+        running_sha256: Sha256,
+        /// The build's version string (git hash): only shown, never compared
+        version: String,
+    },
+    /// Part of the offered image. `sha256` says which image, so one
+    /// published mid-download is noticed (Error IMAGE_CHANGED)
+    Chunk {
+        sha256: Sha256,
+        offset: u32,
+        len: u16,
+    },
 }
 
 /// What the server answers
@@ -41,7 +60,30 @@ pub enum Response {
     /// newer radio), or failed, or this radio isn't allowed (NOT_ALLOWED).
     /// Few words: the radio shows it on the screen
     Error(String),
+    /// We run the server's image already
+    UpToDate,
+    Offer(Offer),
+    /// The bytes a Chunk asked for
+    Chunk(Vec<u8>),
 }
+
+/// Firmware the server has for us
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Offer {
+    pub version: String,
+    pub size: u32,
+    /// The image's own SHA-256 (its last 32 bytes)
+    pub sha256: Sha256,
+}
+
+pub type Sha256 = [u8; 32];
+
+/// The most a Chunk asks for: the image comes this much at a time
+pub const CHUNK: u16 = 4096;
+
+/// What a radio asking for part of an image that's since been replaced
+/// is told: start over with a Hello
+pub const IMAGE_CHANGED: &str = "Image changed";
 
 /// What a radio the server doesn't know (or has revoked) is told
 pub const NOT_ALLOWED: &str = "Not allowed";
@@ -269,7 +311,9 @@ mod tests {
             let (mut link, radio) =
                 NoiseLink::accept(server_end, resolver(), &server_private).unwrap();
             let request: Request = link.receive().unwrap();
-            let Request::Echo(bytes) = request;
+            let Request::Echo(bytes) = request else {
+                panic!("not an echo")
+            };
             link.send(&Response::Echo(bytes)).unwrap();
             radio
         });

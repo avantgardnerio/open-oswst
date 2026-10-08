@@ -17,6 +17,12 @@
 //!                         "port": 3101, "server_public_key": "..."} (JSON),
 //!                         into secrets.toml (devices/secrets.rs). The
 //!                         radio's own key is its own: never set from here
+//!   POST /api/management/update
+//!                         ask the management server for firmware, and if
+//!                         it has other than ours, install it and reboot
+//!                         (the net thread does it: 202 at once, then
+//!                         /api/status says how it's going). The menu's
+//!                         Update does the same, with a question first
 //!   POST /api/management/echo?bytes=N
 //!                         N bytes (default 16, at most 4096) to the
 //!                         management server and back, timed (JSON):
@@ -28,15 +34,16 @@
 
 use std::path::Path;
 use std::sync::mpsc::Sender;
-use std::time::Duration;
 
 use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::http::server::{Configuration, EspHttpConnection, EspHttpServer, Request};
 use esp_idf_svc::http::Method;
 use esp_idf_svc::io::Write;
+use open_oswst_core::devices::management::{Job, CANCEL, JOBS};
 use open_oswst_core::devices::screen;
 use open_oswst_core::management::{self as protocol, key_from_hex, key_to_hex, Response};
 use open_oswst_core::{config, mode};
+use std::sync::atomic::Ordering;
 
 use crate::devices::{secrets, storage};
 use crate::{firmware, management, webdav};
@@ -69,6 +76,7 @@ pub fn start(name: &str, mac: &str, wifi_off: Sender<()>) -> Option<EspHttpServe
         .and_then(|s| s.fn_handler("/api/screenshot", Method::Get, screenshot))
         .and_then(|s| s.fn_handler("/api/reboot", Method::Post, reboot))
         .and_then(|s| s.fn_handler("/api/management", Method::Put, put_management))
+        .and_then(|s| s.fn_handler("/api/management/update", Method::Post, management_update))
         .and_then(|s| s.fn_handler("/api/management/echo", Method::Post, management_echo))
         .and_then(|s| {
             s.fn_handler("/api/wifi/off", Method::Post, move |req| {
@@ -118,7 +126,9 @@ fn status(req: Req, name: &str, mac: &str) -> Result {
             port: server.as_ref().map(|server| server.port),
             server_public_key: server.as_ref().map(|server| key_to_hex(&server.public_key)),
             radio_public_key: secrets::public_key_hex(),
+            last_install: management::install_state(),
         },
+        image_sha256: firmware::running_sha256().map(|sha| key_to_hex(&sha)),
     };
     let mut body = serde_json::to_vec(&status)?;
     body.push(b'\n');
@@ -145,6 +155,9 @@ struct Status<'a> {
     heap_free: u32,
     heap_min: u32,
     management: Management,
+    /// The running image's own SHA-256 (its last 32 bytes): what the
+    /// management server tells images apart by
+    image_sha256: Option<String>,
 }
 
 /// The management server we dial (as PUT /api/management set it), and this
@@ -157,6 +170,8 @@ struct Management {
     server_public_key: Option<String>,
     /// None until WiFi has first come up: the radio makes its key then
     radio_public_key: Option<String>,
+    /// How the last firmware install went, if there's been one since boot
+    last_install: Option<String>,
 }
 
 /// Install /data/firmware.bin (put it there over WebDAV first), then reboot
@@ -170,7 +185,7 @@ fn ota(req: Req) -> Result {
             log::info!("OTA: {} bytes installed, rebooting into them", size);
             req.into_ok_response()?
                 .write_all(format!("ok, {} bytes, rebooting\n", size).as_bytes())?;
-            reboot_soon();
+            firmware::reboot_soon();
         }
         Err(e) => {
             log::warn!("OTA: failed: {}", e);
@@ -213,16 +228,28 @@ fn screenshot(req: Req) -> Result {
 
 fn reboot(req: Req) -> Result {
     req.into_ok_response()?.write_all(b"rebooting\n")?;
-    reboot_soon();
+    firmware::reboot_soon();
     Ok(())
 }
 
-/// Reboot after a moment, so the response gets out first
-fn reboot_soon() {
-    std::thread::spawn(|| {
-        std::thread::sleep(Duration::from_millis(500));
-        unsafe { esp_idf_svc::sys::esp_restart() };
-    });
+/// Check with the management server, then hand an install to the net thread
+fn management_update(req: Req) -> Result {
+    match management::check() {
+        Ok(Response::UpToDate) => text_reply(req, 200, "up to date"),
+        Ok(Response::Offer(offer)) => {
+            let reply = format!(
+                "installing {} ({} B): see /api/status",
+                offer.version, offer.size
+            );
+            CANCEL.store(false, Ordering::Relaxed);
+            match JOBS.try_send(Job::Install(offer)) {
+                Ok(()) => text_reply(req, 202, &reply),
+                Err(_) => text_reply(req, 409, "busy with another job"),
+            }
+        }
+        Ok(Response::Error(e)) | Err(e) => text_reply(req, 502, &e),
+        Ok(other) => text_reply(req, 502, &format!("odd answer: {:?}", other)),
+    }
 }
 
 /// What PUT /api/management takes
@@ -294,8 +321,8 @@ fn management_echo(req: Req) -> Result {
     let (code, reply) = match answer {
         Ok(Response::Echo(got)) if got == sent => (200, EchoReply::ok(size, round_trip_ms)),
         Ok(Response::Echo(_)) => (502, EchoReply::failed("came back different", round_trip_ms)),
-        Ok(Response::Error(e)) => (502, EchoReply::failed(&e, round_trip_ms)),
-        Err(e) => (502, EchoReply::failed(&e, round_trip_ms)),
+        Ok(Response::Error(e)) | Err(e) => (502, EchoReply::failed(&e, round_trip_ms)),
+        Ok(_) => (502, EchoReply::failed("odd answer", round_trip_ms)),
     };
     log::info!("Management echo, {} B: {:?}", size, reply);
     let mut body = serde_json::to_vec(&reply)?;

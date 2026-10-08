@@ -1,7 +1,7 @@
 use crate::devices::battery::Battery;
 use crate::devices::gps::{Fix, Gps};
 use crate::devices::knob::{Event as Knob, Knob as _};
-use crate::devices::management;
+use crate::devices::management::{self, Installing, Job};
 use crate::devices::mic::Mic;
 use crate::devices::network::Network;
 use crate::devices::ptt::Ptt;
@@ -15,7 +15,7 @@ use crate::platform::Platform;
 use crate::playback_timing::PlaybackTiming;
 use core::fmt::Write as _;
 use embassy_futures::join::join;
-use embassy_futures::select::{select, select5, Either, Either5};
+use embassy_futures::select::{select, select3, select5, Either, Either3, Either5};
 use embassy_time::{Ticker, Timer};
 use embedded_graphics::mono_font::ascii::FONT_6X10;
 use embedded_graphics::mono_font::{MonoTextStyle, MonoTextStyleBuilder};
@@ -39,7 +39,7 @@ use crate::config;
 use crate::conveyor::{Arrival, Landing, Transmission};
 use crate::double_click::DoubleClick;
 use crate::echo::{self, Recorder};
-use crate::management::{Request, Response};
+use crate::management::{Offer, Response};
 use crate::menu::{Action, Menu, Outcome, Page, Setting, BACK};
 use crate::mode::{self, Mode};
 use crate::packet::{self, Header, Ident, PacketType, NAME_BYTES};
@@ -61,6 +61,10 @@ const ENCODE_DEADLINE: embassy_time::Duration = embassy_time::Duration::from_mil
 /// How long the menu's Update waits for the management server: the
 /// firmware's own timeouts (connect, then the answer) come first
 const UPDATE_TIMEOUT: embassy_time::Duration = embassy_time::Duration::from_secs(25);
+
+/// An install with no news this long has stalled: the firmware's own
+/// timeouts (10 s a chunk) should have said so first
+const INSTALL_QUIET: embassy_time::Duration = embassy_time::Duration::from_secs(30);
 
 /// How often the battery is read, while idle (never while we transmit: the
 /// mic has the ADC then). Its last reading goes on each GPS log line
@@ -1237,36 +1241,91 @@ impl<P: Platform> App<P> {
         }
     }
 
-    /// Ask the management server. For now an Echo, to show the link works
-    /// and its round trip; the firmware update comes next
+    /// Ask the management server for firmware, and install it if asked
+    /// to. The server holds THE firmware: any image other than ours is
+    /// offered, newer or not (management.rs Request::Hello)
     async fn run_update(&mut self) {
         if !matches!(P::network(), Network::Joined { .. }) {
             self.pick("Not on a network", &[]).await;
             return;
         }
         self.draw_list("Update: asking...", &[], 0);
-        // Nothing left over from a request that timed out
-        while management::REQUESTS.try_receive().is_ok() {}
+        // Nothing left over from a job that timed out
+        while management::JOBS.try_receive().is_ok() {}
         management::ANSWERS.reset();
-        let _ = management::REQUESTS.try_send(Request::Echo(vec![0; 16]));
-        let started = Instant::now();
+        let _ = management::JOBS.try_send(Job::Check);
         let answer = select(management::ANSWERS.wait(), Timer::after(UPDATE_TIMEOUT)).await;
-        let title = match answer {
-            Either::First(Ok(Response::Echo(_))) => {
-                format!("Server: {} ms", started.elapsed().as_millis())
+        let offer = match answer {
+            Either::First(Ok(Response::Offer(offer))) => offer,
+            Either::First(Ok(Response::UpToDate)) => {
+                self.pick("Up to date", &[]).await;
+                return;
             }
             // Few words, meant for this screen ("Not allowed")
-            Either::First(Ok(Response::Error(e))) => {
-                log::warn!("Update: the server says {}", e);
-                e
-            }
-            Either::First(Err(e)) => {
+            Either::First(Ok(Response::Error(e))) | Either::First(Err(e)) => {
                 log::warn!("Update: {}", e);
-                e
+                self.pick(&e, &[]).await;
+                return;
             }
-            Either::Second(()) => "Server: no answer".into(),
+            Either::First(Ok(other)) => {
+                log::warn!("Update: unexpected answer {:?}", other);
+                self.pick("Server: odd answer", &[]).await;
+                return;
+            }
+            Either::Second(()) => {
+                self.pick("Server: no answer", &[]).await;
+                return;
+            }
         };
-        self.pick(&title, &[]).await;
+        let title = format!(
+            "{} {:.1} MB",
+            offer.version,
+            offer.size as f32 / 1_000_000.0
+        );
+        if self.pick(&title, &["Install".into()]).await.is_some() {
+            self.run_install(offer).await;
+        }
+    }
+
+    /// Download `offer` into the spare slot (the net thread does it) while
+    /// showing how far along; a click gives up. Done, the radio reboots into
+    /// it (the firmware's job), so this never returns then
+    async fn run_install(&mut self, offer: Offer) {
+        log::info!("Update: installing {} ({} B)", offer.version, offer.size);
+        management::CANCEL.store(false, Ordering::Relaxed);
+        management::INSTALL.reset();
+        let _ = management::JOBS.try_send(Job::Install(offer));
+        let mut shown = "Installing 0%".to_string();
+        loop {
+            self.draw_list(&shown, &[], 0);
+            let news = select3(
+                management::INSTALL.wait(),
+                self.devices.knob.next(),
+                Timer::after(INSTALL_QUIET),
+            )
+            .await;
+            match news {
+                Either3::First(Installing::Percent(percent)) => {
+                    shown = format!("Installing {}%", percent);
+                }
+                Either3::First(Installing::Done) => shown = "Installed, rebooting".into(),
+                Either3::First(Installing::Failed(e)) => {
+                    log::warn!("Update: install failed: {}", e);
+                    self.pick(&e, &[]).await;
+                    return;
+                }
+                Either3::Second(Knob::Press) => {
+                    management::CANCEL.store(true, Ordering::Relaxed);
+                    shown = "Cancelling...".into();
+                }
+                Either3::Second(_) => {}
+                Either3::Third(()) => {
+                    management::CANCEL.store(true, Ordering::Relaxed);
+                    self.pick("Install stalled", &[]).await;
+                    return;
+                }
+            }
+        }
     }
 
     /// A list to pick from, Back first (where the cursor starts): the index

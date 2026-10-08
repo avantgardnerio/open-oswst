@@ -7,11 +7,14 @@
 //!   server.key    this server's key pair (keys.rs). Private: mode 0600
 //!   radios.toml   the radios allowed in: re-read at every connection, so
 //!                 adding or revoking one needs no restart (keys.rs)
+//!   firmware.bin  THE firmware: radios that run anything else are offered
+//!                 it (firmware.rs; scripts/publish-firmware.sh)
 //!
 //! Run:  cargo run -- DIR [ADDRESS:PORT]   (default 0.0.0.0:3101)
 //! Once: cargo run -- keygen DIR            (prints the public key, for
 //!                                          each radio's secrets.toml)
 
+mod firmware;
 mod keys;
 mod oswst;
 mod service;
@@ -46,6 +49,7 @@ fn run(dir: &Path, address: &str) {
     println!("Listening on {}, public key {}", address, key.public_hex());
     let service = oswst::Oswst {
         radios: dir.join(keys::RADIOS_FILE),
+        firmware: firmware::Firmware::new(dir.join(firmware::FIRMWARE_FILE)),
     };
     service::serve(listener, Arc::new(service), Arc::new(key));
 }

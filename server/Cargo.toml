@@ -7,6 +7,7 @@ description = "The management server radios dial out to (issue #34): firmware up
 [dependencies]
 open-oswst-core = { path = "../core" }
 serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
 snow = "0.10"
 toml = "0.8"
 

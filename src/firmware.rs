@@ -86,6 +86,35 @@ pub fn image_len() -> Option<u32> {
     ok.then_some(metadata.image_len)
 }
 
+/// The running image's own SHA-256: the one ESP-IDF appends to every app
+/// image, its last 32 bytes (and checks at boot). The management server
+/// tells images apart by it
+pub fn running_sha256() -> Option<[u8; 32]> {
+    let len = image_len()? as usize;
+    let mut sha = [0u8; 32];
+    read(len.checked_sub(32)?, &mut sha).ok()?;
+    Some(sha)
+}
+
+/// The build's version string (its git hash, -dirty if built with
+/// uncommitted changes)
+pub fn version() -> String {
+    unsafe {
+        let app = &*esp_app_get_description();
+        core::ffi::CStr::from_ptr(app.version.as_ptr())
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+/// Reboot after a moment, so a reply (HTTP, the screen) gets out first
+pub fn reboot_soon() {
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_millis(500));
+        unsafe { esp_restart() };
+    });
+}
+
 /// Read the running app image from `offset` into `buf`
 pub fn read(offset: usize, buf: &mut [u8]) -> Result<(), EspError> {
     esp!(unsafe { esp_partition_read(running(), offset, buf.as_mut_ptr().cast(), buf.len()) })

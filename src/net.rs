@@ -37,13 +37,13 @@ use esp_idf_svc::wifi::{
 use std::sync::Mutex;
 
 use open_oswst_core::config;
-use open_oswst_core::devices::management::{ANSWERS, REQUESTS};
+use open_oswst_core::devices::management::{Installing, Job, ANSWERS, CANCEL, INSTALL, JOBS};
 use open_oswst_core::devices::network::Network;
 use open_oswst_core::devices::wifi::{self, Seen};
 
 use crate::devices::secrets;
 use crate::devices::settings::{self, WifiNetwork};
-use crate::{clock, http, management, thread};
+use crate::{clock, firmware, http, management, thread};
 
 /// Where the WiFi is at, for the screen (Platform::network). Off until
 /// `start` finds networks configured.
@@ -274,8 +274,9 @@ fn wait_for_wanted() {
 /// Wait out CHECK_EVERY, or less: not at all while the menu wants scans
 /// (they go back to back), or once the HTTP API's setting differs from
 /// `http_on`. Some if WiFi is to stop: /wifi/off (a message on `off_rx`) or
-/// config::WIFI_ON switched off (checked every ON_CHECK). The menu's
-/// requests to the management server are sent from here, as they come
+/// config::WIFI_ON switched off (checked every ON_CHECK). Jobs for the
+/// management server (a check, an install) are done from here, as they
+/// come
 fn wait(off_rx: &mpsc::Receiver<()>, http_on: bool) -> Option<Stop> {
     let started = Instant::now();
     loop {
@@ -285,8 +286,8 @@ fn wait(off_rx: &mpsc::Receiver<()>, http_on: bool) -> Option<Stop> {
         if !config::WIFI_ON.is_on() {
             return Some(Stop::SwitchedOff);
         }
-        if let Ok(request) = REQUESTS.try_receive() {
-            ANSWERS.signal(management::call(&request));
+        if let Ok(job) = JOBS.try_receive() {
+            do_job(job);
         }
         if wifi::SCAN_WANTED.load(Ordering::Relaxed)
             || config::HTTP_API_ON.is_on() != http_on
@@ -296,6 +297,31 @@ fn wait(off_rx: &mpsc::Receiver<()>, http_on: bool) -> Option<Stop> {
         }
         if off_rx.recv_timeout(ON_CHECK).is_ok() {
             return Some(Stop::OffMessage);
+        }
+    }
+}
+
+/// One job from the app (the menu) or the HTTP API: someone asked for it
+fn do_job(job: Job) {
+    match job {
+        Job::Check => ANSWERS.signal(management::check()),
+        Job::Install(offer) => {
+            let installed = management::install(
+                &offer,
+                |percent| INSTALL.signal(Installing::Percent(percent)),
+                &CANCEL,
+            );
+            match installed {
+                Ok(()) => {
+                    log::info!("Update: {} installed, rebooting into it", offer.version);
+                    INSTALL.signal(Installing::Done);
+                    firmware::reboot_soon();
+                }
+                Err(e) => {
+                    log::warn!("Update: {} not installed: {}", offer.version, e);
+                    INSTALL.signal(Installing::Failed(e));
+                }
+            }
         }
     }
 }
