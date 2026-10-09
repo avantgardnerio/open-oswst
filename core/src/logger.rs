@@ -22,6 +22,7 @@ use log::{Level, LevelFilter, Log, Metadata, Record};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// Most written per `flush_chunk()`, cut at a line end
@@ -38,6 +39,20 @@ const MAX_FILES: usize = 50;
 
 /// Milliseconds since boot, for the line timestamps. Set by `init`
 static UPTIME_MS: OnceLock<fn() -> u32> = OnceLock::new();
+
+/// Where log files go, and the storage's (used, total) bytes: set at boot
+/// (`set_storage`) whether logging to flash is on or not, so it can be
+/// switched on later
+static STORAGE: Mutex<Option<(PathBuf, Usage)>> = Mutex::new(None);
+
+/// The storage's (used, total) bytes
+type Usage = fn() -> (usize, usize);
+
+/// Whether lines are kept for a file: from boot until it's decided (the
+/// settings load), then while one is being written. Off, a line goes to the
+/// serial port only, so nothing logged while logging is off ever reaches
+/// the flash, even if it's switched on later
+static KEEPING: AtomicBool = AtomicBool::new(true);
 
 struct Logger {
     serial_level: LevelFilter,
@@ -94,19 +109,47 @@ pub fn init(uptime_ms: fn() -> u32, memory: &'static mut [u8]) {
     log::set_max_level(LOGGER.serial_level.max(LOGGER.file_level));
 }
 
-/// Start this boot's log file, `dir/NNNN.txt`, numbered one past the newest,
-/// after dropping empty files and making room. `usage` gives the storage's
-/// (used, total) bytes.
-pub fn open_file(dir: &Path, usage: fn() -> (usize, usize)) -> std::io::Result<PathBuf> {
-    fs::create_dir_all(dir)?;
-    let mut numbers = log_file_numbers(dir);
+/// Where log files go: `dir`, on a storage whose (used, total) bytes
+/// `usage` gives. Nothing is written until `start_file()`
+pub fn set_storage(dir: &Path, usage: fn() -> (usize, usize)) {
+    *STORAGE.lock().unwrap() = Some((dir.to_path_buf(), usage));
+}
+
+/// Start writing a log file, `NNNN.txt`, numbered one past the newest,
+/// after dropping empty files and making room: at boot if log_to_flash is
+/// on, or when it's switched on. The lines waiting in RAM go to it. One
+/// already open stays as it is
+pub fn start_file() -> std::io::Result<PathBuf> {
+    let (dir, usage) = storage()?;
+    let mut file = LOGGER.file.lock().unwrap();
+    if let Some(open) = file.as_ref() {
+        return Ok(log_path(&open.dir, open.number));
+    }
+    fs::create_dir_all(&dir)?;
+    let mut numbers = log_file_numbers(&dir);
     numbers.sort_unstable();
-    drop_empty_logs(dir, &mut numbers);
+    drop_empty_logs(&dir, &mut numbers);
     let number = numbers.last().map_or(1, |newest| newest + 1);
-    let log_file = LogFile::start(dir, number, usage)?;
-    let path = log_path(dir, number);
-    *LOGGER.file.lock().unwrap() = Some(log_file);
-    Ok(path)
+    *file = Some(LogFile::start(&dir, number, usage)?);
+    KEEPING.store(true, Ordering::Relaxed);
+    Ok(log_path(&dir, number))
+}
+
+/// Stop writing to flash: log_to_flash off (at boot, or switched off). The
+/// file is closed, the lines waiting for it are dropped (they must never
+/// get there), and no more are kept until `start_file()`
+pub fn stop_file() {
+    KEEPING.store(false, Ordering::Relaxed);
+    LOGGER.file.lock().unwrap().take();
+    discard_pending();
+}
+
+fn storage() -> std::io::Result<(PathBuf, Usage)> {
+    STORAGE
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no storage"))
 }
 
 /// Is anything waiting to be written?
@@ -175,6 +218,36 @@ impl Ring {
         }
         chunk
     }
+}
+
+/// Delete every log file, and the lines not written yet: the menu's
+/// Privacy > Erase logs. A file being written is closed first, and a fresh
+/// one (0001.txt) started after, so logging carries on as it was. Returns
+/// how many files went
+pub fn erase_all() -> std::io::Result<usize> {
+    let (dir, usage) = storage()?;
+    let mut file = LOGGER.file.lock().unwrap();
+    // Closed (dropped) before its file is deleted
+    let was_open = file.take().is_some();
+    let mut erased = 0;
+    for number in log_file_numbers(&dir) {
+        fs::remove_file(log_path(&dir, number))?;
+        erased += 1;
+    }
+    discard_pending();
+    if was_open {
+        *file = Some(LogFile::start(&dir, 1, usage)?);
+    }
+    Ok(erased)
+}
+
+/// Forget the lines not written yet: log_to_flash switched off (they were
+/// meant for the file, and must never reach it), or Erase logs
+fn discard_pending() {
+    let mut buffer = LOGGER.buffer.lock().unwrap();
+    buffer.lines.start = 0;
+    buffer.lines.len = 0;
+    buffer.dropped = 0;
 }
 
 /// Write everything buffered to the file, however long that stalls: for
@@ -268,7 +341,7 @@ impl Log for Logger {
             // write fails, and print! panics on failure. Drop the line instead.
             let _ = std::io::stdout().write_all(line.as_bytes());
         }
-        if record.level() <= self.file_level {
+        if record.level() <= self.file_level && KEEPING.load(Ordering::Relaxed) {
             let mut buffer = self.buffer.lock().unwrap();
             if !buffer.lines.push(line.as_bytes()) {
                 buffer.dropped += 1;
@@ -377,6 +450,20 @@ mod tests {
 
     fn storage_full() -> (usize, usize) {
         (90, 100)
+    }
+
+    #[test]
+    fn erasing_deletes_every_log() {
+        let dir = test_dir("erase");
+        for n in 1..=3 {
+            fs::write(log_path(&dir, n), b"I (1) a: line\n").unwrap();
+        }
+        fs::write(dir.join("notes.md"), b"not a log").unwrap();
+        set_storage(&dir, plenty_of_space);
+        assert_eq!(erase_all().unwrap(), 3);
+        assert_eq!(sorted_numbers(&dir), Vec::<u32>::new());
+        assert!(dir.join("notes.md").exists()); // only log files go
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -28,6 +28,7 @@ pub enum Page {
     Connected,  // the network we're on, and our address
     AddWifi,    // networks in range, then the password
     ForgetWifi, // the saved networks
+    EraseLogs,  // asks first, then deletes every log file
     Update,     // ask the management server
 }
 
@@ -95,6 +96,7 @@ static ROOT: &[Item] = &[
                     Item::Choice("off", Setting::LogToFlash, 0),
                 ],
             ),
+            Item::Page("Erase logs", Page::EraseLogs),
         ],
     ),
     Item::Submenu(

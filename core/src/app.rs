@@ -1124,6 +1124,7 @@ impl<P: Platform> App<P> {
                     Outcome::Open(Page::AddWifi) => self.run_add_wifi().await,
                     Outcome::Open(Page::ForgetWifi) => self.run_forget_wifi().await,
                     Outcome::Open(Page::Connected) => self.run_connected().await,
+                    Outcome::Open(Page::EraseLogs) => self.run_erase_logs().await,
                     Outcome::Open(Page::Update) => self.run_update().await,
                 },
             }
@@ -1246,6 +1247,27 @@ impl<P: Platform> App<P> {
             settings.forget_wifi(ssid);
             log::info!("Menu: WiFi network {:?} forgotten", ssid);
         }
+    }
+
+    /// Delete every log file and the lines not written yet, once asked
+    /// twice (the menu, then Yes here). The flash work stalls the chip: fine
+    /// here, menuing has already stopped RX
+    async fn run_erase_logs(&mut self) {
+        if self
+            .pick("Erase all logs?", &["Yes".into()])
+            .await
+            .is_none()
+        {
+            return;
+        }
+        let title = match logger::erase_all() {
+            Ok(erased) => format!("Erased {} logs", erased),
+            Err(e) => {
+                log::warn!("Erase logs failed: {}", e);
+                "Erase failed".into()
+            }
+        };
+        self.pick(&title, &[]).await;
     }
 
     /// Which network we're on, and our address on it: the screen shows only
@@ -1405,7 +1427,17 @@ impl<P: Platform> App<P> {
                 config::SEND_POSITION.set(value as i32, self.devices.settings.as_mut())
             }
             Setting::LogToFlash => {
-                config::LOG_TO_FLASH.set(value as i32, self.devices.settings.as_mut())
+                config::LOG_TO_FLASH.set(value as i32, self.devices.settings.as_mut());
+                // At once, either way. Off: the file closes, and what's
+                // waiting for it never gets there
+                if value == 0 {
+                    logger::stop_file();
+                } else {
+                    match logger::start_file() {
+                        Ok(path) => log::info!("Logging to {}", path.display()),
+                        Err(e) => log::warn!("No log file ({}), serial only", e),
+                    }
+                }
             }
         }
     }

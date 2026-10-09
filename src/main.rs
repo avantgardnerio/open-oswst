@@ -125,16 +125,22 @@ fn main() {
     config::load(Some(&settings));
 
     // Logs also go to a file per boot, unless log_to_flash is off: then
-    // nothing from logging ever writes the flash. Opened only now that the
-    // settings say; the lines logged before wait in the RAM buffer
-    if storage_ok && config::LOG_TO_FLASH.is_on() {
-        let log_dir = Path::new(storage::ROOT).join("log");
-        match logger::open_file(&log_dir, storage::usage) {
-            Ok(path) => log::info!("Logging to {}", path.display()),
-            Err(e) => log::warn!("No log file ({}), serial only", e),
+    // nothing from logging ever writes the flash (the menu switches it, at
+    // once). Started only now that the settings say; the lines logged before
+    // wait in the RAM buffer
+    if storage_ok {
+        logger::set_storage(&Path::new(storage::ROOT).join("log"), storage::usage);
+        if config::LOG_TO_FLASH.is_on() {
+            match logger::start_file() {
+                Ok(path) => log::info!("Logging to {}", path.display()),
+                Err(e) => log::warn!("No log file ({}), serial only", e),
+            }
+        } else {
+            log::info!("Not logging to flash (log_to_flash off): serial only");
+            logger::stop_file();
         }
-    } else if storage_ok {
-        log::info!("Not logging to flash (log_to_flash off): serial only");
+    } else {
+        logger::stop_file();
     }
     log::info!(
         "Config: {} WiFi network(s)",
