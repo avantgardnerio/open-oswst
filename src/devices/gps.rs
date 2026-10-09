@@ -1,11 +1,15 @@
 //! GPS: the L76K on the Heltec's GNSS connector. A thread reads its NMEA and
 //! keeps the latest time and position; callers just ask for `latest()`.
 //! Parsing and the `Fix` type live in the core crate's `devices::gps`.
+//!
+//! config::GPS_ON (the menu's Privacy > GPS) powers the module down and up:
+//! the thread checks it at least once a second.
 
 use esp_idf_svc::hal::delay::TickType;
 use esp_idf_svc::hal::gpio::{AnyIOPin, AnyOutputPin, PinDriver};
 use esp_idf_svc::hal::uart::{config::Config, UartDriver, UART1};
 use esp_idf_svc::hal::units::Hertz;
+use open_oswst_core::config;
 use open_oswst_core::devices::gps::{apply_nmea, command, Fix};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -51,8 +55,10 @@ pub fn init(p: Peripherals) -> Gps {
 }
 
 fn run(p: Peripherals, state: Arc<Mutex<State>>) {
+    // Off until the loop below sees GPS_ON (VGNSS_Ctrl is active LOW)
     let mut power = PinDriver::output(p.power).unwrap();
-    power.set_low().unwrap();
+    power.set_high().unwrap();
+    let mut powered = false;
     let mut reset = PinDriver::output(p.reset).unwrap();
     reset.set_high().unwrap();
     let mut wake = PinDriver::output(p.wake).unwrap();
@@ -67,17 +73,37 @@ fn run(p: Peripherals, state: Arc<Mutex<State>>) {
         &Config::new().baudrate(Hertz(9600)),
     )
     .unwrap();
-    log::info!("GPS powered, reading NMEA");
-    // Its firmware version comes back as TXT lines (logged below): proof
-    // that what we send reaches it
-    let _ = uart.write(&command("PCAS06,0"));
-    let powered = Instant::now();
+    let mut powered_at = Instant::now();
     let mut first_fix_logged = false;
     let mut last_txt = String::with_capacity(96);
 
     let mut line = Vec::with_capacity(96);
     let mut buf = [0u8; 64];
     loop {
+        // Follow the setting: each pass is a second at most (the read below)
+        let wanted = config::GPS_ON.is_on();
+        if wanted && !powered {
+            power.set_low().unwrap();
+            powered = true;
+            powered_at = Instant::now();
+            first_fix_logged = false;
+            line.clear();
+            log::info!("GPS powered, reading NMEA");
+            // Its firmware version comes back as TXT lines (logged below):
+            // proof that what we send reaches it
+            let _ = uart.write(&command("PCAS06,0"));
+        } else if !wanted && powered {
+            power.set_high().unwrap();
+            powered = false;
+            // No position from before: latest() is None at once
+            *state.lock().unwrap() = State::default();
+            log::info!("GPS powered off (GPS_ON off)");
+        }
+        if !powered {
+            std::thread::sleep(Duration::from_secs(1));
+            continue;
+        }
+
         let n = uart
             .read(&mut buf, TickType::new_millis(1000).ticks())
             .unwrap_or(0);
@@ -106,7 +132,7 @@ fn run(p: Peripherals, state: Arc<Mutex<State>>) {
                                 first_fix_logged = true;
                                 log::info!(
                                     "GPS: first fix {} s after power-on",
-                                    powered.elapsed().as_secs()
+                                    powered_at.elapsed().as_secs()
                                 );
                             }
                         }

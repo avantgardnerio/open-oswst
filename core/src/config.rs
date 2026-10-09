@@ -44,6 +44,12 @@ pub static WIFI_ON: Setting = Setting::bool("wifi_on", true).live();
 /// within a second (net.rs). Off: nothing on the radio listens at all
 pub static HTTP_API_ON: Setting = Setting::bool("http_api_on", true).live();
 
+/// The GPS module's power (devices/gps.rs). Saved: switched off or on in
+/// the menu (Privacy), it powers down or up within a second. Off: no
+/// position and no GPS time (the clock then comes from NTP, if WiFi has
+/// it), and the module draws nothing
+pub static GPS_ON: Setting = Setting::bool("gps_on", true).live();
+
 /// The channel to start on: a slot round the band (air::slots). 103 = 915
 /// MHz. The last slot is 206 at 125 kHz (a test keeps this in step)
 pub static START_SLOT: Setting = Setting::number("start_slot", 0, 206, 103).must_match();
@@ -86,6 +92,7 @@ pub static SETTINGS: &[&Setting] = &[
     &MODE,
     &WIFI_ON,
     &HTTP_API_ON,
+    &GPS_ON,
     &START_SLOT,
     &HOP_SEED,
     &RX_HOPS,
@@ -154,11 +161,12 @@ pub static LOG_TO_FLASH: Setting = Setting::bool("log_to_flash", true).live();
 /// 16 KB log buffer. Off by default
 pub static LOG_PACKETS: Setting = Setting::bool("log_packets", false).live();
 
-/// Put our GPS position in the end packet of each transmission we send (the
-/// talker's end, or an echo station's replay end). Off: the end packet still
-/// goes out, with our name and "no fix" (packet::Ident). Never anywhere else:
-/// a radio never beacons its position, and only sends it when its user has
-/// chosen to. Off by default
+/// Put our name and GPS position in the end packet of each transmission we
+/// send (the talker's end, or an echo station's replay end). Off: the end
+/// packet still goes out, with no name and "no fix" (packet::Ident), so a
+/// transmission doesn't say whose it is. Never anywhere else: a radio never
+/// beacons who or where it is, and only sends it when its user has chosen
+/// to. Off by default
 pub static SEND_POSITION: Setting = Setting::bool("send_position", false).live();
 
 pub static FLAGS: &[&Setting] = &[

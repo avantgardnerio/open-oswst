@@ -192,7 +192,7 @@ struct App<P: Platform> {
     rx: Receiving,
     sounds: Sounds,
     echo: Recorder,          // only used in echo mode
-    locked: bool,            // PTT ignored; the menu still opens, so it can be unlocked
+    locked: bool,            // PTT and volume ignored; the menu still opens, so it can be unlocked
     menu_click: DoubleClick, // the knob's double click that opens the menu
     ptt_refused: bool,       // a PTT press refused (someone else talking): ignored until let go
     logs: LogTimes,
@@ -259,8 +259,10 @@ impl<P: Platform> App<P> {
                         self.run_menu().await;
                     }
                 }
-                AppEvent::Knob(Knob::Cw) => self.change_volume(1),
-                AppEvent::Knob(Knob::Ccw) => self.change_volume(-1),
+                // Locked, a knob bumped can't turn the volume down unnoticed
+                AppEvent::Knob(Knob::Cw) if !self.locked => self.change_volume(1),
+                AppEvent::Knob(Knob::Ccw) if !self.locked => self.change_volume(-1),
+                AppEvent::Knob(Knob::Cw | Knob::Ccw) => {}
                 AppEvent::Tick => self.housekeeping().await,
             }
         }
@@ -394,6 +396,7 @@ impl<P: Platform> App<P> {
             let battery = BatteryLog(self.display.battery_mv);
             match fix {
                 Some(fix) => log::info!("GPS {} {}", fix, battery),
+                None if !config::GPS_ON.is_on() => log::info!("GPS off {}", battery),
                 None => log::info!("GPS not responding {}", battery),
             }
             self.logs.last_gps_log = Some((Instant::now(), has_position));
@@ -1072,17 +1075,19 @@ impl<P: Platform> App<P> {
         self.display.battery_mv = self.devices.battery.millivolts().await;
     }
 
-    /// Us, for our end packets: our name, and where we are now if our user
-    /// has chosen to send it (config::SEND_POSITION)
+    /// Us, for our end packets: our name and where we are now, only if our
+    /// user has chosen to send them (config::SEND_POSITION). Off: no name and
+    /// no position, so a transmission doesn't say whose it is
     fn ident(&self) -> Ident {
-        let position = if config::SEND_POSITION.is_on() {
-            self.devices.gps.latest().and_then(|fix| fix.position)
-        } else {
-            None
-        };
+        if !config::SEND_POSITION.is_on() {
+            return Ident {
+                name: heapless::String::new(),
+                position: None,
+            };
+        }
         Ident {
             name: self.display.name.clone(),
-            position,
+            position: self.devices.gps.latest().and_then(|fix| fix.position),
         }
     }
 
@@ -1395,6 +1400,7 @@ impl<P: Platform> App<P> {
             Setting::HttpApi => {
                 config::HTTP_API_ON.set(value as i32, self.devices.settings.as_mut())
             }
+            Setting::Gps => config::GPS_ON.set(value as i32, self.devices.settings.as_mut()),
             Setting::SendPosition => {
                 config::SEND_POSITION.set(value as i32, self.devices.settings.as_mut())
             }
@@ -1410,6 +1416,7 @@ impl<P: Platform> App<P> {
             Setting::Mode => mode::get() as u8,
             Setting::Wifi => config::WIFI_ON.get() as u8,
             Setting::HttpApi => config::HTTP_API_ON.get() as u8,
+            Setting::Gps => config::GPS_ON.get() as u8,
             Setting::SendPosition => config::SEND_POSITION.get() as u8,
             Setting::LogToFlash => config::LOG_TO_FLASH.get() as u8,
         }
@@ -1441,6 +1448,7 @@ impl<P: Platform> App<P> {
             // Used / in view: in view climbs while it acquires, used stays
             // 0 until the fix (so it alone never showed progress)
             Some(fix) => write!(rows[1], "No fix, {}/{} sats", fix.satellites, fix.in_view()),
+            None if !config::GPS_ON.is_on() => write!(rows[1], "GPS off"),
             None => write!(rows[1], "No GPS"),
         };
         if let Some(heard) = &self.display.heard {

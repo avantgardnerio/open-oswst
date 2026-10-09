@@ -10,6 +10,7 @@ pub enum Setting {
     Mode,         // a mode::Mode as u8
     Wifi,         // config::WIFI_ON, 0 or 1
     HttpApi,      // config::HTTP_API_ON, 0 or 1
+    Gps,          // config::GPS_ON, 0 or 1
     SendPosition, // config::SEND_POSITION, 0 or 1
     LogToFlash,   // config::LOG_TO_FLASH, 0 or 1
 }
@@ -74,7 +75,14 @@ static ROOT: &[Item] = &[
                 ],
             ),
             Item::Submenu(
-                "Send position",
+                "GPS",
+                &[
+                    Item::Choice("on", Setting::Gps, 1),
+                    Item::Choice("off", Setting::Gps, 0),
+                ],
+            ),
+            Item::Submenu(
+                "Send name+position",
                 &[
                     Item::Choice("on", Setting::SendPosition, 1),
                     Item::Choice("off", Setting::SendPosition, 0),

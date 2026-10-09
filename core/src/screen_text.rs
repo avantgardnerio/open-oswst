@@ -97,7 +97,13 @@ pub fn heard(heard: &Heard, our_position: Option<(f64, f64)>) -> (Row, Row) {
         };
         let _ = write!(far, " {}", compass_point(bearing_deg(ours, theirs)));
     }
-    let first = spread(&heard.ident.name, &far);
+    // No name: its talker chose not to send one (config::SEND_POSITION)
+    let name = if heard.ident.name.is_empty() {
+        "Unnamed"
+    } else {
+        &heard.ident.name
+    };
+    let first = spread(name, &far);
 
     let mut second = Row::new();
     let _ = write!(second, "{}dBm {:+}dB", heard.rssi, heard.snr);
@@ -243,6 +249,10 @@ mod tests {
         assert_eq!(first.chars().count(), WIDTH);
         // Either side without a fix: no distance
         assert_eq!(heard(&bob(None, 0), Some(home)).0, "Bob");
+        // A talker who sends neither name nor position
+        let mut anonymous = bob(None, 0);
+        anonymous.ident.name.clear();
+        assert_eq!(heard(&anonymous, Some(home)).0, "Unnamed");
     }
 
     #[test]
