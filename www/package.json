@@ -1,0 +1,9 @@
+{
+  "name": "open-oswst-www",
+  "private": true,
+  "description": "The radio's web page. Only the files index.html's import map names ship to the radio (scripts/publish-firmware.sh, scripts/upload-www.sh)",
+  "dependencies": {
+    "htm": "^3.1.1",
+    "preact": "^10.29.0"
+  }
+}

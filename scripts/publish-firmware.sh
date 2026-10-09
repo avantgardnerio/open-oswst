@@ -6,6 +6,10 @@
 #   firmware.bin   -> the radio's spare app slot
 #   www/...        -> the radio's storage, /data/www/...
 #
+# Of www/node_modules (www/package.json), only the files index.html's
+# import map names go in: the radio serves them, so nothing needs the
+# internet
+#
 # Radios are offered it the next time someone asks: the menu's Update, or
 # POST /api/management/update. The server notices the new file by itself.
 #
@@ -26,7 +30,7 @@ cargo build
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 espflash save-image --chip esp32s3 target/xtensa-esp32s3-espidf/debug/open-oswst "$STAGE/firmware.bin"
-cp -r www "$STAGE/www"
+scripts/stage-www.sh "$STAGE/www"
 
 # ustar: the radio's tar reader reads only that. Firmware first, then files
 NEW="$DIR/.bundle.tar.gz.new"

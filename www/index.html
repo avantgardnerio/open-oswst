@@ -5,15 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Open OSWST radio</title>
   <link rel="stylesheet" href="style.css">
-  <!-- From a CDN for now: the radio will serve its own copies later, so
-       nothing needs the internet -->
+  <!-- The libraries, served by the radio itself: nothing needs the
+       internet. These node_modules files (package.json) are the only ones
+       that go to the radio: the scripts copy what this map names -->
   <script type="importmap">
   {
     "imports": {
-      "preact": "https://cdn.jsdelivr.net/npm/preact@10.24.3/dist/preact.mjs",
-      "preact/hooks": "https://cdn.jsdelivr.net/npm/preact@10.24.3/hooks/dist/hooks.mjs",
-      "htm": "https://cdn.jsdelivr.net/npm/htm@3.1.1/dist/htm.mjs",
-      "htm/preact": "https://cdn.jsdelivr.net/npm/htm@3.1.1/preact/index.mjs"
+      "preact": "./node_modules/preact/dist/preact.mjs",
+      "preact/hooks": "./node_modules/preact/hooks/dist/hooks.mjs",
+      "htm": "./node_modules/htm/dist/htm.mjs",
+      "htm/preact": "./node_modules/htm/preact/index.mjs"
     }
   }
   </script>

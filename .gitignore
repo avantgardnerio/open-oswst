@@ -6,6 +6,9 @@ out/
 *.lck
 *.dsn
 
+# The web app's libraries: www/package.json (npm ci)
+www/node_modules/
+
 # Log files pulled off boards by scripts/pull-logs.py
 logs/
 
