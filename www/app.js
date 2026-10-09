@@ -13,6 +13,7 @@ function App() {
     <h1>Open OSWST</h1>
     <${Screen} />
     <${Status} />
+    <${Update} />
   `;
 }
 
@@ -66,12 +67,45 @@ function Status() {
     ["Memory free", `${kb(status.heap_free)} (lowest ${kb(status.heap_min)})`],
     ["Management server", status.management ? `${status.management.host}:${status.management.port}` : "none"],
   ];
+  // Only once there's been one since boot: an install's progress, then how it went
+  if (status.management?.last_install) {
+    rows.push(["Last install", status.management.last_install]);
+  }
   return html`
     <section>
       <h2>Status</h2>
       <table>
         ${rows.map(([label, value]) => html`<tr><th>${label}</th><td>${value}</td></tr>`)}
       </table>
+    </section>
+  `;
+}
+
+/// Ask the management server for an update, and install it if there is one:
+/// POST /api/management/update, as the menu's Update does. Its progress
+/// shows in the status table (Last install), then the radio reboots
+function Update() {
+  const [answer, setAnswer] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  async function update() {
+    if (!confirm("Check for an update, and install it if there is one? The radio reboots when it's done.")) return;
+    setBusy(true);
+    setAnswer("Asking the management server...");
+    try {
+      const response = await fetch("/api/management/update", { method: "POST" });
+      setAnswer(await response.text());
+    } catch (e) {
+      setAnswer(`Can't reach the radio (${e.message})`);
+    }
+    setBusy(false);
+  }
+
+  return html`
+    <section>
+      <h2>Update</h2>
+      <button onClick=${update} disabled=${busy}>Check for update</button>
+      ${answer && html`<p>${answer}</p>`}
     </section>
   `;
 }
