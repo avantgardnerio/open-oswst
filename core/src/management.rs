@@ -29,6 +29,7 @@ use std::io::{self, Read, Write};
 /// What the radio asks
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Request {
+    // WARNING: new variants only ever at the end (see the top)
     /// Bytes to send straight back: proves the link works, and at what size
     Echo(Vec<u8>),
     /// What we run: is there other firmware for us? Answered UpToDate or
@@ -50,6 +51,23 @@ pub enum Request {
         offset: u32,
         len: u16,
     },
+    /// Hello's successor: is there another update bundle for us (bundle.rs)?
+    /// Answered UpToDate or BundleOffer. Up to date means we run the
+    /// bundle's firmware AND installed that bundle last
+    CheckBundle {
+        mac: [u8; 6],
+        running_sha256: Sha256,
+        /// The SHA-256 of the bundle we installed last: None if none yet
+        /// (new, or only ever updated by Hello)
+        installed_sha256: Option<Sha256>,
+        version: String,
+    },
+    /// Part of the offered bundle, as Chunk is of an image
+    BundleChunk {
+        sha256: Sha256,
+        offset: u32,
+        len: u16,
+    },
 }
 
 /// What the server answers
@@ -63,11 +81,14 @@ pub enum Response {
     /// We run the server's image already
     UpToDate,
     Offer(Offer),
-    /// The bytes a Chunk asked for
+    /// The bytes a Chunk (or BundleChunk) asked for
     Chunk(Vec<u8>),
+    /// An update bundle for us: `size` and `sha256` are the whole .tar.gz
+    /// file's, `version` its firmware's
+    BundleOffer(Offer),
 }
 
-/// Firmware the server has for us
+/// Firmware (or a bundle) the server has for us
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Offer {
     pub version: String,

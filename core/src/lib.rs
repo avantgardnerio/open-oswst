@@ -4,6 +4,7 @@
 
 pub mod air;
 pub mod app;
+pub mod bundle;
 pub mod climb;
 pub mod codec;
 pub mod config;
@@ -13,6 +14,7 @@ pub mod devices;
 pub mod double_click;
 pub mod echo;
 pub mod fec;
+pub mod gzip;
 pub mod logger;
 pub mod management;
 pub mod menu;
@@ -24,4 +26,5 @@ pub mod playback_timing;
 pub mod playout;
 pub mod scan_list;
 pub mod screen_text;
+pub mod tar;
 pub mod utc;

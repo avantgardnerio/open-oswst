@@ -26,11 +26,12 @@ use std::sync::{Mutex, OnceLock};
 
 /// Most written per `flush_chunk()`, cut at a line end
 const CHUNK_BYTES: usize = 512;
-/// Delete old log files until the partition is below this full
-const MAX_USED_PERCENT: usize = 80;
+/// Delete old log files until the partition is below this full. The rest
+/// is kept for an update bundle's download (bundle.rs, ~1.4MB of ~10MB)
+const MAX_USED_PERCENT: usize = 60;
 /// A file this big continues in the next one. An hour's walk logs ~500KB
 /// (2026-10-04): 1MB keeps one in a single file. MAX_USED_PERCENT still
-/// caps the total (~8 files this size on the 10MB partition)
+/// caps the total (~6 files this size on the 10MB partition)
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 /// Most log files kept
 const MAX_FILES: usize = 50;
@@ -174,6 +175,12 @@ impl Ring {
         }
         chunk
     }
+}
+
+/// Write everything buffered to the file, however long that stalls: for
+/// just before a reboot, which would lose it (firmware.rs reboot_soon)
+pub fn flush_all() {
+    while flush_chunk() {}
 }
 
 impl LogFile {

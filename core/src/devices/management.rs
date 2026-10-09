@@ -10,16 +10,23 @@ use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 
 pub enum Job {
-    /// Is there other firmware for us? The answer: UpToDate, Offer or Error
+    /// Is there another update bundle for us? The answer: UpToDate,
+    /// BundleOffer or Error
     Check,
-    /// Download this offer into the spare slot, check it, and reboot into it
+    /// Install this bundle (bundle.rs): download, verify, extract, then
+    /// reboot into its firmware
     Install(Offer),
 }
 
-/// How an install is going
+/// How an install is going: its three steps, each in percent
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Installing {
-    Percent(u8),
+    /// To the storage, from the management server
+    Downloading(u8),
+    /// Its SHA-256, against the offer's
+    Verifying(u8),
+    /// The firmware into the spare app slot, the files onto the storage
+    Extracting(u8),
     /// Not installed (the running firmware stays); few words, for the screen
     Failed(String),
     /// Installed: the radio reboots into it in a moment

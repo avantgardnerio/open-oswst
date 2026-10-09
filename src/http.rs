@@ -249,7 +249,7 @@ fn reboot(req: Req) -> Result {
 fn management_update(req: Req) -> Result {
     match management::check() {
         Ok(Response::UpToDate) => text_reply(req, 200, "up to date"),
-        Ok(Response::Offer(offer)) => {
+        Ok(Response::BundleOffer(offer)) => {
             let reply = format!(
                 "installing {} ({} B): see /api/status",
                 offer.version, offer.size

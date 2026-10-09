@@ -6,6 +6,8 @@ description = "The management server radios dial out to (issue #34): firmware up
 
 [dependencies]
 open-oswst-core = { path = "../core" }
+# Reads the bundle (bundle.tar.gz) for the firmware in it
+flate2 = "1"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 snow = "0.10"

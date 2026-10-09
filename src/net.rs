@@ -306,11 +306,7 @@ fn do_job(job: Job) {
     match job {
         Job::Check => ANSWERS.signal(management::check()),
         Job::Install(offer) => {
-            let installed = management::install(
-                &offer,
-                |percent| INSTALL.signal(Installing::Percent(percent)),
-                &CANCEL,
-            );
+            let installed = management::install(&offer, |news| INSTALL.signal(news), &CANCEL);
             match installed {
                 Ok(()) => {
                     log::info!("Update: {} installed, rebooting into it", offer.version);

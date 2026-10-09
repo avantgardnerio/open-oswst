@@ -1273,7 +1273,7 @@ impl<P: Platform> App<P> {
         let _ = management::JOBS.try_send(Job::Check);
         let answer = select(management::ANSWERS.wait(), Timer::after(UPDATE_TIMEOUT)).await;
         let offer = match answer {
-            Either::First(Ok(Response::Offer(offer))) => offer,
+            Either::First(Ok(Response::BundleOffer(offer))) => offer,
             Either::First(Ok(Response::UpToDate)) => {
                 self.pick("Up to date", &[]).await;
                 return;
@@ -1304,15 +1304,16 @@ impl<P: Platform> App<P> {
         }
     }
 
-    /// Download `offer` into the spare slot (the net thread does it) while
-    /// showing how far along; a click gives up. Done, the radio reboots into
-    /// it (the firmware's job), so this never returns then
+    /// Install the bundle `offer` (the net thread does it: download, verify,
+    /// extract) while showing which step and how far along; a click gives
+    /// up. Done, the radio reboots into it (the firmware's job), so this
+    /// never returns then
     async fn run_install(&mut self, offer: Offer) {
         log::info!("Update: installing {} ({} B)", offer.version, offer.size);
         management::CANCEL.store(false, Ordering::Relaxed);
         management::INSTALL.reset();
         let _ = management::JOBS.try_send(Job::Install(offer));
-        let mut shown = "Installing 0%".to_string();
+        let mut shown = "Downloading 0%".to_string();
         loop {
             self.draw_list(&shown, &[], 0);
             let news = select3(
@@ -1322,8 +1323,14 @@ impl<P: Platform> App<P> {
             )
             .await;
             match news {
-                Either3::First(Installing::Percent(percent)) => {
-                    shown = format!("Installing {}%", percent);
+                Either3::First(Installing::Downloading(percent)) => {
+                    shown = format!("Downloading {}%", percent);
+                }
+                Either3::First(Installing::Verifying(percent)) => {
+                    shown = format!("Verifying {}%", percent);
+                }
+                Either3::First(Installing::Extracting(percent)) => {
+                    shown = format!("Extracting {}%", percent);
                 }
                 Either3::First(Installing::Done) => shown = "Installed, rebooting".into(),
                 Either3::First(Installing::Failed(e)) => {

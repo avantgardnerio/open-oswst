@@ -1,18 +1,18 @@
 //! What the server answers radios: who gets in (radios.toml, keys.rs), and
 //! one arm per request (core's management.rs has them all)
 
-use crate::firmware::{short_hex, Firmware};
+use crate::bundle::{short_hex, Published};
 use crate::keys::{self, Radio};
 use crate::service::Service;
 use open_oswst_core::management::{
-    Key, Offer, Request, Response, CHUNK, IMAGE_CHANGED, NOT_ALLOWED,
+    Key, Offer, Request, Response, Sha256, CHUNK, IMAGE_CHANGED, NOT_ALLOWED,
 };
 use std::io;
 use std::path::PathBuf;
 
 pub struct Oswst {
     pub radios: PathBuf, // radios.toml
-    pub firmware: Firmware,
+    pub published: Published,
 }
 
 impl Service for Oswst {
@@ -27,24 +27,45 @@ impl Service for Oswst {
     fn handle(&self, radio: &Radio, request: Request) -> Response {
         match request {
             Request::Echo(bytes) => Response::Echo(bytes),
+            // Firmware from before bundles: the firmware alone
             Request::Hello {
                 running_sha256,
                 version,
                 ..
             } => {
                 println!(
-                    "{} runs {} ({})",
+                    "{} runs {} ({}), asks for firmware",
                     radio,
                     version,
                     short_hex(&running_sha256)
                 );
-                self.offer(running_sha256)
+                self.offer_firmware(running_sha256)
             }
             Request::Chunk {
                 sha256,
                 offset,
                 len,
-            } => self.chunk(sha256, offset, len),
+            } => self.firmware_chunk(sha256, offset, len),
+            Request::CheckBundle {
+                running_sha256,
+                installed_sha256,
+                version,
+                ..
+            } => {
+                println!(
+                    "{} runs {} ({}), installed bundle {}",
+                    radio,
+                    version,
+                    short_hex(&running_sha256),
+                    installed_sha256.as_ref().map_or("none".into(), short_hex)
+                );
+                self.offer_bundle(running_sha256, installed_sha256)
+            }
+            Request::BundleChunk {
+                sha256,
+                offset,
+                len,
+            } => self.bundle_chunk(sha256, offset, len),
         }
     }
 
@@ -58,32 +79,60 @@ impl Service for Oswst {
 }
 
 impl Oswst {
-    /// Our image, unless the radio runs it already
-    fn offer(&self, running: [u8; 32]) -> Response {
-        match self.firmware.image() {
-            Ok(image) if image.sha256 == running => Response::UpToDate,
-            Ok(image) => Response::Offer(Offer {
-                version: image.version.clone(),
-                size: image.bytes.len() as u32,
-                sha256: image.sha256,
+    /// The bundle's firmware, unless the radio runs it already
+    fn offer_firmware(&self, running: Sha256) -> Response {
+        match self.published.bundle() {
+            Ok(bundle) if bundle.firmware.sha256 == running => Response::UpToDate,
+            Ok(bundle) => Response::Offer(Offer {
+                version: bundle.firmware.version.clone(),
+                size: bundle.firmware.bytes.len() as u32,
+                sha256: bundle.firmware.sha256,
             }),
             Err(e) => Response::Error(e),
         }
     }
 
-    fn chunk(&self, sha256: [u8; 32], offset: u32, len: u16) -> Response {
-        let image = match self.firmware.image() {
-            Ok(image) => image,
-            Err(e) => return Response::Error(e),
-        };
-        if image.sha256 != sha256 {
-            return Response::Error(IMAGE_CHANGED.into());
+    fn firmware_chunk(&self, sha256: Sha256, offset: u32, len: u16) -> Response {
+        match self.published.bundle() {
+            Ok(bundle) if bundle.firmware.sha256 == sha256 => {
+                chunk(&bundle.firmware.bytes, offset, len)
+            }
+            Ok(_) => Response::Error(IMAGE_CHANGED.into()),
+            Err(e) => Response::Error(e),
         }
-        let start = offset as usize;
-        let end = start + len.min(CHUNK) as usize;
-        match image.bytes.get(start..end) {
-            Some(bytes) => Response::Chunk(bytes.to_vec()),
-            None => Response::Error("Chunk past the end".into()),
+    }
+
+    /// The bundle, unless the radio installed it last and still runs its
+    /// firmware (a rollback, or a USB flash since, and it's offered again)
+    fn offer_bundle(&self, running: Sha256, installed: Option<Sha256>) -> Response {
+        match self.published.bundle() {
+            Ok(bundle) if installed == Some(bundle.sha256) && bundle.firmware.sha256 == running => {
+                Response::UpToDate
+            }
+            Ok(bundle) => Response::BundleOffer(Offer {
+                version: bundle.firmware.version.clone(),
+                size: bundle.bytes.len() as u32,
+                sha256: bundle.sha256,
+            }),
+            Err(e) => Response::Error(e),
         }
+    }
+
+    fn bundle_chunk(&self, sha256: Sha256, offset: u32, len: u16) -> Response {
+        match self.published.bundle() {
+            Ok(bundle) if bundle.sha256 == sha256 => chunk(&bundle.bytes, offset, len),
+            Ok(_) => Response::Error(IMAGE_CHANGED.into()),
+            Err(e) => Response::Error(e),
+        }
+    }
+}
+
+/// `len` bytes of `bytes` from `offset`, at most CHUNK
+fn chunk(bytes: &[u8], offset: u32, len: u16) -> Response {
+    let start = offset as usize;
+    let end = start + len.min(CHUNK) as usize;
+    match bytes.get(start..end) {
+        Some(bytes) => Response::Chunk(bytes.to_vec()),
+        None => Response::Error("Chunk past the end".into()),
     }
 }

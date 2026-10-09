@@ -123,10 +123,13 @@ pub fn version() -> String {
     String::from_utf8_lossy(&VERSION[..len]).into_owned()
 }
 
-/// Reboot after a moment, so a reply (HTTP, the screen) gets out first
+/// Reboot after a moment, so a reply (HTTP, the screen) gets out first.
+/// The log lines still in RAM go to the file first: the reboot would lose
+/// them, and they say why it rebooted (an install's are all there)
 pub fn reboot_soon() {
     std::thread::spawn(|| {
         std::thread::sleep(Duration::from_millis(500));
+        open_oswst_core::logger::flush_all();
         unsafe { esp_restart() };
     });
 }

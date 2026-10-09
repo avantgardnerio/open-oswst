@@ -318,19 +318,25 @@ impl Cipher for AesGcm {
     }
 }
 
-/// SHA-256 on the SHA hardware
-struct Sha256(Box<mbedtls_sha256_context>);
+/// SHA-256 on the SHA hardware (also checks update bundles: management.rs)
+pub struct Sha256(Box<mbedtls_sha256_context>);
 
 // The context is plain memory; snow uses it from one thread at a time
 unsafe impl Send for Sha256 {}
 unsafe impl Sync for Sha256 {}
 
 impl Sha256 {
-    fn new() -> Sha256 {
+    pub fn new() -> Sha256 {
         let mut sha = Sha256(Box::new(unsafe { core::mem::zeroed() }));
         unsafe { mbedtls_sha256_init(&mut *sha.0) };
         sha.reset();
         sha
+    }
+}
+
+impl Default for Sha256 {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
