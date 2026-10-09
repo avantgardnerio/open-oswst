@@ -16,7 +16,10 @@ export function fileSize(bytes) {
   return bytes >= mb ? `${(bytes / mb).toFixed(1)} MB` : kb(bytes);
 }
 
-/// A date in this browser's own time zone and style
+/// A date as ISO 8601 (2026-10-09 10:06:03), in this browser's time zone
 export function dateTime(date) {
-  return date.toLocaleString();
+  const two = (number) => String(number).padStart(2, "0");
+  const day = `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}`;
+  const time = `${two(date.getHours())}:${two(date.getMinutes())}:${two(date.getSeconds())}`;
+  return `${day} ${time}`;
 }
