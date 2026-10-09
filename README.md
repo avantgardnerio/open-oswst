@@ -173,6 +173,9 @@ after boot. If a radio doesn't show up:
 
 ### Talk to a radio
 
+In a browser: `http://oswst-XXXX.local/` (or its IP) opens the radio's web page, its status and a live picture of its screen
+(`www/`, served by the radio itself: no internet needed).
+
 Port 80, no password (the WiFi password is the security). `/fs/` is the radio's storage as a read-write WebDAV folder
 (`src/webdav.rs`): open `dav://oswst-XXXX.local/fs/` in a file manager, or:
 
@@ -221,6 +224,77 @@ When a radio isn't on WiFi:
 - **Watch a boot:** `scripts/boot-log.py`.
 
 Identify boards by MAC, not by `ttyACM` number, and never flash while another program holds the port.
+
+## Management Server
+
+Radios get updates from a management server (`server/`, issue #34) that they dial out to: nothing on a radio listens for it. Every
+connection is Noise: a radio must know the server's public key, and the server must find the radio's in its list, or it's refused.
+The server's files live in one folder outside the repo (default `/srv/oswst`):
+
+```
+server.key      the server's key pair (mode 0600)
+radios.toml     the radios allowed in: re-read at every connection, no restart needed
+bundle.tar.gz   THE update: radios that don't have it are offered it
+```
+
+```bash
+cd server && cargo run --release -- keygen /srv/oswst     # once: prints the server's public key
+cd server && cargo run --release -- /srv/oswst            # run it (port 3101)
+```
+
+### Publish an update
+
+```bash
+scripts/publish-firmware.sh          # builds, then writes /srv/oswst/bundle.tar.gz
+```
+
+A bundle (`core/src/bundle.rs`) is one `.tar.gz`: `firmware.bin` for the radio's spare app slot, and `www/` (the web page, with
+only the `node_modules` files its import map names) for its storage. The server notices the new file by itself.
+
+### Install it
+
+On the radio: **menu, Update**. It shows the version and size, then **Install** runs three steps, each in percent: **Downloading**
+(to the storage), **Verifying** (its SHA-256), **Extracting** (the firmware into the spare slot, marked to boot only once every
+file is written; the files onto the storage, never touching `config.toml` or `secrets.toml`). Then it reboots into the new
+firmware, which must run a minute to be kept. A radio that has the bundle is told **Up to date**.
+
+`POST /api/management/update` does the same from a laptop. Radios on firmware from before bundles are offered just the firmware
+inside the bundle; one more Update then gets the whole bundle.
+
+### Set up a new radio
+
+1. **Provision over USB** (once). Give the radio an entry in `boards.toml` (its mode, name, WiFi networks), then:
+
+   ```bash
+   . ~/export-esp.sh && cargo build
+   .venv/bin/python scripts/provision.py 10:BD:A3:5A:EB:7C
+   ```
+
+   This flashes the firmware and writes a fresh storage holding just its `config.toml` (it **erases** the storage). The radio
+   boots, joins WiFi, and makes its own key pair: the private key never leaves it.
+2. **Enroll it on the server.** Its public key is on its status page; add it to `/srv/oswst/radios.toml`:
+
+   ```bash
+   curl -s http://oswst-eb7c.local/api/status    # "management": {"radio_public_key": "..."}
+   ```
+
+   ```toml
+   [[radio]]
+   name = "Repeater"
+   mac = "10:BD:A3:5A:EB:7C"
+   public_key = "38389dbc..."
+   ```
+3. **Tell it where the server is** (and the server's public key, from `keygen`):
+
+   ```bash
+   curl -X PUT -H "Content-Type: application/json" \
+        -d '{"host": "<server host>", "port": 3101, "server_public_key": "<64 hex digits>"}' \
+        http://oswst-eb7c.local/api/management
+   ```
+4. **Menu, Update.** A radio flashed over USB doesn't have the bundle yet, so it's offered it: that brings the web page too.
+
+A re-provisioned radio has a new key (the storage was erased), so it's enrolled again: replace its `public_key` in `radios.toml`.
+To shut a lost radio out, delete its entry.
 
 ## Current Behavior
 
@@ -381,7 +455,7 @@ hopping (each repeater relays on the next channel) is for.
 
 ## Project Structure
 
-Three Cargo workspaces. Each opens as its own IDE project: the firmware builds for the ESP32-S3, the other two for this PC.
+Four Cargo workspaces. Each opens as its own IDE project: the firmware builds for the ESP32-S3, the others for this PC.
 
 ```
 src/                 # Firmware (repo root workspace, xtensa)
@@ -395,10 +469,14 @@ core/                # Hardware-free app: its own workspace, so `cargo test` run
   src/climb.rs       #   Which channel to listen on, bin by bin: hold the strongest copy, seek beside it (unit tested)
   src/playout.rs     #   Decoded packets to the speaker in order, silence for lost ones (unit tested)
   src/codec.rs       #   Codec2 thread
+  src/management.rs  #   The management server's protocol (Noise), shared with server/
+  src/bundle.rs, tar.rs, gzip.rs   # Update bundles: what goes where, streamed off a .tar.gz (unit tested)
   src/echo.rs, mode.rs, menu.rs, packet.rs, logger.rs
   src/devices/       #   Device interfaces: radio/speaker/screen channels, gps/mic/ptt/knob/settings traits
 desktop/             # Desktop build on virtual devices (skeleton so far)
-scripts/             # boot-log.py, pull-logs.py, flash-all.sh, ...
+server/              # The management server: radios' keys, update bundles
+www/                 # The radio's web page (preact + htm, no build step), shipped in bundles
+scripts/             # provision.py, publish-firmware.sh, boot-log.py, pull-logs.py, ...
 pcb/                 # PCB definition (Python DSL) and generated KiCad board
 models/              # Parametric case (build123d) and fit check
 partitions.csv       # Partition table: two OTA app slots, LittleFS storage (/data)
