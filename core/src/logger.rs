@@ -6,6 +6,9 @@
 //! safe. If the buffer fills first, new lines are dropped and counted, and a
 //! marker records the gap in the file.
 //!
+//! The buffer's memory comes from the caller (`init`), so the firmware can
+//! put it in PSRAM, away from the internal heap.
+//!
 //! Line format matches ESP-IDF's: `I (12345) target: message`.
 //!
 //! Files rotate the usual way: a new one per boot, `NNNN.txt`, numbered one
@@ -16,15 +19,11 @@
 //! files, and listing them ran the HTTP server out of memory.
 
 use log::{Level, LevelFilter, Log, Metadata, Record};
-use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-/// RAM held for lines not yet written: ~13s of busy radio traffic. Was 48KB;
-/// cut to make room for WiFi (logs can be fetched over HTTP now)
-const BUFFER_BYTES: usize = 16 * 1024;
 /// Most written per `flush_chunk()`, cut at a line end
 const CHUNK_BYTES: usize = 512;
 /// Delete old log files until the partition is below this full
@@ -57,30 +56,39 @@ struct LogFile {
 }
 
 struct Buffer {
-    bytes: VecDeque<u8>,
+    lines: Ring,
     dropped: u32, // lines lost since the last flush because the buffer was full
+}
+
+/// Bytes waiting to be written, in a fixed piece of memory used round and
+/// round: the oldest byte is at `start`, and the `len` after it (wrapping
+/// past the end) are waiting
+struct Ring {
+    memory: &'static mut [u8],
+    start: usize,
+    len: usize,
 }
 
 static LOGGER: Logger = Logger {
     serial_level: LevelFilter::Info,
     file_level: LevelFilter::Info,
     buffer: Mutex::new(Buffer {
-        bytes: VecDeque::new(),
+        lines: Ring {
+            memory: &mut [],
+            start: 0,
+            len: 0,
+        },
         dropped: 0,
     }),
     file: Mutex::new(None),
 };
 
 /// Install as the `log` backend. The console works from here on; the file
-/// only once `open_file()` succeeds. `uptime_ms` stamps each line.
-pub fn init(uptime_ms: fn() -> u32) {
+/// only once `open_file()` succeeds. `uptime_ms` stamps each line, and
+/// `memory` holds the lines waiting for the file.
+pub fn init(uptime_ms: fn() -> u32, memory: &'static mut [u8]) {
     let _ = UPTIME_MS.set(uptime_ms);
-    LOGGER
-        .buffer
-        .lock()
-        .unwrap()
-        .bytes
-        .reserve_exact(BUFFER_BYTES);
+    LOGGER.buffer.lock().unwrap().lines.memory = memory;
     log::set_logger(&LOGGER).unwrap();
     log::set_max_level(LOGGER.serial_level.max(LOGGER.file_level));
 }
@@ -103,7 +111,7 @@ pub fn open_file(dir: &Path, usage: fn() -> (usize, usize)) -> std::io::Result<P
 /// Is anything waiting to be written?
 pub fn pending() -> bool {
     let buffer = LOGGER.buffer.lock().unwrap();
-    !buffer.bytes.is_empty() || buffer.dropped > 0
+    buffer.lines.len > 0 || buffer.dropped > 0
 }
 
 /// Write up to one chunk of buffered lines to the file and sync it. Stalls
@@ -112,16 +120,9 @@ pub fn pending() -> bool {
 pub fn flush_chunk() -> bool {
     let (chunk, dropped, more) = {
         let mut buffer = LOGGER.buffer.lock().unwrap();
-        let limit = buffer.bytes.len().min(CHUNK_BYTES);
-        // Cut after the last full line in the chunk, if there is one
-        let cut = buffer
-            .bytes
-            .range(..limit)
-            .rposition(|&b| b == b'\n')
-            .map_or(limit, |i| i + 1);
-        let chunk: Vec<u8> = buffer.bytes.drain(..cut).collect();
+        let chunk = buffer.lines.take_chunk(CHUNK_BYTES);
         let dropped = std::mem::take(&mut buffer.dropped);
-        (chunk, dropped, !buffer.bytes.is_empty())
+        (chunk, dropped, buffer.lines.len > 0)
     };
 
     // Buffer lock released: logging carries on while the flash write runs
@@ -134,6 +135,45 @@ pub fn flush_chunk() -> bool {
         let _ = file.write(&chunk);
     }
     more
+}
+
+impl Ring {
+    /// Append `bytes` whole, or not at all if they don't fit
+    fn push(&mut self, bytes: &[u8]) -> bool {
+        let capacity = self.memory.len();
+        if self.len + bytes.len() > capacity {
+            return false;
+        }
+        // The free space starts just past the last waiting byte
+        let mut at = (self.start + self.len) % capacity;
+        for &byte in bytes {
+            self.memory[at] = byte;
+            at = (at + 1) % capacity;
+        }
+        self.len += bytes.len();
+        true
+    }
+
+    /// Remove and return up to `limit` of the oldest bytes, cut after the last
+    /// full line among them, if there is one
+    fn take_chunk(&mut self, limit: usize) -> Vec<u8> {
+        let capacity = self.memory.len();
+        let limit = self.len.min(limit);
+        let mut chunk = Vec::with_capacity(limit);
+        for offset in 0..limit {
+            chunk.push(self.memory[(self.start + offset) % capacity]);
+        }
+        let cut = chunk
+            .iter()
+            .rposition(|&byte| byte == b'\n')
+            .map_or(limit, |newline| newline + 1);
+        chunk.truncate(cut);
+        if cut > 0 {
+            self.start = (self.start + cut) % capacity;
+            self.len -= cut;
+        }
+        chunk
+    }
 }
 
 impl LogFile {
@@ -223,9 +263,7 @@ impl Log for Logger {
         }
         if record.level() <= self.file_level {
             let mut buffer = self.buffer.lock().unwrap();
-            if buffer.bytes.len() + line.len() <= BUFFER_BYTES {
-                buffer.bytes.extend(line.as_bytes());
-            } else {
+            if !buffer.lines.push(line.as_bytes()) {
                 buffer.dropped += 1;
             }
         }
@@ -277,6 +315,53 @@ mod tests {
         let mut numbers = log_file_numbers(dir);
         numbers.sort_unstable();
         numbers
+    }
+
+    /// A ring over a fresh piece of memory, leaked like the firmware's
+    fn ring(capacity: usize) -> Ring {
+        Ring {
+            memory: Box::leak(vec![0u8; capacity].into_boxed_slice()),
+            start: 0,
+            len: 0,
+        }
+    }
+
+    #[test]
+    fn a_line_that_does_not_fit_is_refused_whole() {
+        let mut lines = ring(10);
+        assert!(lines.push(b"12345\n"));
+        assert!(!lines.push(b"12345\n"));
+        assert_eq!(lines.len, 6);
+    }
+
+    #[test]
+    fn chunks_end_at_a_line_end() {
+        let mut lines = ring(64);
+        lines.push(b"one\n");
+        lines.push(b"two\n");
+        lines.push(b"three\n");
+        // 10 bytes reach into "three": the chunk stops after "two"
+        assert_eq!(lines.take_chunk(10), b"one\ntwo\n");
+        assert_eq!(lines.take_chunk(10), b"three\n");
+        assert_eq!(lines.len, 0);
+    }
+
+    #[test]
+    fn a_line_longer_than_a_chunk_is_split() {
+        let mut lines = ring(64);
+        lines.push(b"abcdefgh\n");
+        assert_eq!(lines.take_chunk(4), b"abcd");
+        assert_eq!(lines.take_chunk(8), b"efgh\n");
+    }
+
+    #[test]
+    fn lines_wrap_past_the_end_of_memory() {
+        let mut lines = ring(8);
+        lines.push(b"aaaaa\n");
+        assert_eq!(lines.take_chunk(8), b"aaaaa\n");
+        // Starts at 6 of 8: wraps round to the front
+        assert!(lines.push(b"bbbbbb\n"));
+        assert_eq!(lines.take_chunk(8), b"bbbbbb\n");
     }
 
     fn plenty_of_space() -> (usize, usize) {

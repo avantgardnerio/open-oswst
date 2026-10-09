@@ -64,13 +64,48 @@ fn get_mac() -> [u8; 6] {
     mac
 }
 
+/// Log lines waiting for the file, in PSRAM: minutes of talking at the
+/// ~1-2KB/s a busy radio logs (2026-10-08 logs), against ~10s in the 16KB of
+/// internal RAM it had before
+const LOG_BUFFER_BYTES: usize = 1024 * 1024;
+/// Without PSRAM (a board that has none): what the internal heap can spare
+const LOG_BUFFER_FALLBACK_BYTES: usize = 16 * 1024;
+
+/// The log buffer's memory, once, for good. Only this explicit request puts
+/// anything in PSRAM (CONFIG_SPIRAM_USE_CAPS_ALLOC): ordinary allocations
+/// never land there. Returns whether it got PSRAM.
+fn log_buffer_memory() -> (&'static mut [u8], bool) {
+    use esp_idf_svc::sys::{heap_caps_malloc, MALLOC_CAP_8BIT, MALLOC_CAP_SPIRAM};
+    let memory = unsafe { heap_caps_malloc(LOG_BUFFER_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) };
+    if memory.is_null() {
+        let fallback = vec![0u8; LOG_BUFFER_FALLBACK_BYTES].into_boxed_slice();
+        return (Box::leak(fallback), false);
+    }
+    // SAFETY: a fresh allocation of that many bytes, never freed, so 'static
+    let memory = unsafe { std::slice::from_raw_parts_mut(memory as *mut u8, LOG_BUFFER_BYTES) };
+    (memory, true)
+}
+
 fn main() {
     esp_idf_svc::sys::link_patches();
     // Same clock as ESP-IDF's own log lines
-    logger::init(|| unsafe { esp_idf_svc::sys::esp_log_timestamp() });
+    let (log_buffer, in_psram) = log_buffer_memory();
+    let log_buffer_bytes = log_buffer.len();
+    logger::init(
+        || unsafe { esp_idf_svc::sys::esp_log_timestamp() },
+        log_buffer,
+    );
     // ESP-IDF's own boot lines print its version, which goes stale
     // (firmware.rs VERSION): this one is the build's
     log::info!("open-oswst {} starting...", firmware::version());
+    if in_psram {
+        log::info!("Log buffer: {} KB in PSRAM", log_buffer_bytes / 1024);
+    } else {
+        log::warn!(
+            "No PSRAM: log buffer {} KB of internal RAM",
+            log_buffer_bytes / 1024
+        );
+    }
 
     // The settings (and the log files) live on the storage
     let storage_ok = match storage::init() {
@@ -167,11 +202,14 @@ async fn log_memory() {
     const MAX_TASKS: usize = 24;
     loop {
         unsafe {
+            // Internal RAM only: that's what everything but the log buffer
+            // allocates from. PSRAM (the log buffer) is mostly spoken for
             log::info!(
-                "Heap: free {} B, largest block {} B, min ever free {} B",
-                esp_get_free_heap_size(),
-                heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
-                esp_get_minimum_free_heap_size()
+                "Heap: free {} B, largest block {} B, min ever free {} B, psram free {} B",
+                heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                heap_caps_get_free_size(MALLOC_CAP_SPIRAM)
             );
             let mut tasks: [TaskStatus_t; MAX_TASKS] = core::mem::zeroed();
             let n =

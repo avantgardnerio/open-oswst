@@ -63,3 +63,15 @@ CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
 CONFIG_ESP_WIFI_IRAM_OPT=n
 CONFIG_ESP_WIFI_RX_IRAM_OPT=n
 CONFIG_LWIP_IRAM_OPTIMIZATION=n
+
+# The ESP32-S3R2 has 2MB of PSRAM in the package (efuse PSRAM_CAP=2M; CS is
+# GPIO26/SPICS1, already off-limits). It's slower than internal RAM (through
+# the cache, shared with the flash) and unreachable while the flash is being
+# written, so nothing goes there by default: CAPS_ALLOC means only an explicit
+# heap_caps_malloc(MALLOC_CAP_SPIRAM) does. Today that's the log buffer.
+# A board without it still boots (IGNORE_NOTFOUND); main.rs falls back
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_CAPS_ALLOC=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
