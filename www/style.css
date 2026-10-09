@@ -67,6 +67,39 @@ button {
   padding: 0.4rem 1rem;
 }
 
+nav {
+  display: flex;
+  gap: 1rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--border);
+}
+
+nav a {
+  color: var(--muted);
+}
+
+/* The page showing */
+nav a[aria-current="page"] {
+  color: var(--text);
+  font-weight: bold;
+  text-decoration: none;
+}
+
+/* A list of files: a column each for name, size and date */
+.files {
+  margin-top: 0.6rem;
+}
+
+.files td {
+  padding-right: 1rem;
+  word-break: normal;
+  white-space: nowrap;
+}
+
+a {
+  color: inherit;
+}
+
 .error {
   color: var(--error);
 }
