@@ -1,0 +1,45 @@
+body {
+  font-family: system-ui, sans-serif;
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 1rem;
+  background: #fff;
+  color: #111;
+}
+
+h1 {
+  font-size: 1.4rem;
+}
+
+h2 {
+  font-size: 1.1rem;
+  margin-bottom: 0.4rem;
+}
+
+/* The OLED is 128x64: scale it up with hard pixel edges */
+.screen {
+  width: 100%;
+  max-width: 512px;
+  image-rendering: pixelated;
+  border: 1px solid #888;
+}
+
+table {
+  border-collapse: collapse;
+}
+
+th {
+  text-align: left;
+  padding: 0.2rem 1rem 0.2rem 0;
+  font-weight: normal;
+  color: #555;
+}
+
+td {
+  padding: 0.2rem 0;
+  word-break: break-all;
+}
+
+.error {
+  color: #b00;
+}

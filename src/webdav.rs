@@ -369,6 +369,11 @@ fn content_type(path: &Path) -> &'static str {
     match path.extension().and_then(|extension| extension.to_str()) {
         Some("txt" | "toml" | "md" | "csv") => "text/plain",
         Some("json") => "application/json",
+        // The web app (www/ in the repo): a browser shows a page only as
+        // text/html, and runs a module script only with a JavaScript type
+        Some("html") => "text/html; charset=utf-8",
+        Some("js" | "mjs") => "text/javascript",
+        Some("css") => "text/css",
         _ => "application/octet-stream",
     }
 }

@@ -68,8 +68,11 @@ pub fn start(name: &str, mac: &str, wifi_off: Sender<()>) -> Option<EspHttpServe
         .ok()?;
     let (name, mac) = (name.to_string(), mac.to_string());
     let routes = server
-        .fn_handler("/api/status", Method::Get, move |req| {
-            status(req, &name, &mac)
+        .fn_handler("/", Method::Get, home)
+        .and_then(|s| {
+            s.fn_handler("/api/status", Method::Get, move |req| {
+                status(req, &name, &mac)
+            })
         })
         .and_then(|s| s.fn_handler("/api/ota", Method::Post, ota))
         .and_then(|s| s.fn_handler("/api/firmware", Method::Get, download_firmware))
@@ -223,6 +226,16 @@ fn screenshot(req: Req) -> Result {
     let bmp = screen::on_panel().bmp();
     req.into_response(200, None, &[("Content-Type", "image/bmp")])?
         .write_all(&bmp)?;
+    Ok(())
+}
+
+/// Where a browser pointed at the radio's address lands: the web app,
+/// uploaded to the storage (scripts/upload-www.sh)
+const HOME_PAGE: &str = "/fs/www/index.html";
+
+/// The bare address: send the browser on to the web app
+fn home(req: Req) -> Result {
+    req.into_response(302, None, &[("Location", HOME_PAGE)])?;
     Ok(())
 }
 
