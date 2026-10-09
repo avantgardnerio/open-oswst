@@ -24,6 +24,7 @@ pub enum Action {
 /// when the page is left
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
+    Connected,  // the network we're on, and our address
     AddWifi,    // networks in range, then the password
     ForgetWifi, // the saved networks
     Update,     // ask the management server
@@ -91,6 +92,7 @@ static ROOT: &[Item] = &[
     Item::Submenu(
         "WiFi networks",
         &[
+            Item::Page("Connected", Page::Connected),
             Item::Page("Add", Page::AddWifi),
             Item::Page("Forget", Page::ForgetWifi),
         ],
@@ -242,9 +244,9 @@ mod tests {
         let mut menu = Menu::new();
         menu.rotate(5); // Back, Screenshot, Lock, Mode, Privacy, WiFi networks
         assert!(matches!(menu.click(), Outcome::Stay));
-        menu.rotate(1); // Add
+        menu.rotate(2); // Connected, Add
         assert!(matches!(menu.click(), Outcome::Open(Page::AddWifi)));
         assert_eq!(menu.title(), "WiFi networks");
-        assert_eq!(menu.cursor(), 1);
+        assert_eq!(menu.cursor(), 2);
     }
 }

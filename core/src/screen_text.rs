@@ -4,12 +4,15 @@
 //! ```text
 //! Cornelious   A2:C6:2C     us: our name, short MAC (the hard ID)
 //! 40.54390,-105.09185       our position
-//! Bob            1.24km     the last transmission heard to its end:
-//! 14:11Z -87dBm via rpt       who, how far, when, how strong, how
-//! koldendeco      .0.240    WiFi (devices::network)
-//! V7 RX 14:11Z    3.91V    volume, what we're doing, the time, battery
+//! Bob          1.35km W     the last transmission heard to its end: who,
+//! -87dBm +13dB 1 hop          how far, how strong, through how many
+//! 14:11    192.168.0.240      repeaters, and when; then WiFi (devices::network)
+//! V7 RX 14:11     3.91V     volume, what we're doing, the time, battery
 //!                           (with the mode first if not normal: RPT 3.9V)
 //! ```
+//!
+//! Every field has a fixed widest form that fits: nothing comes and goes
+//! with the values. The time is UTC, without a Z.
 
 use core::fmt::Write as _;
 
@@ -48,6 +51,9 @@ pub struct Heard {
     pub txid: u8,
     pub ident: Ident,
     pub rssi: i16,
+    /// Signal to noise, dB: below 0 is under the noise (LoRa still decodes
+    /// to about -7.5 at SF7)
+    pub snr: i16,
     /// Repeaters it came through (its header's hop count): 0 straight from
     /// the talker. Its RSSI is the last repeater's
     pub hops: u8,
@@ -77,7 +83,8 @@ pub fn us(name: &str, short_mac: &str) -> Row {
 }
 
 /// Rows 3 and 4: who we last heard, how far away and which way (if both of
-/// us had a fix), then when, how strong, and through how many repeaters
+/// us had a fix), then how strong and through how many repeaters. Widest:
+/// "-120dBm -12dB 2 hops", 20
 pub fn heard(heard: &Heard, our_position: Option<(f64, f64)>) -> (Row, Row) {
     // "10.5km NNW" at the widest: 10 of the row's 21, leaving the name 10
     let mut far = heapless::String::<12>::new();
@@ -93,14 +100,22 @@ pub fn heard(heard: &Heard, our_position: Option<(f64, f64)>) -> (Row, Row) {
     let first = spread(&heard.ident.name, &far);
 
     let mut second = Row::new();
-    let _ = match heard.at {
-        Some((h, m)) => write!(second, "{:02}:{:02}Z", h, m),
-        None => write!(second, "--:--Z"),
-    };
-    let _ = write!(second, " {}dBm", heard.rssi);
+    let _ = write!(second, "{}dBm {:+}dB", heard.rssi, heard.snr);
     let plural = if heard.hops == 1 { "" } else { "s" };
     let _ = write!(second, " {} hop{}", heard.hops, plural);
     (first, second)
+}
+
+/// Row 5: when we last heard someone (blank if no one yet), and the WiFi:
+/// its address, or why there's none. Widest: "14:11 192.168.100.240", 21
+pub fn heard_at_and_network(heard: Option<&Heard>, network: &str) -> Row {
+    let mut when = Row::new();
+    let _ = match heard.map(|heard| heard.at) {
+        Some(Some((h, m))) => write!(when, "{:02}:{:02}", h, m),
+        Some(None) => write!(when, "--:--"),
+        None => Ok(()),
+    };
+    spread(&when, network)
 }
 
 /// Row 6: volume (* when locked), what we're doing, the UTC time, then the
@@ -117,8 +132,8 @@ pub fn status(
     let lock = if locked { "*" } else { " " };
     let _ = write!(left, "V{}{}{}", volume, lock, activity.code());
     let _ = match time {
-        Some((h, m)) => write!(left, " {:02}:{:02}Z", h, m),
-        None => write!(left, " --:--Z"),
+        Some((h, m)) => write!(left, " {:02}:{:02}", h, m),
+        None => write!(left, " --:--"),
     };
     // The battery in volts: a LiPo's percent under load is a guess. Normal
     // mode isn't shown, so the volts get two decimals; another mode is worth
@@ -147,6 +162,7 @@ mod tests {
                 position,
             },
             rssi: -87,
+            snr: 13,
             hops,
             at: Some((14, 11)),
         }
@@ -168,11 +184,11 @@ mod tests {
                 Mode::Normal,
                 Some(3_912)
             ),
-            "V7 RX 14:11Z    3.91V"
+            "V7 RX 14:11     3.91V"
         );
         assert_eq!(
             status(7, false, Activity::Idle, Some((14, 11)), Mode::Normal, None),
-            "V7    14:11Z    -.--V"
+            "V7    14:11     -.--V"
         );
         assert_eq!(
             status(
@@ -183,7 +199,7 @@ mod tests {
                 Mode::Repeater,
                 Some(4_187)
             ),
-            "V7*RP --:--Z RPT 4.1V"
+            "V7*RP --:--  RPT 4.1V"
         );
         assert_eq!(
             status(
@@ -194,7 +210,7 @@ mod tests {
                 Mode::Echo,
                 Some(3_650)
             ),
-            "V10 RP 09:05 ECH 3.6V" // the battery stays whole; the time gives way
+            "V10 RP 09:05 ECH 3.6V" // the widest
         );
         for row in [
             us("x", "y"),
@@ -210,14 +226,15 @@ mod tests {
         let far_end = (40.545_389, -105.107_722);
         let (first, second) = heard(&bob(Some(far_end), 1), Some(home));
         assert_eq!(first, "Bob          1.35km W");
-        assert_eq!(second, "14:11Z -87dBm 1 hop");
+        assert_eq!(second, "-87dBm +13dB 1 hop");
         let (first, second) = heard(&bob(Some((40.544_8, -105.091_85)), 0), Some(home));
         assert_eq!(first, "Bob            100m N");
-        assert_eq!(second, "14:11Z -87dBm 0 hops");
+        assert_eq!(second, "-87dBm +13dB 0 hops");
         // The widest it gets still fits
         let mut weak = bob(None, 2);
         weak.rssi = -120;
-        assert_eq!(heard(&weak, None).1, "14:11Z -120dBm 2 hops");
+        weak.snr = -12;
+        assert_eq!(heard(&weak, None).1, "-120dBm -12dB 2 hops");
         // The widest it gets still fits: a long name is cut short
         let mut far_away = bob(Some((0.088, -0.037)), 0);
         far_away.ident.name = "Longest-Name".try_into().unwrap();
@@ -226,5 +243,30 @@ mod tests {
         assert_eq!(first.chars().count(), WIDTH);
         // Either side without a fix: no distance
         assert_eq!(heard(&bob(None, 0), Some(home)).0, "Bob");
+    }
+
+    #[test]
+    fn when_heard_and_the_network_share_a_row() {
+        let bob = bob(None, 0);
+        assert_eq!(
+            heard_at_and_network(Some(&bob), "192.168.0.240"),
+            "14:11   192.168.0.240"
+        );
+        // The widest of both still fits
+        assert_eq!(
+            heard_at_and_network(Some(&bob), "192.168.100.240"),
+            "14:11 192.168.100.240"
+        );
+        let mut no_clock = bob.clone();
+        no_clock.at = None;
+        assert_eq!(
+            heard_at_and_network(Some(&no_clock), "WiFi off"),
+            "--:--        WiFi off"
+        );
+        // No one heard yet: just the network
+        assert_eq!(
+            heard_at_and_network(None, "WiFi searching"),
+            "       WiFi searching"
+        );
     }
 }

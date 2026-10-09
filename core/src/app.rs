@@ -829,6 +829,7 @@ impl<P: Platform> App<P> {
                 txid,
                 ident,
                 rssi: rx_pkt.rssi,
+                snr: rx_pkt.snr,
                 hops,
                 // The system clock (NTP, else the GPS): it has the time
                 // without a fix, or any GPS at all
@@ -1117,6 +1118,7 @@ impl<P: Platform> App<P> {
                     }
                     Outcome::Open(Page::AddWifi) => self.run_add_wifi().await,
                     Outcome::Open(Page::ForgetWifi) => self.run_forget_wifi().await,
+                    Outcome::Open(Page::Connected) => self.run_connected().await,
                     Outcome::Open(Page::Update) => self.run_update().await,
                 },
             }
@@ -1238,6 +1240,21 @@ impl<P: Platform> App<P> {
         if let Some(settings) = self.devices.settings.as_mut() {
             settings.forget_wifi(ssid);
             log::info!("Menu: WiFi network {:?} forgotten", ssid);
+        }
+    }
+
+    /// Which network we're on, and our address on it: the screen shows only
+    /// the address
+    async fn run_connected(&mut self) {
+        match P::network() {
+            Network::Joined { ssid, ip } => {
+                let address = format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+                self.pick("Connected", &[ssid.as_str().into(), address])
+                    .await;
+            }
+            _ => {
+                self.pick("Not on a network", &[]).await;
+            }
         }
     }
 
@@ -1423,7 +1440,8 @@ impl<P: Platform> App<P> {
             let our_position = fix.and_then(|fix| fix.position);
             (rows[2], rows[3]) = screen_text::heard(heard, our_position);
         }
-        rows[4] = network.screen_line(screen_text::WIDTH);
+        rows[4] =
+            screen_text::heard_at_and_network(self.display.heard.as_ref(), &network.screen_text());
         rows[5] = screen_text::status(
             speaker::volume(),
             self.locked,
