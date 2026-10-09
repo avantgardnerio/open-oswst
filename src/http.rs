@@ -103,8 +103,10 @@ fn status(req: Req, name: &str, mac: &str) -> Result {
             firmware::version(),
             slot.into_owned(),
             esp_timer_get_time() / 1_000_000,
-            esp_get_free_heap_size(),
-            esp_get_minimum_free_heap_size(),
+            // Internal RAM only, like the Heap log line: PSRAM holds just
+            // the log buffer, and would hide a shortage
+            heap_caps_get_free_size(MALLOC_CAP_INTERNAL) as u32,
+            heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) as u32,
         )
     };
     let server = secrets::server().ok();
