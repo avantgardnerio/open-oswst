@@ -38,7 +38,7 @@ mod tests {
     #[test]
     fn the_screen_shows_the_address_or_why_none() {
         let joined = Network::Joined {
-            ssid: "koldendeco".try_into().unwrap(),
+            ssid: "home-network".try_into().unwrap(),
             ip: [192, 168, 100, 240],
         };
         assert_eq!(joined.screen_text(), "192.168.100.240");
