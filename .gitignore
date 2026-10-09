@@ -14,3 +14,6 @@ logs/
 
 # Board settings incl. WiFi passwords (see boards.example.toml)
 boards.toml
+
+# Python bytecode caches (scripts/, pcb/, models/)
+__pycache__/
