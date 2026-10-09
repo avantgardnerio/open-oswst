@@ -1,10 +1,32 @@
+/* Light or dark, as the system is set (prefers-color-scheme): the colours
+   are these variables, and the dark block below swaps them. color-scheme
+   lets the browser match its own parts (scroll bars, form fields) */
+:root {
+  color-scheme: light dark;
+  --background: #fff;
+  --text: #111;
+  --muted: #555;
+  --border: #888;
+  --error: #b00;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #121212;
+    --text: #e4e4e4;
+    --muted: #9a9a9a;
+    --border: #555;
+    --error: #ff6b6b;
+  }
+}
+
 body {
   font-family: system-ui, sans-serif;
   max-width: 40rem;
   margin: 0 auto;
   padding: 1rem;
-  background: #fff;
-  color: #111;
+  background: var(--background);
+  color: var(--text);
 }
 
 h1 {
@@ -21,7 +43,7 @@ h2 {
   width: 100%;
   max-width: 512px;
   image-rendering: pixelated;
-  border: 1px solid #888;
+  border: 1px solid var(--border);
 }
 
 table {
@@ -32,7 +54,7 @@ th {
   text-align: left;
   padding: 0.2rem 1rem 0.2rem 0;
   font-weight: normal;
-  color: #555;
+  color: var(--muted);
 }
 
 td {
@@ -41,5 +63,5 @@ td {
 }
 
 .error {
-  color: #b00;
+  color: var(--error);
 }
