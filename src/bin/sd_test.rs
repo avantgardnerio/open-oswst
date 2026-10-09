@@ -18,6 +18,10 @@
 //! 2. Mount its FAT filesystem at /sdcard. A new card comes formatted FAT32;
 //!    exFAT (most cards over 32GB) won't mount.
 //! 3. Write HELLO.TXT, read it back, compare, list the root directory.
+//! 4. Write speed: 1 MiB to SPEED.BIN in chunks of 512 B, 4 KiB and 32 KiB.
+//!    Once with an fsync per chunk (the logger's pattern: every chunk safe on
+//!    the card), once with one fsync at the end (raw throughput). Logs MB/s
+//!    and the average and worst time per chunk.
 //!
 //! Build & flash: cargo build --bin sd_test && espflash flash -p <PORT> --bootloader target/xtensa-esp32s3-espidf/debug/build/esp-idf-sys-*/out/build/bootloader/bootloader.bin --partition-table target/xtensa-esp32s3-espidf/debug/partition-table.bin target/xtensa-esp32s3-espidf/debug/sd_test
 
@@ -34,6 +38,14 @@ use std::time::{Duration, Instant};
 
 /// FAT without long-file-name support (ESP-IDF's default): 8.3 names only
 const PATH: &str = "/sdcard/HELLO.TXT";
+const SPEED_PATH: &str = "/sdcard/SPEED.BIN";
+
+/// Bytes written per speed run
+const SPEED_TOTAL: usize = 1024 * 1024;
+const SPEED_CHUNKS: [usize; 3] = [512, 4 * 1024, 32 * 1024];
+
+/// SD bus clock. ESP-IDF's default is 20 MHz
+const BUS_KHZ: u32 = 5_000;
 
 fn main() {
     esp_idf_svc::sys::link_patches();
@@ -54,7 +66,9 @@ fn main() {
         &SdMmcHostConfiguration::new(),
     )
     .unwrap();
-    let card = match SdCardDriver::new_mmc(host, &SdCardConfiguration::new()) {
+    let mut card_config = SdCardConfiguration::new();
+    card_config.speed_khz = BUS_KHZ;
+    let card = match SdCardDriver::new_mmc(host, &card_config) {
         Ok(card) => card,
         Err(err) => {
             log::error!("No card: {err} (check wiring, D3 high, card seated)");
@@ -118,7 +132,52 @@ fn main() {
         log::info!("  {:?} {} B", entry.file_name(), size);
     }
 
+    // 4. Write speed
+    for chunk in SPEED_CHUNKS {
+        for fsync_each in [true, false] {
+            if let Err(err) = write_speed(chunk, fsync_each) {
+                log::error!("{chunk:>5} B chunks, fsync each {fsync_each}: FAILED: {err}");
+            }
+        }
+    }
+    let _ = fs::remove_file(SPEED_PATH);
+    log::info!("Done");
+
     idle();
+}
+
+/// Writes SPEED_TOTAL bytes in `chunk`-byte writes to a fresh file and logs
+/// the throughput and the time per chunk. With `fsync_each`, every chunk is
+/// flushed to the card (data and FAT) before the next one.
+fn write_speed(chunk: usize, fsync_each: bool) -> std::io::Result<()> {
+    let data = vec![0xA5u8; chunk];
+    let mut file = fs::File::create(SPEED_PATH)?;
+
+    let mut worst = Duration::ZERO;
+    let started = Instant::now();
+    for _ in 0..SPEED_TOTAL / chunk {
+        let chunk_started = Instant::now();
+        file.write_all(&data)?;
+        if fsync_each {
+            file.sync_all()?;
+        }
+        worst = worst.max(chunk_started.elapsed());
+    }
+    if !fsync_each {
+        file.sync_all()?;
+    }
+    let total = started.elapsed();
+
+    let chunks = (SPEED_TOTAL / chunk) as u32;
+    log::info!(
+        "{:>5} B chunks, fsync {}: {:.2} MB/s | per chunk avg {:?}, worst {:?}",
+        chunk,
+        if fsync_each { "each" } else { "at end" },
+        SPEED_TOTAL as f64 / total.as_secs_f64() / 1e6,
+        total / chunks,
+        worst
+    );
+    Ok(())
 }
 
 /// Time since boot, from ESP-IDF's microsecond timer
