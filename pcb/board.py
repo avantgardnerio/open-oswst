@@ -113,6 +113,9 @@ board.add_text(BX + BW / 2, BY + BH - 2, f"open-oswst  {git_sha}", size=0.8, thi
 # Ground plane — GND zone covering full board, both copper layers
 board.add_zone("GND", [
     (BX, BY), (BX + BW, BY), (BX + BW, BY + BH), (BX, BY + BH),
-], clearance=0.25, thermal_gap=0.3, thermal_bridge_width=0.3)
+], clearance=0.25, thermal_gap=0.3, thermal_bridge_width=0.3,
+   # Every island goes: a scrap of fill the traces cut off is copper
+   # connected to nothing (DRC: "isolated copper fill", 2026-10-10)
+   island_removal_mode=0)
 
 board.save("open-oswst.kicad_pcb")
