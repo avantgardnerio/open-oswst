@@ -6,7 +6,7 @@ use embassy_futures::join::join4;
 use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::hal::task::block_on;
 use open_oswst::devices::{
-    battery, encoder, fem, gps, mic, ptt, radio, screen, settings, speaker, storage,
+    battery, fem, gps, mic, ptt, radio, screen, settings, speaker, storage, twist,
 };
 use open_oswst::{board, firmware, net, thread};
 use open_oswst_core::devices::network::Network;
@@ -31,7 +31,7 @@ impl Platform for Esp {
     type Mic = mic::Mic;
     type Battery = battery::Battery;
     type Ptt = ptt::Ptt;
-    type Knob = encoder::Encoder;
+    type Knob = twist::Twist;
     type Gps = gps::Gps;
     type Settings = settings::Settings;
 
@@ -184,7 +184,7 @@ fn main() {
                 mic: mic::init(board.mic),
                 battery: battery::init(board.battery),
                 ptt: ptt::init(board.ptt),
-                knob: encoder::init(board.vol),
+                knob: twist::init(board.vol),
                 screen: screen::init(board.screen),
                 gps,
                 settings,
