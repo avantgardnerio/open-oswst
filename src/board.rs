@@ -1,4 +1,4 @@
-//! Pin map for the open-oswst PCB (v2) on a Heltec WiFi LoRa 32 V4.
+//! Pin map for the next open-oswst PCB rev (#44: I2C knob, SD on 43/44/45) on a Heltec WiFi LoRa 32 V4.
 //! The one place pins are assigned — every app gets its peripherals from here.
 
 use esp_idf_svc::hal::gpio::{AnyIOPin, Output, PinDriver};
@@ -7,7 +7,7 @@ use esp_idf_svc::hal::peripherals::Peripherals;
 use std::thread;
 use std::time::Duration;
 
-use crate::devices::{battery, encoder, fem, gps, irq_pin, mic, radio, screen, speaker};
+use crate::devices::{battery, fem, gps, irq_pin, mic, radio, screen, speaker, twist};
 
 pub struct Board {
     pub fem: fem::Peripherals,
@@ -17,7 +17,7 @@ pub struct Board {
     pub screen: screen::Peripherals,
     pub mic: mic::Peripherals,
     pub battery: battery::Peripherals,
-    pub vol: encoder::Peripherals,
+    pub vol: twist::Peripherals,
     pub ptt: AnyIOPin<'static>,
     /// WiFi (net.rs)
     pub modem: Modem<'static>,
@@ -85,10 +85,12 @@ pub fn take() -> Board {
             pin: p.pins.gpio1,
             enable: p.pins.gpio37.into(), // ADC_CTRL
         },
-        vol: encoder::Peripherals {
-            a: p.pins.gpio3.into(),
-            b: p.pins.gpio6.into(),   // GPIO2 is the FEM's
-            sw: p.pins.gpio45.into(), // GPIO1 is battery sense
+        // The next rev's knob bus (#44): the wired encoder's A/B pins, now
+        // I2C1 (I2C0 is the OLED's). Its SW pin, GPIO45, goes to the SD card
+        vol: twist::Peripherals {
+            i2c: p.i2c1,
+            sda: p.pins.gpio3.into(),
+            scl: p.pins.gpio6.into(),
         },
         ptt: p.pins.gpio0.into(),
         modem: p.modem,
