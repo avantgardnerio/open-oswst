@@ -55,7 +55,7 @@
   )
 
   (gr_rect (start 113 113) (end 183 163) (stroke (width 0.1) (type solid)) (fill none) (layer "Edge.Cuts"))
-  (gr_text "open-oswst  cf52971"
+  (gr_text "open-oswst  f92e84b"
     (at 148.0 161)
     (layer "F.SilkS")
     (effects (font (size 0.8 0.8) (thickness 0.12)))
@@ -684,6 +684,15 @@
     )
   )
 
+  (via (at 150 129.57) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2))
+  (via (at 150 137.57) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2))
+  (via (at 158 129.57) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2))
+  (via (at 158 137.57) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2))
+  (via (at 166 129.57) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2))
+  (via (at 166 137.57) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2))
+  (via (at 174 129.57) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2))
+  (via (at 174 137.57) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2))
+
   (zone
     (net 2)
     (net_name "GND")
@@ -697,7 +706,7 @@
     (fill yes
       (thermal_gap 0.3)
       (thermal_bridge_width 0.3)
-      (island_removal_mode 2)
+      (island_removal_mode 0)
       (island_area_min 10)
     )
     (polygon

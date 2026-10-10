@@ -118,4 +118,13 @@ board.add_zone("GND", [
    # connected to nothing (DRC: "isolated copper fill", 2026-10-10)
    island_removal_mode=0)
 
+# GND stitching vias across the open middle, under the Heltec (between the
+# J3 and J2 rows): wherever the traces cut one layer's fill into an island,
+# a via ties it to the other layer's ground, so it stays and the plane under
+# the SD lines (20-40 MHz on a real board) has no hole. 2026-10-10 the SD
+# DO trace boxed in ~20x25 mm of F.Cu here. Freerouting routes around them
+for x in (BX + 37, BX + 45, BX + 53, BX + 61):
+    for y in (HY + 7, HY + 15):
+        board.add_via(x, y, "GND")
+
 board.save("open-oswst.kicad_pcb")
