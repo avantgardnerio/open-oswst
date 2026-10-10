@@ -239,7 +239,15 @@ bundle.tar.gz   THE update: radios that don't have it are offered it
 
 ```bash
 cd server && cargo run --release -- keygen /srv/oswst     # once: prints the server's public key
-cd server && cargo run --release -- /srv/oswst            # run it (port 3101)
+cd server && cargo run --release -- /srv/oswst            # run it by hand (port 3101)
+```
+
+To keep it running, install it as the systemd service `oswst-server` (`server/oswst-server.service`). It runs as its own user,
+`oswst`, which can only read `/srv/oswst`. Run the same script again after you change `server/`:
+
+```bash
+scripts/install-server.sh                                 # build, install, (re)start
+sudo journalctl -u oswst-server -f                        # its log
 ```
 
 ### Publish an update

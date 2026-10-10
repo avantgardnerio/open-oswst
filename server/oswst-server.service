@@ -1,0 +1,39 @@
+# The management server (server/, issue #34) as a systemd service.
+# Installed by scripts/install-server.sh; logs: journalctl -u oswst-server
+#
+# Runs as its own user, oswst, which can only read /srv/oswst (an ACL the
+# install script sets): the server never writes there. publish-firmware.sh
+# and radios.toml edits need no restart, the server re-reads both.
+
+[Unit]
+Description=Open OSWST management server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=oswst
+Group=oswst
+ExecStart=/usr/local/bin/oswst-server /srv/oswst
+Restart=on-failure
+RestartSec=5
+
+# Hardening: the whole file system read-only, no home directories, no
+# devices, no privileges. Port 3101 is above 1024, so no capabilities
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target
