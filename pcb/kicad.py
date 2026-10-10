@@ -17,6 +17,7 @@ class Board:
         self.graphics = []
         self.footprints = []
         self.zones = []
+        self.vias = []
         self._fp_id = 0
         self._nets = {"": 0}  # net name → net number (0 = unconnected)
 
@@ -168,6 +169,15 @@ class Board:
                 f' (layer "{layer}") (net {number}))'
             )
 
+    def add_via(self, x, y, net, size=0.6, drill=0.3):
+        """Add a through via (F.Cu to B.Cu) at (x, y) on `net`: a stitching via
+        ties the two layers' copper fill together there."""
+        n = self._net(net)
+        self.vias.append(
+            f'  (via (at {x} {y}) (size {size}) (drill {drill})'
+            f' (layers "F.Cu" "B.Cu") (net {n}))'
+        )
+
     def add_zone(self, net, points, layers=("F.Cu", "B.Cu"), clearance=0.5,
                  min_thickness=0.25, thermal_gap=0.5, thermal_bridge_width=0.5,
                  island_removal_mode=2, min_island_area=10):
@@ -222,6 +232,8 @@ class Board:
             parts.append("\n".join(self.graphics))
         if self.footprints:
             parts.append("\n".join(self.footprints))
+        if self.vias:
+            parts.append("\n".join(self.vias))
         if self.zones:
             parts.append("\n".join(self.zones))
         gfx = "\n\n" + "\n\n".join(parts) if parts else ""
