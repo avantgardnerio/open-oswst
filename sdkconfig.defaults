@@ -75,3 +75,11 @@ CONFIG_SPIRAM_MODE_QUAD=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_USE_CAPS_ALLOC=y
 CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+
+# Console on the USB port only (#44). Everything we read on ttyACM was already
+# USB-Serial-JTAG (the secondary console); UART0 was the primary, on GPIO43/44
+# with no USB-UART bridge on the V4.3. Freed, 43/44 carry the SD card's CMD
+# and D0. The ROM still prints a few lines on GPIO43 at reset: with no SD
+# clock running, the card ignores them
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
