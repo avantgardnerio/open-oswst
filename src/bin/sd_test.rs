@@ -1,16 +1,15 @@
-//! microSD bringup: an SD/TF breakout on J3, in SDMMC 1-bit mode.
+//! microSD bringup: an SD/TF breakout in SDMMC 1-bit mode, on the next rev's
+//! pins (#44).
 //!
-//! Wiring (J3, pin 1 = GND at the USB-C end):
-//! - 3.3V -> J3-2 (3V3), GND -> J3-1
-//! - CLK  -> GPIO3 (J3-14)
-//! - CMD  -> GPIO6 (J3-17)
-//! - D0   -> GPIO4 (J3-15)
-//! - D3   -> 3V3 (J3-3): high at the first command keeps the card in SD mode
+//! Wiring (pin 1 = GND at the USB-C end):
+//! - 3.3V -> J2-3/4 (Ve, switched on below), GND -> J2-1
+//! - CLK  -> GPIO45 (J3-6). WARNING: strapping pin: a pull-up on it at boot selects
+//!   1.8 V flash. The breakout's pull-ups go to Ve, which is off at reset
+//! - CMD  -> GPIO43 (J2-6, UART0 TX until the console moved to USB only)
+//! - D0   -> GPIO44 (J2-5, UART0 RX until then)
+//! - D3   -> Ve: high at the first command keeps the card in SD mode
 //!   (low would switch it to SPI mode)
 //! - D1, D2, CD unconnected
-//!
-//! These are the encoder and mic pins in the radio firmware, so this is for a
-//! bare breadboard board only.
 //!
 //! Steps, each logged:
 //! 1. Talk to the card: its name and size come from its own registers, so
@@ -26,7 +25,7 @@
 //! Build & flash: cargo build --bin sd_test && espflash flash -p <PORT> --bootloader target/xtensa-esp32s3-espidf/debug/build/esp-idf-sys-*/out/build/bootloader/bootloader.bin --partition-table target/xtensa-esp32s3-espidf/debug/partition-table.bin target/xtensa-esp32s3-espidf/debug/sd_test
 
 use esp_idf_svc::fs::fatfs::Fatfs;
-use esp_idf_svc::hal::gpio::AnyIOPin;
+use esp_idf_svc::hal::gpio::{AnyIOPin, PinDriver};
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::hal::sd::mmc::{SdMmcHostConfiguration, SdMmcHostDriver};
 use esp_idf_svc::hal::sd::{SdCardConfiguration, SdCardDriver};
@@ -53,14 +52,28 @@ fn main() {
 
     let p = Peripherals::take().unwrap();
 
+    // Ve also powers the speaker amp: with its I2S lines floating it plays
+    // whatever they pick up, loud. Held low, it has no clock and stays silent
+    let mut amp_din = PinDriver::output(p.pins.gpio33).unwrap();
+    let mut amp_bclk = PinDriver::output(p.pins.gpio47).unwrap();
+    let mut amp_lrc = PinDriver::output(p.pins.gpio48).unwrap();
+    amp_din.set_low().unwrap();
+    amp_bclk.set_low().unwrap();
+    amp_lrc.set_low().unwrap();
+
+    // Ve powers the card (GPIO36 LOW = on). Kept alive to the end
+    let mut vext = PinDriver::output(p.pins.gpio36).unwrap();
+    vext.set_low().unwrap();
+    thread::sleep(Duration::from_millis(100));
+
     // 1. Talk to the card. The S3's SDMMC host routes through the GPIO
     // matrix, so any pins work. Internal pull-ups on CMD and D0 in case the
     // breakout has none (the SD bus is open-drain during init).
     let host = SdMmcHostDriver::new_1bit(
         p.sdmmc1,
-        p.pins.gpio6, // CMD
-        p.pins.gpio3, // CLK
-        p.pins.gpio4, // D0
+        p.pins.gpio43, // CMD
+        p.pins.gpio45, // CLK
+        p.pins.gpio44, // D0
         None::<AnyIOPin>,
         None::<AnyIOPin>,
         &SdMmcHostConfiguration::new(),
