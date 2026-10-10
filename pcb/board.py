@@ -31,9 +31,14 @@ board.add_jst_ph(cx, cy, pins=2, label="PA",
 # RF front end. Channel is picked from the menu instead. Gap kept so VOL/PTT
 # don't move.)
 cx += 11
+# The volume knob on I2C (#44): a Qwiic knob through a JST-SH (Qwiic) to
+# JST-PH adapter cable. Same place and footprint as the wired encoder's
+# connector; pads in Qwiic order, so a straight-through cable fits. Mounted
+# on the other side of the board, the order mirrors (3V3 and GND swap):
+# check the cable against these labels before plugging the knob in
 board.add_jst_ph(cx, cy, pins=4, label="VOL",
-                 pad_labels=["A", "B", "SW", "GND"],
-                 pad_nets=["VOL_A", "VOL_B", "VOL_SW", "GND"]); cx += 10
+                 pad_labels=["GND", "3V3", "SDA", "SCL"],
+                 pad_nets=["GND", "Ve", "KNOB_SDA", "KNOB_SCL"]); cx += 10
 board.add_jst_ph(cx, cy, pins=2, label="PTT",
                  pad_nets=["PTT", "GND"])
 
@@ -58,11 +63,12 @@ board.add_header(BX + BW - 3 - J3_SPAN / 2, HY, pins=18, label="J3",
                              "GPIO45", "GPIO46", "GPIO37", "3V3a", "3V3b", "GND"],
                  # GPIO7 (FEM power), GPIO5 (FEM CTX), GPIO2 (FEM CSD) must stay
                  # unconnected: the Heltec V4.3 drives them. GPIO1 + GPIO37 are
-                 # battery sense (ADC + divider enable). VOL_SW on GPIO45 is a
-                 # strapping pin, safe as a switch to GND (LOW is its default).
-                 pad_nets=[None, "VOL_B", None, "MIC_OUT", "VOL_A", None,
+                 # battery sense (ADC + divider enable). GPIO3/GPIO6 are the
+                 # knob's I2C bus; GPIO45, the wired encoder's switch once,
+                 # goes to the SD card (CLK) next.
+                 pad_nets=[None, "KNOB_SCL", None, "MIC_OUT", "KNOB_SDA", None,
                            None, None, None, None, None, None,
-                           "VOL_SW", None, None, None, None, "GND"])
+                           None, None, None, None, None, "GND"])
 
 # Heltec V4 J2 header (right side, pin 18→1 top to bottom)
 J2_SPAN = J3_SPAN  # same 18 pins
