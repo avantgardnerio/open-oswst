@@ -4,10 +4,10 @@
 //!
 //! ```text
 //! firmware.bin     the app image -> the spare app slot
-//! www/app.js       any other file -> the storage, at that path (/data/www/app.js)
+//! www/app.js       any other file -> the SD card, at that path (/data/sd/www/app.js)
 //! ```
 //!
-//! A radio installs one in three steps: download it to the storage, check
+//! A radio installs one in three steps: download it to the card, check
 //! its SHA-256, then extract it. Files overwrite what's there, except the
 //! radio's own: its settings and its secrets are never touched.
 

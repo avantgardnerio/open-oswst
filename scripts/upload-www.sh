@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Upload the web app (www/, as scripts/stage-www.sh lays it out) to a
-# radio's storage over WebDAV, at /fs/www/: for trying a change without
+# radio's SD card over WebDAV, at /fs/sd/www/: for trying a change without
 # publishing a bundle. Then browse to http://<radio>/
 #
 # Usage: scripts/upload-www.sh <radio address or name>   e.g. 192.168.0.219
@@ -18,10 +18,10 @@ cd "$STAGE"
 # Folders first, each before what's in it. One already there answers
 # MKCOL with 405, which is fine
 for folder in $(find . -type d | sort); do
-    curl -s -o /dev/null -X MKCOL "http://$RADIO/fs/www/${folder#./}"
+    curl -s -o /dev/null -X MKCOL "http://$RADIO/fs/sd/www/${folder#./}"
 done
 for file in $(find . -type f | sort); do
-    curl -sf -T "$file" "http://$RADIO/fs/www/${file#./}" > /dev/null
+    curl -sf -T "$file" "http://$RADIO/fs/sd/www/${file#./}" > /dev/null
     echo "uploaded ${file#./}"
 done
 echo "Open http://$RADIO/"

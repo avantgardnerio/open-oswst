@@ -6,7 +6,7 @@ use embassy_futures::join::join4;
 use esp_idf_svc::hal::cpu::Core;
 use esp_idf_svc::hal::task::block_on;
 use open_oswst::devices::{
-    battery, fem, gps, mic, ptt, radio, screen, settings, speaker, storage, twist,
+    battery, fem, gps, mic, ptt, radio, screen, sd, settings, speaker, storage, twist,
 };
 use open_oswst::{board, firmware, net, thread};
 use open_oswst_core::devices::network::Network;
@@ -23,6 +23,10 @@ const RADIO_PRIORITY: u8 = 10;
 /// all delay the speaker. Now level with the radio, which is on the other
 /// core; only WiFi and the hal's IsrReactor (11) come first.
 const APP_PRIORITY: u8 = 10;
+
+/// The log writer (sd::write_logs): below everything else that works, so a
+/// slow card only ever delays the log
+const LOG_PRIORITY: u8 = 2;
 
 /// The board, as the app sees it
 struct Esp;
@@ -48,7 +52,7 @@ impl Platform for Esp {
     }
 
     fn data_dir() -> Option<PathBuf> {
-        storage::mounted().then(|| PathBuf::from(storage::ROOT))
+        sd::mounted().then(|| PathBuf::from(sd::ROOT))
     }
 }
 
@@ -107,16 +111,17 @@ fn main() {
         );
     }
 
-    // The settings (and the log files) live on the storage
-    let storage_ok = match storage::init() {
-        Ok(()) => true,
-        Err(e) => {
-            log::warn!("Storage unavailable ({}), serial only", e);
-            false
-        }
-    };
+    // The settings live on the flash storage
+    if let Err(e) = storage::init() {
+        log::warn!("Storage unavailable ({}): default settings", e);
+    }
 
     let board = board::take();
+    // Everything else written (logs, web app, updates) goes on the SD card.
+    // After board::take(): the card is powered by Ve
+    if let Err(e) = sd::init(board.sd) {
+        log::warn!("No SD card ({}): no logs, web app or updates", e);
+    }
     let _fem = fem::init(board.fem);
     let gps = gps::init(board.gps);
 
@@ -124,21 +129,22 @@ fn main() {
     let settings = settings::init();
     config::load(Some(&settings));
 
-    // Logs also go to a file per boot, unless log_to_flash is off: then
-    // nothing from logging ever writes the flash (the menu switches it, at
-    // once). Started only now that the settings say; the lines logged before
-    // wait in the RAM buffer
-    if storage_ok {
-        logger::set_storage(&Path::new(storage::ROOT).join("log"), storage::usage);
+    // Logs also go to a file per boot on the SD card, unless log_to_flash
+    // is off (the menu switches it, at once). No card, no log. Started only
+    // now that the settings say; the lines logged before wait in the RAM
+    // buffer, and the "log" thread writes them as they come
+    if sd::mounted() {
+        logger::set_storage(&Path::new(sd::ROOT).join("log"), sd::usage);
         if config::LOG_TO_FLASH.is_on() {
             match logger::start_file() {
                 Ok(path) => log::info!("Logging to {}", path.display()),
                 Err(e) => log::warn!("No log file ({}), serial only", e),
             }
         } else {
-            log::info!("Not logging to flash (log_to_flash off): serial only");
+            log::info!("Not logging (log_to_flash off): serial only");
             logger::stop_file();
         }
+        thread::spawn(c"log", 4096, Some(LOG_PRIORITY), None, || sd::write_logs());
     } else {
         logger::stop_file();
     }

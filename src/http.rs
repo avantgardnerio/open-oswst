@@ -5,8 +5,9 @@
 //!                         OTA slot, mode, settings profile, uptime, heap,
 //!                         the management server we dial and this radio's
 //!                         public key for it (JSON)
-//!   POST /api/ota         install /data/firmware.bin (`espflash save-image`,
-//!                         put there over /fs/): into the spare app slot,
+//!   POST /api/ota         install /data/sd/firmware.bin (`espflash
+//!                         save-image`, put there over /fs/sd/): into the
+//!                         spare app slot,
 //!                         checked, then reboot. It must run a minute or the
 //!                         old one comes back (firmware.rs)
 //!   GET  /api/firmware    download the app image running
@@ -28,7 +29,8 @@
 //!                         management server and back, timed (JSON):
 //!                         does this radio reach it (management.rs)
 //!   /fs/...               the storage (/data) as a WebDAV folder, read and
-//!                         write: config.toml, log/, anything (webdav.rs)
+//!                         write: config.toml on the flash, and the SD card
+//!                         under sd/: log/, www/, anything (webdav.rs)
 //!
 //! Handlers run on the server's own task, never the app's or the radio's.
 
@@ -45,7 +47,7 @@ use open_oswst_core::management::{self as protocol, key_from_hex, key_to_hex, Re
 use open_oswst_core::{config, mode};
 use std::sync::atomic::Ordering;
 
-use crate::devices::{secrets, storage};
+use crate::devices::{sd, secrets};
 use crate::{firmware, management, webdav};
 
 /// Files go through this much at a time
@@ -177,11 +179,11 @@ struct Management {
     last_install: Option<String>,
 }
 
-/// Install /data/firmware.bin (put it there over WebDAV first), then reboot
+/// Install /data/sd/firmware.bin (put it there over WebDAV first), then reboot
 /// into it. It boots pending: if it doesn't run a minute, the bootloader goes
 /// back to the app running now (firmware.rs). The file stays
 fn ota(req: Req) -> Result {
-    let image = Path::new(storage::ROOT).join("firmware.bin");
+    let image = Path::new(sd::ROOT).join("firmware.bin");
     log::info!("OTA: installing {}", image.display());
     match firmware::install(&image) {
         Ok(size) => {
@@ -200,7 +202,7 @@ fn ota(req: Req) -> Result {
 }
 
 /// The running app image, read straight from its slot: a backup, or the
-/// same build for another radio (put it there as /fs/firmware.bin)
+/// same build for another radio (put it there as /fs/sd/firmware.bin)
 fn download_firmware(req: Req) -> Result {
     let Some(len) = firmware::image_len() else {
         req.into_status_response(500)?
@@ -230,8 +232,8 @@ fn screenshot(req: Req) -> Result {
 }
 
 /// Where a browser pointed at the radio's address lands: the web app,
-/// uploaded to the storage (scripts/upload-www.sh)
-const HOME_PAGE: &str = "/fs/www/index.html";
+/// on the SD card (an update bundle, or scripts/upload-www.sh)
+const HOME_PAGE: &str = "/fs/sd/www/index.html";
 
 /// The bare address: send the browser on to the web app
 fn home(req: Req) -> Result {

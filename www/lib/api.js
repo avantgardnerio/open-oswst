@@ -22,7 +22,7 @@ export function screenshotUrl(stamp) {
   return `/api/screenshot?at=${stamp}`;
 }
 
-/// The files in a storage folder (e.g. "/fs/log/"), one level down:
+/// The files in a storage folder (e.g. "/fs/sd/log/"), one level down:
 /// [{ name, url, bytes, modified }], folders left out. `modified` is a Date,
 /// or null when the radio had no clock when it wrote the file. A folder
 /// that isn't there (logging never on) is an empty list

@@ -85,8 +85,6 @@ const REPLY_WAIT: Duration = Duration::from_secs(3);
 /// relayed back by repeaters arrive within a bin or two. After that it's
 /// anyone's, so a talker who draws the same txid isn't ignored
 const OWN_RELAYS_FOR: Duration = Duration::from_secs(2);
-/// Air quiet this long before log lines are written to flash
-const LOG_FLUSH_IDLE: Duration = Duration::from_secs(3);
 /// How often the GPS fix goes in the log (also whenever it's gained or
 /// lost). Walking, 30s is ~40m: enough to place a transmission
 const GPS_LOG_PERIOD: Duration = Duration::from_secs(30);
@@ -236,7 +234,7 @@ struct Sounds {
 
 /// When logs were last due
 struct LogTimes {
-    last_activity: Instant, // last packet heard or sent: gates log flushes
+    last_activity: Instant, // last packet heard or sent: the Sweep waits for quiet
     last_gps_log: Option<(Instant, bool)>, // when, and whether it had a position
 }
 
@@ -363,20 +361,6 @@ impl<P: Platform> App<P> {
                 || self.display.battery_mv.map(|mv| mv / 10) != self.display.shown_battery_cv)
         {
             self.draw_screen(Activity::Idle);
-        }
-
-        // Flash writes stall the chip, so logs only go to the file once the
-        // air has been quiet a while, and one chunk per tick. Between chunks,
-        // any packet or PTT press gets handled first.
-        // Never with log_to_flash off (config::LOG_TO_FLASH): a repeater runs
-        // that way, since a packet can arrive at any moment and one landing
-        // during the stall misses its relay slot
-        if config::LOG_TO_FLASH.is_on()
-            && !receiving
-            && self.logs.last_activity.elapsed() > LOG_FLUSH_IDLE
-            && logger::pending()
-        {
-            logger::flush_chunk();
         }
     }
 

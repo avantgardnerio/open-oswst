@@ -127,12 +127,10 @@ The boot log shows the result, e.g. `Config: mode=Echo, 1 WiFi network(s)`.
 
 ### Logs
 
-Every boot writes a text log to `/data/log/NNNN.txt` on the board's LittleFS `storage` partition (~11.6 MB). Lines are buffered in RAM and
-only written to flash after 3 s with no radio traffic, because a flash write stalls the chip for up to ~18 ms. To copy them off a board:
-
-```bash
-.venv/bin/python scripts/pull-logs.py <PORT>     # ~80 s; writes logs/<MAC>-<time>/
-```
+Every boot writes a text log to `/data/sd/log/NNNN.txt` on the board's SD card (LittleFS, `src/devices/sd.rs`). Lines are buffered in
+RAM and written by a low-priority thread once a second: unlike the chip's own flash, the card stalls nothing, so repeaters log too. No
+card, no log. Copy them off over WiFi (WebDAV, below: `/fs/sd/log/`). `scripts/pull-logs.py` reads the flash over USB, so it only
+finds logs from before the card.
 
 After an echo test, join the handheld's and the echo station's logs into a per-transmission table and a map (OpenStreetMap/satellite,
 one circle per transmission coloured by how well each direction got through, plus GeoJSON for QGIS):
@@ -182,8 +180,8 @@ Port 80, no password (the WiFi password is the security). `/fs/` is the radio's 
 ```bash
 R=oswst-0f5c.local
 curl http://$R/api/status                     # name, MAC, firmware (git hash, confirmed?), OTA slot, mode, uptime, heap
-gio list -l dav://$R/fs/log/                  # after `gio mount dav://$R/fs/`
-curl -O http://$R/fs/log/0007.txt             # fetch a log: 25 KB in under 0.1 s (vs ~80 s over USB)
+gio list -l dav://$R/fs/sd/log/               # after `gio mount dav://$R/fs/`
+curl -O http://$R/fs/sd/log/0007.txt          # fetch a log: 25 KB in under 0.1 s (vs ~80 s over USB)
 curl -O http://$R/fs/config.toml              # the settings
 curl -T config.toml http://$R/fs/config.toml  # replace them (checked first: a bad file is refused); apply on reboot
 curl -X POST http://$R/api/reboot
@@ -195,7 +193,7 @@ off, the radio can't be reached over WiFi until then.
 
 ### Update firmware over WiFi (OTA)
 
-Build, save an app image, put it on the radio as `/fs/firmware.bin` (an ordinary file: a file manager works too), then
+Build, save an app image, put it on the radio as `/fs/sd/firmware.bin` (an ordinary file: a file manager works too), then
 `POST /api/ota`: the radio copies it into its spare slot and reboots into it (back up in ~15 s). `/api/status` then shows the new
 git hash, the other slot and `"firmware_state":"pending"`: a new app must run a minute (then `valid`), or the radio goes back to the
 old one. `GET /api/firmware` downloads the app a radio is running.
@@ -203,14 +201,14 @@ old one. `GET /api/firmware` downloads the app a radio is running.
 ```bash
 . ~/export-esp.sh && cargo build
 espflash save-image --chip esp32s3 target/xtensa-esp32s3-espidf/debug/open-oswst app.bin
-curl -T app.bin http://oswst-0f5c.local/fs/firmware.bin && curl -X POST http://oswst-0f5c.local/api/ota
+curl -T app.bin http://oswst-0f5c.local/fs/sd/firmware.bin && curl -X POST http://oswst-0f5c.local/api/ota
 ```
 
 Every radio found:
 
 ```bash
 for host in $(avahi-browse -rtp _oswst._tcp | grep "^=" | cut -d';' -f7 | sort -u); do
-    curl -T app.bin http://$host/fs/firmware.bin && curl -X POST http://$host/api/ota
+    curl -T app.bin http://$host/fs/sd/firmware.bin && curl -X POST http://$host/api/ota
 done
 ```
 
@@ -456,7 +454,8 @@ hopping (each repeater relays on the next channel) is for.
 - **Async**: `block_on` + `embassy_futures::select`; the app sleeps until an event (packet, PTT, speaker, knob) or a 250 ms housekeeping tick
 - **LoRa driver**: `lora-phy` (lora-rs git main) with `GenericSx126xInterfaceVariant`; DIO2 drives the FEM's TX/RX path, GPIO5 its RX LNA
 - **Hardware-free app**: everything above the drivers is in `core/` behind small device traits, so it runs and is tested on a PC
-- **Storage**: LittleFS (`joltwallet/littlefs` component) mounted at `/data`, chosen over FAT for power-cut safety
+- **Storage**: LittleFS (`joltwallet/littlefs` component), chosen over FAT for power-cut safety: the flash partition at `/data` holds
+  the settings (`config.toml`, `secrets.toml`); the SD card at `/data/sd` everything else (logs, web app, updates)
 - **SPI async**: `CONFIG_SPI_MASTER_ISR_IN_IRAM` disabled in `sdkconfig.defaults`
 - **defmt workaround**: `defmt-discard.x` linker script discards defmt sections that break ESP-IDF flash layout
 - **Stack**: 65536 bytes for main task (Codec2 init needs large stack temporaries)

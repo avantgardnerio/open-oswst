@@ -4,7 +4,7 @@
 # DIR/bundle.tar.gz (core/src/bundle.rs):
 #
 #   firmware.bin   -> the radio's spare app slot
-#   www/...        -> the radio's storage, /data/www/...
+#   www/...        -> the radio's SD card, /data/sd/www/...
 #
 # Of www/node_modules (www/package.json), only the files index.html's
 # import map names go in: the radio serves them, so nothing needs the

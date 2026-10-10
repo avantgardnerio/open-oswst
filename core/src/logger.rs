@@ -1,10 +1,11 @@
 //! Logger behind the `log` macros: every line goes to the console straight
 //! away, and is also kept in a RAM buffer for a log file.
 //!
-//! Writing to flash stalls the chip for up to ~18ms, so this never writes on
-//! its own. Whoever owns the timing (the app) calls `flush_chunk()` when it's
-//! safe. If the buffer fills first, new lines are dropped and counted, and a
-//! marker records the gap in the file.
+//! Writing a file blocks the writer until the storage is done (an SD card:
+//! 30-85 ms at worst), so this never writes on its own. A writer of the
+//! firmware's choosing calls `flush_chunk()`: its own thread, so nothing
+//! else waits. If the buffer fills first, new lines are dropped and counted,
+//! and a marker records the gap in the file.
 //!
 //! The buffer's memory comes from the caller (`init`), so the firmware can
 //! put it in PSRAM, away from the internal heap.
@@ -16,7 +17,8 @@
 //! number (its first line says so). The oldest are deleted to keep at most
 //! MAX_FILES and the storage under MAX_USED_PERCENT full, and empty files
 //! (boots that never wrote a line) are dropped. A boot loop once left 300+
-//! files, and listing them ran the HTTP server out of memory.
+//! files, and listing them ran the HTTP server out of memory (WebDAV's
+//! listing streams them now).
 
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use std::fs::{self, File, OpenOptions};
@@ -34,14 +36,15 @@ const MAX_USED_PERCENT: usize = 60;
 /// (2026-10-04): 1MB keeps one in a single file. MAX_USED_PERCENT still
 /// caps the total (~6 files this size on the 10MB partition)
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
-/// Most log files kept
-const MAX_FILES: usize = 50;
+/// Most log files kept: weeks of walks. Was 50 on the 10MB flash; the SD
+/// card's MAX_USED_PERCENT is gigabytes
+const MAX_FILES: usize = 1000;
 
 /// Milliseconds since boot, for the line timestamps. Set by `init`
 static UPTIME_MS: OnceLock<fn() -> u32> = OnceLock::new();
 
 /// Where log files go, and the storage's (used, total) bytes: set at boot
-/// (`set_storage`) whether logging to flash is on or not, so it can be
+/// (`set_storage`) whether logging is on or not, so it can be
 /// switched on later
 static STORAGE: Mutex<Option<(PathBuf, Usage)>> = Mutex::new(None);
 
@@ -51,7 +54,7 @@ type Usage = fn() -> (usize, usize);
 /// Whether lines are kept for a file: from boot until it's decided (the
 /// settings load), then while one is being written. Off, a line goes to the
 /// serial port only, so nothing logged while logging is off ever reaches
-/// the flash, even if it's switched on later
+/// the file, even if it's switched on later
 static KEEPING: AtomicBool = AtomicBool::new(true);
 
 struct Logger {
@@ -135,7 +138,7 @@ pub fn start_file() -> std::io::Result<PathBuf> {
     Ok(log_path(&dir, number))
 }
 
-/// Stop writing to flash: log_to_flash off (at boot, or switched off). The
+/// Stop writing the file: log_to_flash off (at boot, or switched off). The
 /// file is closed, the lines waiting for it are dropped (they must never
 /// get there), and no more are kept until `start_file()`
 pub fn stop_file() {
@@ -158,8 +161,8 @@ pub fn pending() -> bool {
     buffer.lines.len > 0 || buffer.dropped > 0
 }
 
-/// Write up to one chunk of buffered lines to the file and sync it. Stalls
-/// the chip for up to ~18ms, so only call it when timing doesn't matter.
+/// Write up to one chunk of buffered lines to the file and sync it. Blocks
+/// until the storage is done, so only call it where waiting is harmless.
 /// Returns whether more is still waiting.
 pub fn flush_chunk() -> bool {
     let (chunk, dropped, more) = {
@@ -169,7 +172,7 @@ pub fn flush_chunk() -> bool {
         (chunk, dropped, buffer.lines.len > 0)
     };
 
-    // Buffer lock released: logging carries on while the flash write runs
+    // Buffer lock released: logging carries on while the write runs
     let mut file = LOGGER.file.lock().unwrap();
     if let Some(file) = file.as_mut() {
         if dropped > 0 {
@@ -482,14 +485,16 @@ mod tests {
     #[test]
     fn at_most_max_files_the_oldest_go() {
         let dir = test_dir("count");
-        for n in 1..=60 {
+        // Ten more than the most kept, then one new one
+        let newest = MAX_FILES as u32 + 11;
+        for n in 1..newest {
             fs::write(log_path(&dir, n), b"x\n").unwrap();
         }
-        LogFile::start(&dir, 61, plenty_of_space).unwrap();
+        LogFile::start(&dir, newest, plenty_of_space).unwrap();
         let numbers = sorted_numbers(&dir);
         assert_eq!(numbers.len(), MAX_FILES);
-        assert_eq!(*numbers.first().unwrap(), 61 - MAX_FILES as u32 + 1);
-        assert_eq!(*numbers.last().unwrap(), 61);
+        assert_eq!(*numbers.first().unwrap(), newest - MAX_FILES as u32 + 1);
+        assert_eq!(*numbers.last().unwrap(), newest);
         fs::remove_dir_all(&dir).unwrap();
     }
 
