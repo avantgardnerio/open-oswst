@@ -1,9 +1,12 @@
 //! Pin map for the next open-oswst PCB rev (#44: I2C knob, SD on 43/44/45) on a Heltec WiFi LoRa 32 V4.
 //! The one place pins are assigned — every app gets its peripherals from here.
 
-use esp_idf_svc::hal::gpio::{AnyIOPin, Output, PinDriver};
+use esp_idf_svc::hal::gpio::{AnyIOPin, Output, Pin, PinDriver};
 use esp_idf_svc::hal::modem::Modem;
 use esp_idf_svc::hal::peripherals::Peripherals;
+use esp_idf_svc::sys::{
+    gpio_mode_t_GPIO_MODE_OUTPUT, gpio_num_t, gpio_set_direction, gpio_set_level,
+};
 use std::thread;
 use std::time::Duration;
 
@@ -30,6 +33,21 @@ pub struct Board {
 /// service, and hand out each subsystem's pins.
 pub fn take() -> Board {
     let p = Peripherals::take().unwrap();
+
+    // Before Ve: it powers the speaker amp, which plays whatever its I2S
+    // lines pick up while they float (loud, ~0.8 s until speaker::init
+    // takes them). Held low, the amp has no clock and stays silent; the I2S
+    // driver takes the pins over from there
+    for pin in [
+        p.pins.gpio33.pin(),
+        p.pins.gpio47.pin(),
+        p.pins.gpio48.pin(),
+    ] {
+        unsafe {
+            gpio_set_direction(pin as gpio_num_t, gpio_mode_t_GPIO_MODE_OUTPUT);
+            gpio_set_level(pin as gpio_num_t, 0);
+        }
+    }
 
     // Vext power on (GPIO36 LOW)
     let mut vext = PinDriver::output(p.pins.gpio36).unwrap();
