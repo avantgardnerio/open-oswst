@@ -8,7 +8,7 @@
 4. DRC on the routed board: any violation (warnings too, unconnected items
    included) stops here, so nothing is plotted from a dirty board
 5. Gerbers (F/B copper, silkscreen, mask, and Edge.Cuts) and drill files
-   (PTH and NPTH apart) into out/fab/, checked, and zipped for upload
+   (PTH and NPTH apart) into out/, checked, and zipped there for upload
 6. the routed board opened in KiCad for a last look
 
 System Python on purpose: KiCad's `pcbnew` module is installed for it, not
@@ -18,7 +18,6 @@ so a dirty tree gets a warning (the board wouldn't say what it was made from).
 Usage: pcb/make.py [--no-open]
 """
 
-import shutil
 import subprocess
 import sys
 import zipfile
@@ -30,7 +29,8 @@ PCB = Path(__file__).resolve().parent
 NAME = "open-oswst"
 OUT = PCB / "out"
 ROUTE = OUT / "route"  # .dsn, .ses, the routed board, the DRC report
-FAB = OUT / "fab"      # only what JLCPCB gets
+# What JLCPCB gets: these files in out/, and the zip of them
+FAB_FILES = ("*.gbr", "*.gbrjob", "*.drl", "*.zip")
 
 FREEROUTING = (Path.home() / ".local/share/kicad/9.0/3rdparty/plugins"
                / "app_freerouting_kicad-plugin/jar/freerouting-2.4.1.jar")
@@ -85,17 +85,18 @@ def main():
         fail(f"DRC not clean: {report}")
 
     print("5. Gerbers and drill files")
-    if FAB.exists():
-        shutil.rmtree(FAB)
-    FAB.mkdir(parents=True)
+    # Last run's files go first, so nothing stale gets zipped or uploaded
+    for pattern in FAB_FILES:
+        for old in OUT.glob(pattern):
+            old.unlink()
     run(["kicad-cli", "pcb", "export", "gerbers", "--no-protel-ext",
-         "--layers", ",".join(GERBER_LAYERS), "--output", f"{FAB}/", str(routed)])
+         "--layers", ",".join(GERBER_LAYERS), "--output", f"{OUT}/", str(routed)])
     run(["kicad-cli", "pcb", "export", "drill", "--format", "excellon",
-         "--excellon-separate-th", "--output", f"{FAB}/", str(routed)])
-    check_fab()
+         "--excellon-separate-th", "--output", f"{OUT}/", str(routed)])
+    fab = check_fab()
     archive = OUT / f"{NAME}-{commit}.zip"
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipped:
-        for path in sorted(FAB.iterdir()):
+        for path in fab:
             zipped.write(path, path.name)
     print(f"   {archive} ({archive.stat().st_size // 1024} KB): upload this")
 
@@ -120,8 +121,9 @@ def git_commit():
 
 def check_fab():
     """Every layer has its Gerber, and both drill files are there; the hole
-    counts are printed for comparing with the board"""
-    names = {path.name for path in FAB.iterdir()}
+    counts are printed for comparing with the board. Returns the files"""
+    fab = sorted(path for pattern in FAB_FILES[:-1] for path in OUT.glob(pattern))
+    names = {path.name for path in fab}
     for layer in GERBER_LAYERS:
         gerber = f"{NAME}-{layer.replace('.', '_')}.gbr"
         if gerber not in names:
@@ -129,12 +131,13 @@ def check_fab():
     for drill in (f"{NAME}-PTH.drl", f"{NAME}-NPTH.drl"):
         if drill not in names:
             fail(f"No drill file {drill}")
-    plated = hits(FAB / f"{NAME}-PTH.drl")
-    unplated = hits(FAB / f"{NAME}-NPTH.drl")
+    plated = hits(OUT / f"{NAME}-PTH.drl")
+    unplated = hits(OUT / f"{NAME}-NPTH.drl")
     if unplated != NPTH_HOLES:
         fail(f"{unplated} unplated holes, expected {NPTH_HOLES} (the mounting holes)")
     print(f"   {len(names)} files, {plated} plated holes (pads and vias),"
           f" {unplated} unplated")
+    return fab
 
 
 def hits(drill_file):
