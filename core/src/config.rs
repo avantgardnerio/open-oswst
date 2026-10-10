@@ -135,18 +135,13 @@ pub static SWEEP: Setting = Setting::bool("sweep", false);
 /// CONVEYOR line counts them: "garbled on the belt"). Off: dropped, as now
 pub static PLAY_GARBLED: Setting = Setting::bool("play_garbled", false).live();
 
-/// Keep a log file on the flash (/data/log, one per boot). Off: nothing is
-/// flushed, so logging never writes the flash at all; lines still go to the
-/// serial console. A flash write stalls both cores for up to ~18 ms (the
-/// radio task included), which is why the app only flushes once the air has
-/// been quiet a while.
+/// Keep a log file on the SD card (/data/sd/log, one per boot). Off: lines
+/// go to the serial console only, and none ever reach the card. (Named for
+/// when logs went to the flash, whose writes stall the chip; the card's
+/// don't, so repeaters log too.) No card: no log, whatever this says.
 ///
 /// In the menu (Privacy). Off takes effect at once: nothing more reaches the
-/// file. The file itself is opened at boot, so on, after booting with it
-/// off, starts a file at the next boot. Was tied to the role until
-/// 2026-10-06 (a repeater never flushed, every other radio did); now it's
-/// this flag's to say, so (WARNING) a repeater needs `log_to_flash = false`
-/// in its file to keep not logging
+/// file. On starts a file at once
 pub static LOG_TO_FLASH: Setting = Setting::bool("log_to_flash", true).live();
 
 /// Log every packet's bytes as hex, CRC included: "PKT TX" for each one

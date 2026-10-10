@@ -1,6 +1,6 @@
 // The radio's web page, from the radio's own HTTP API (src/http.rs).
-// Served by the radio itself over WebDAV, from /fs/www/, so every request
-// here goes back to the same radio.
+// Served by the radio itself over WebDAV, from /fs/sd/www/ (its SD card),
+// so every request here goes back to the same radio.
 //
 //   components/  the parts of a page (App is the whole page)
 //   pages/       one per link in the nav

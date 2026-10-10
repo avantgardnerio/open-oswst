@@ -1,5 +1,6 @@
 //! WebDAV (RFC 4918, class 1) over the radio's storage: everything under
-//! /data (config.toml, the logs, anything put there) is a folder at /fs/.
+//! /data is a folder at /fs/: config.toml on the flash, and the SD card at
+//! sd/ (devices/sd.rs: the logs, the web app, anything put there).
 //! Any client works: a file manager at dav://oswst-XXXX.local/fs/, gio,
 //! davfs2, rclone, curl.
 //!
@@ -13,10 +14,12 @@
 //!   MOVE      rename (some clients save by uploading under a temporary name)
 //!   OPTIONS   says the above
 //!
-//! Two rules on top: a write that lands on config.toml must pass the settings
-//! check, or it's refused and the old file stays; and secrets.toml
+//! Rules on top: a write that lands on config.toml must pass the settings
+//! check, or it's refused and the old file stays; secrets.toml
 //! (devices/secrets.rs) isn't here at all: left out of listings, and no
 //! method reaches it (local_path). /api/management (http.rs) is its way in.
+//! With no card, sd/ isn't here either, so nothing meant for the card can
+//! land on the flash; neither it nor /fs/ itself can be deleted or moved.
 //!
 //! No LOCK: Linux clients don't need it, but Finder and Windows Explorer may
 //! refuse to write. Modification dates are listed only when they're real:
@@ -34,7 +37,7 @@ use esp_idf_svc::sys::EspError;
 
 use open_oswst_core::utc;
 
-use crate::devices::{secrets, settings, storage};
+use crate::devices::{sd, secrets, settings, storage};
 
 type Req<'a, 'r> = Request<&'a mut EspHttpConnection<'r>>;
 type Result<T = ()> = std::result::Result<T, anyhow::Error>;
@@ -91,6 +94,13 @@ fn propfind(req: Req) -> Result {
             }
             if let Ok(meta) = item.metadata() {
                 response.write_all(entry(&item.path(), &meta).as_bytes())?;
+            }
+        }
+        // The card is mounted inside /data, but the flash's own listing of
+        // /data doesn't know it's there
+        if path == Path::new(storage::ROOT) && sd::mounted() {
+            if let Ok(meta) = fs::metadata(sd::ROOT) {
+                response.write_all(entry(Path::new(sd::ROOT), &meta).as_bytes())?;
             }
         }
     }
@@ -172,8 +182,8 @@ fn delete(req: Req) -> Result {
     let Some(path) = local_path(req.uri()) else {
         return reply(req, 400, "bad path");
     };
-    if path == Path::new(storage::ROOT) {
-        return reply(req, 403, "not the whole storage");
+    if is_mount_point(&path) {
+        return reply(req, 403, "not a whole storage");
     }
     let removed = if path.is_dir() {
         fs::remove_dir_all(&path)
@@ -217,8 +227,8 @@ fn move_to(req: Req) -> Result {
         return reply(req, 404, "not found");
     }
     // The secrets would go with it, and be reachable at the new name
-    if from == Path::new(storage::ROOT) {
-        return reply(req, 403, "not the whole storage");
+    if is_mount_point(&from) {
+        return reply(req, 403, "not a whole storage");
     }
     let existed = to.exists();
     if existed && req.header("Overwrite") == Some("F") {
@@ -290,8 +300,9 @@ fn last_modified(meta: &fs::Metadata) -> String {
 }
 
 /// The file or folder a URL path names, under storage::ROOT. None if it isn't
-/// under PREFIX, isn't valid once decoded, tries to climb out with `..`, or
-/// is a secret: every method finds its path here, a MOVE's destination too
+/// under PREFIX, isn't valid once decoded, tries to climb out with `..`, is
+/// on a card that isn't there, or is a secret: every method finds its path
+/// here, a MOVE's destination too
 fn local_path(uri: &str) -> Option<PathBuf> {
     let path = uri.split('?').next()?;
     let rest = path.strip_prefix(PREFIX)?;
@@ -306,7 +317,15 @@ fn local_path(uri: &str) -> Option<PathBuf> {
         }
         local.push(segment);
     }
+    if local.starts_with(sd::ROOT) && !sd::mounted() {
+        return None;
+    }
     (!secrets::is_secret(&local)).then_some(local)
+}
+
+/// /data or /data/sd: deleting or moving one would take a whole storage
+fn is_mount_point(path: &Path) -> bool {
+    path == Path::new(storage::ROOT) || path == Path::new(sd::ROOT)
 }
 
 /// The URL path for a local path: PREFIX, then each part percent-encoded,

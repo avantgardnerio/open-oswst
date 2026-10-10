@@ -83,3 +83,7 @@ CONFIG_SPIRAM_IGNORE_NOTFOUND=y
 # clock running, the card ignores them
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# LittleFS on the SD card too (devices/sd.rs), not just the flash partition:
+# it survives a power cut mid-write, which FAT doesn't
+CONFIG_LITTLEFS_SDMMC_SUPPORT=y

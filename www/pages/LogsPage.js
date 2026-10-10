@@ -1,5 +1,5 @@
-// The radio's log files (/data/log, one per boot: core/src/logger.rs),
-// newest first, each a link that saves it. The newest may still be growing:
+// The radio's log files (/data/sd/log on its SD card, one per boot:
+// core/src/logger.rs), newest first, each a link that saves it. The newest may still be growing:
 // a download is the file as it is at that moment
 
 import { html } from "htm/preact";
@@ -7,7 +7,7 @@ import { useState, useEffect } from "preact/hooks";
 import { listFiles } from "../lib/api.js";
 import { fileSize, dateTime } from "../lib/format.js";
 
-const LOG_FOLDER = "/fs/log/";
+const LOG_FOLDER = "/fs/sd/log/";
 
 export function LogsPage() {
   const [files, setFiles] = useState(null);

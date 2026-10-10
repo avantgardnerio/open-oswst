@@ -7,7 +7,7 @@ use esp_idf_svc::hal::peripherals::Peripherals;
 use std::thread;
 use std::time::Duration;
 
-use crate::devices::{battery, fem, gps, irq_pin, mic, radio, screen, speaker, twist};
+use crate::devices::{battery, fem, gps, irq_pin, mic, radio, screen, sd, speaker, twist};
 
 pub struct Board {
     pub fem: fem::Peripherals,
@@ -18,6 +18,7 @@ pub struct Board {
     pub mic: mic::Peripherals,
     pub battery: battery::Peripherals,
     pub vol: twist::Peripherals,
+    pub sd: sd::Peripherals,
     pub ptt: AnyIOPin<'static>,
     /// WiFi (net.rs)
     pub modem: Modem<'static>,
@@ -91,6 +92,15 @@ pub fn take() -> Board {
             i2c: p.i2c1,
             sda: p.pins.gpio3.into(),
             scl: p.pins.gpio6.into(),
+        },
+        // The SD card in 1-bit mode (#44). CLK on GPIO45 because it needs
+        // no pull-up (a strapping pin); CMD and D0 on UART0's pins, free
+        // since the console is USB only
+        sd: sd::Peripherals {
+            sdmmc: p.sdmmc1,
+            clk: p.pins.gpio45.into(),
+            cmd: p.pins.gpio43.into(),
+            d0: p.pins.gpio44.into(),
         },
         ptt: p.pins.gpio0.into(),
         modem: p.modem,

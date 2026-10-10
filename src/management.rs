@@ -27,7 +27,7 @@ use open_oswst_core::management::{
 use open_oswst_core::tar::TarReader;
 use snow::types::Hash as _;
 
-use crate::devices::{secrets, storage};
+use crate::devices::{sd, secrets};
 use crate::firmware;
 use crate::inflate::RomInflate;
 use crate::noise::{self, MbedtlsResolver};
@@ -110,11 +110,12 @@ pub fn install_state() -> Option<String> {
     LAST_INSTALL.lock().unwrap().clone()
 }
 
-/// Where a bundle is downloaded to, and extracted from (deleted after)
-const DOWNLOAD: &str = "/data/update.tar.gz";
+/// Where a bundle is downloaded to, and extracted from (deleted after): the
+/// SD card, whose writes don't stall the radio (devices/sd.rs)
+const DOWNLOAD: &str = "/data/sd/update.tar.gz";
 /// The SHA-256 of the bundle installed last, as hex: CheckBundle tells it
-/// to the server
-const INSTALLED: &str = "/data/bundle.sha256";
+/// to the server. On the card with the files it put there
+const INSTALLED: &str = "/data/sd/bundle.sha256";
 /// Free storage left over after a download, for the logs meanwhile
 const ROOM_TO_SPARE: usize = 64 * 1024;
 /// Files are read and written this much at a time
@@ -122,10 +123,10 @@ const COPY: usize = 4096;
 
 /// Install the bundle `offer` (core's bundle.rs) in three steps, telling
 /// `progress` each new percent of each:
-/// 1. download it to the storage, from the management server
+/// 1. download it to the SD card, from the management server
 /// 2. verify its SHA-256 against the offer's
 /// 3. extract it: the firmware into the spare app slot, marked to boot
-///    only once every file is written; the files onto the storage
+///    only once every file is written; the files onto the card
 ///
 /// Ok: the caller reboots. Err: the running firmware stays (the spare
 /// slot's image is never marked to boot), but files already extracted stay
@@ -185,7 +186,10 @@ impl Steps<'_> {
 
 /// Step 1: the bundle, a chunk at a time, into DOWNLOAD
 fn download(offer: &Offer, steps: &mut Steps, cancel: &AtomicBool) -> Result<(), String> {
-    let (used, total) = storage::usage();
+    if !sd::mounted() {
+        return Err("No SD card".into());
+    }
+    let (used, total) = sd::usage();
     if total.saturating_sub(used) < offer.size as usize + ROOM_TO_SPARE {
         return Err("No room: delete logs".into());
     }
@@ -284,7 +288,7 @@ fn extract(offer: &Offer, steps: &mut Steps, cancel: &AtomicBool) -> Result<(), 
             })?;
             firmware = Some(update);
         } else if let Some(path) = bundle::extract_to(&entry.path) {
-            write_file(&Path::new(storage::ROOT).join(path), &mut tar)?;
+            write_file(&Path::new(sd::ROOT).join(path), &mut tar)?;
             log::info!("Update: wrote {} ({} B)", path, entry.size);
         } else {
             log::warn!("Update: left {} alone", entry.path);
