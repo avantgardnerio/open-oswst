@@ -7,8 +7,8 @@
 //! Bob          1.35km W     the last transmission heard to its end: who,
 //! -87dBm +13dB 1 hop          how far, how strong, through how many
 //! 14:11    192.168.0.240      repeaters, and when; then WiFi (devices::network)
-//! V7 RX 14:11     3.91V     volume, what we're doing, the time, battery
-//!                           (with the mode first if not normal: RPT 3.9V)
+//! V7 RX 14:11       50%     volume, what we're doing, the time, battery
+//!                           (with the mode first if not normal: RPT 50%)
 //! ```
 //!
 //! Every field has a fixed widest form that fits: nothing comes and goes
@@ -16,6 +16,7 @@
 
 use core::fmt::Write as _;
 
+use crate::devices::battery;
 use crate::devices::gps::{bearing_deg, compass_point, distance_m};
 use crate::mode::Mode;
 use crate::packet::Ident;
@@ -141,17 +142,18 @@ pub fn status(
         Some((h, m)) => write!(left, " {:02}:{:02}", h, m),
         None => write!(left, " --:--"),
     };
-    // The battery in volts: a LiPo's percent under load is a guess. Normal
-    // mode isn't shown, so the volts get two decimals; another mode is worth
-    // seeing at a glance, and takes one of them
+    // The battery's charge in 10 % steps: finer would only show the ADC's
+    // noise (battery::percent). Normal mode isn't shown; another mode is
+    // worth seeing at a glance
     let mut right = Row::new();
-    let _ = match (mode, battery_mv) {
-        (Mode::Normal, Some(mv)) => write!(right, "{}.{:02}V", mv / 1000, mv % 1000 / 10),
-        (Mode::Normal, None) => write!(right, "-.--V"),
-        (Mode::Repeater, Some(mv)) => write!(right, "RPT {}.{}V", mv / 1000, mv % 1000 / 100),
-        (Mode::Repeater, None) => write!(right, "RPT -.-V"),
-        (Mode::Echo, Some(mv)) => write!(right, "ECH {}.{}V", mv / 1000, mv % 1000 / 100),
-        (Mode::Echo, None) => write!(right, "ECH -.-V"),
+    let _ = match mode {
+        Mode::Normal => Ok(()),
+        Mode::Repeater => write!(right, "RPT "),
+        Mode::Echo => write!(right, "ECH "),
+    };
+    let _ = match battery_mv {
+        Some(mv) => write!(right, "{}%", (battery::percent(mv) + 5) / 10 * 10),
+        None => write!(right, "--%"),
     };
     spread(&left, &right)
 }
@@ -190,11 +192,11 @@ mod tests {
                 Mode::Normal,
                 Some(3_912)
             ),
-            "V7 RX 14:11     3.91V"
+            "V7 RX 14:11       50%" // 48 %, in 10 % steps
         );
         assert_eq!(
             status(7, false, Activity::Idle, Some((14, 11)), Mode::Normal, None),
-            "V7    14:11     -.--V"
+            "V7    14:11       --%"
         );
         assert_eq!(
             status(
@@ -205,7 +207,7 @@ mod tests {
                 Mode::Repeater,
                 Some(4_187)
             ),
-            "V7*RP --:--  RPT 4.1V"
+            "V7*RP --:--   RPT 90%"
         );
         assert_eq!(
             status(
@@ -214,9 +216,9 @@ mod tests {
                 Activity::Repeating,
                 Some((9, 5)),
                 Mode::Echo,
-                Some(3_650)
+                Some(4_255)
             ),
-            "V10 RP 09:05 ECH 3.6V" // the widest
+            "V10 RP 09:05 ECH 100%" // the widest
         );
         for row in [
             us("x", "y"),
