@@ -1,4 +1,4 @@
-use crate::devices::battery::Battery;
+use crate::devices::battery::{self, Battery};
 use crate::devices::gps::{Fix, Gps};
 use crate::devices::knob::{Event as Knob, Knob as _};
 use crate::devices::management::{self, Installing, Job};
@@ -148,7 +148,7 @@ pub async fn init<P: Platform>(
             shown_screen: Snapshot::default(),
             battery_mv: None,
             battery_read_at: None,
-            shown_battery_cv: None,
+            shown_battery: None,
         },
         rx: Receiving {
             playout: Playout::default(),
@@ -210,7 +210,7 @@ struct Display {
     shown_screen: Snapshot,             // the radio screen last drawn: what a screenshot saves
     battery_mv: Option<u32>,            // the last battery reading
     battery_read_at: Option<Instant>,   // when; None until the first
-    shown_battery_cv: Option<u32>,      // what the screen shows, in hundredths of a volt
+    shown_battery: Option<u8>,          // the charge the screen shows, %
 }
 
 /// The transmission we're hearing
@@ -358,7 +358,7 @@ impl<P: Platform> App<P> {
             && (self.devices.gps.latest() != self.display.shown_fix
                 || P::network() != self.display.shown_network
                 || utc::now_hm() != self.display.shown_time
-                || self.display.battery_mv.map(|mv| mv / 10) != self.display.shown_battery_cv)
+                || self.display.battery_mv.map(battery::percent) != self.display.shown_battery)
         {
             self.draw_screen(Activity::Idle);
         }
@@ -1494,7 +1494,7 @@ impl<P: Platform> App<P> {
         self.display.shown_network = network;
         self.display.shown_time = utc::now_hm();
         self.display.shown_activity = activity;
-        self.display.shown_battery_cv = self.display.battery_mv.map(|mv| mv / 10);
+        self.display.shown_battery = self.display.battery_mv.map(battery::percent);
     }
 
     fn draw_menu(&self, menu: &Menu) {
