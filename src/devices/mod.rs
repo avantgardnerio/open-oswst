@@ -11,6 +11,7 @@ pub mod radio_bus;
 pub mod screen;
 pub mod sd;
 pub mod secrets;
+pub mod seesaw;
 pub mod settings;
 pub mod speaker;
 pub mod storage;
