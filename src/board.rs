@@ -10,7 +10,7 @@ use esp_idf_svc::sys::{
 use std::thread;
 use std::time::Duration;
 
-use crate::devices::{battery, fem, gps, irq_pin, mic, radio, screen, sd, speaker, twist};
+use crate::devices::{battery, fem, gps, irq_pin, mic, radio, screen, sd, seesaw, speaker};
 
 pub struct Board {
     pub fem: fem::Peripherals,
@@ -20,7 +20,7 @@ pub struct Board {
     pub screen: screen::Peripherals,
     pub mic: mic::Peripherals,
     pub battery: battery::Peripherals,
-    pub vol: twist::Peripherals,
+    pub vol: seesaw::Peripherals,
     pub sd: sd::Peripherals,
     pub ptt: AnyIOPin<'static>,
     /// WiFi (net.rs)
@@ -106,7 +106,7 @@ pub fn take() -> Board {
         },
         // The next rev's knob bus (#44): the wired encoder's A/B pins, now
         // I2C1 (I2C0 is the OLED's). Its SW pin, GPIO45, goes to the SD card
-        vol: twist::Peripherals {
+        vol: seesaw::Peripherals {
             i2c: p.i2c1,
             sda: p.pins.gpio3.into(),
             scl: p.pins.gpio6.into(),
