@@ -4,7 +4,7 @@
 //! replaces; knows nothing about what they mean.
 //!
 //! Polled, not interrupt-driven: the pin its INT line would need went to the
-//! SD card. A thread reads the knob every POLL and queues what changed, so
+//! SD card. A thread reads the knob every 20 ms and queues what changed, so
 //! the I2C reads never block the app; `next()` just waits on the queue.
 //!
 //! Each poll reads two registers:
@@ -12,10 +12,14 @@
 //!   Turns are the difference from the last poll, so none are lost between a
 //!   read and a clear.
 //! - GPIO BULK: the switch on seesaw pin 24, low while pressed (its pull-up
-//!   is switched on at start). Polling every POLL filters most bounce.
+//!   is switched on at start). Polling every 20 ms filters most bounce.
 //!
 //! seesaw reads are a write of [module, register], a pause while the ATtiny
-//! fetches the value, then a read: not a repeated-start write_read.
+//! fetches the value, then a read: not a repeated-start write_read. The two
+//! pauses are the poll interval: each is one FreeRTOS tick (10 ms), the
+//! shortest sleep that really sleeps. Under a tick, ESP-IDF's usleep (so
+//! thread::sleep) spins the CPU instead (newlib/time.c): 1 ms pauses here
+//! cost ~7% of core 0.
 //!
 //! Register map: docs/Adafruit_seesaw/Adafruit_seesaw.h (values big-endian);
 //! docs/Adafruit_seesaw/encoder_basic.ino is Adafruit's own use of it.
@@ -47,11 +51,11 @@ const POSITION: u8 = 0x30;
 /// The knob's switch: seesaw pin 24, as a bit of the 32-bit GPIO registers
 const SWITCH: u32 = 1 << 24;
 
-/// The ATtiny needs this between the register write and the read
-/// (Adafruit_seesaw.h's default read delay is 250 us)
-const READ_DELAY: Duration = Duration::from_millis(1);
-/// Fast enough that a quick click (~100 ms down) is always seen pressed
-const POLL: Duration = Duration::from_millis(20);
+/// Between the register write and the read: the ATtiny needs 250 us
+/// (Adafruit_seesaw.h's default read delay); one tick is the shortest real
+/// sleep. Two per poll: a poll every 20 ms, fast enough that a quick click
+/// (~100 ms down) is always seen pressed
+const READ_DELAY: Duration = Duration::from_millis(10);
 /// After a failed read: the knob unplugged, or not powered yet
 const RETRY: Duration = Duration::from_secs(1);
 /// 400 kHz: a poll's two reads take ~0.4 ms of the bus
@@ -127,7 +131,6 @@ fn run(mut bus: I2cDriver<'static>) {
             }
         }
         last = Some((position, pressed));
-        thread::sleep(POLL);
     }
 }
 
