@@ -7,6 +7,11 @@ from kicad import Board
 board = Board()
 git_sha = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
 
+# Board revision: one per fab order, counting every JLCPCB order so far (A/B
+# tests included), so it only ever goes up. Bump it when work on the next
+# order starts, before anything else changes
+REV = 9
+
 # 70x50mm landscape, centered on A4 (297x210mm)
 BX, BY = 113, 113  # board origin
 BW, BH = 70, 50    # board size
@@ -107,8 +112,8 @@ board.add_header(AMP_X, AMP_Y, pins=7, label="AMP", angle=180,
 board.add_header(AMP_X, AMP_Y - 12.954, pins=2, label="AMP_SPK", angle=180,
                  pitch=3.5, pad_labels=["+", "-"], pad_nets=["SPK+", "SPK-"])
 
-# Silkscreen — project name and git SHA
-board.add_text(BX + BW / 2, BY + BH - 2, f"open-oswst  {git_sha}", size=0.8, thickness=0.12)
+# Silkscreen — project name, revision and git SHA
+board.add_text(BX + BW / 2, BY + BH - 2, f"open-oswst  rev{REV}  {git_sha}", size=0.8, thickness=0.12)
 
 # Ground plane — GND zone covering full board, both copper layers
 board.add_zone("GND", [

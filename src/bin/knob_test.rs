@@ -1,7 +1,7 @@
 //! Knob bringup: a SparkFun Qwiic Twist on the I2C bus that replaces the VOL
 //! encoder's A/B/SW wires (#44). Logs every turn and click.
 //!
-//! Wiring (the next rev's knob bus; the Twist's own 2.2k pull-ups, none added):
+//! Wiring (rev 9's knob bus; the Twist's own 2.2k pull-ups, none added):
 //! - GND  -> J2-1
 //! - 3.3V -> J2-3/4 (Ve, switched on below)
 //! - SDA  -> GPIO3 (J3-14)
