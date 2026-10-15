@@ -1,4 +1,4 @@
-//! The volume knob on the next rev: a SparkFun Qwiic Twist on its own I2C
+//! The volume knob on rev 9: a SparkFun Qwiic Twist on its own I2C
 //! bus (#44). Hands out turn, press and release events, like the wired
 //! encoder (encoder.rs) it replaces; knows nothing about what they mean.
 //!

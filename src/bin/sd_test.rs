@@ -1,4 +1,4 @@
-//! microSD bringup: an SD/TF breakout in SDMMC 1-bit mode, on the next rev's
+//! microSD bringup: an SD/TF breakout in SDMMC 1-bit mode, on rev 9's
 //! pins (#44).
 //!
 //! Wiring (pin 1 = GND at the USB-C end):

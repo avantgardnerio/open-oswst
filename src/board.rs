@@ -1,4 +1,4 @@
-//! Pin map for the next open-oswst PCB rev (#44: I2C knob, SD on 43/44/45) on a Heltec WiFi LoRa 32 V4.
+//! Pin map for open-oswst PCB rev 9 (#44: I2C knob, SD on 43/44/45) on a Heltec WiFi LoRa 32 V4.
 //! The one place pins are assigned — every app gets its peripherals from here.
 
 use esp_idf_svc::hal::gpio::{AnyIOPin, Output, Pin, PinDriver};
@@ -104,7 +104,7 @@ pub fn take() -> Board {
             pin: p.pins.gpio1,
             enable: p.pins.gpio37.into(), // ADC_CTRL
         },
-        // The next rev's knob bus (#44): the wired encoder's A/B pins, now
+        // Rev 9's knob bus (#44): the wired encoder's A/B pins, now
         // I2C1 (I2C0 is the OLED's). Its SW pin, GPIO45, goes to the SD card
         vol: seesaw::Peripherals {
             i2c: p.i2c1,

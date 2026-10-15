@@ -1,4 +1,4 @@
-//! The volume knob on the next rev: an Adafruit I2C QT Rotary Encoder (an
+//! The volume knob on rev 9: an Adafruit I2C QT Rotary Encoder (an
 //! ATtiny running Adafruit's seesaw firmware) on its own I2C bus. Hands out
 //! turn, press and release events, like the wired encoder (encoder.rs) it
 //! replaces; knows nothing about what they mean.
