@@ -1,0 +1,52 @@
+# Genmitsu 3018-PROVer V2 factory GRBL settings, read 2026-10-15 (backup before any change)
+[VER:ARM32 V3.2.20250319:]
+[OPT:VZL,35,254]
+ok
+$0=10 (step pulse,usec)
+$1=25 (step idle delay,msec)
+$2=0 (stepport invert mask)
+$3=2 (dirport invert mask)
+$4=0 (stepenable invert,bool)
+$5=1 (lims pin invert,bool)
+$6=1 (probe pin invert,bool)
+$10=1 (status report mask)
+$11=0.010 (junction deviation)
+$12=0.002 (arc tolerance,mm)
+$13=0 (report inches,bool)
+$20=0 (soft limits,bool)
+$21=1 (hard limits,bool)
+$22=1 (home cycle,bool)
+$23=3 (homing dir invert mask)
+$24=100.000 (homing feed,mm/min)
+$25=500.000 (homing seek,mm/min)
+$26=250 (homing debounce,msec)
+$27=2.000 (homing pull-off,mm)
+$30=10000 (maximum spindle speed,rpm)
+$31=0 (minimum spindle speed,rpm)
+$32=0 (laser mode enable,bool)
+$100=800.000 (x axis pulse:step/mm)
+$101=800.000 (y axis pulse:step/mm)
+$102=800.000 (z axis pulse:step/mm)
+$110=2000.000 (x axis max rata:mm/min)
+$111=2000.000 (y axis max rata:mm/min)
+$112=2000.000 (z axis max rata:mm/min)
+$120=50.000 (x axis acceleration:mm/s^2)
+$121=50.000 (y axis acceleration:mm/s^2)
+$122=50.000 (z axis acceleration:mm/s^2)
+$130=300.000 (x aixs max travel:mm)
+$131=200.000 (y aixs max travel:mm)
+$132=80.000 (z aixs max travel:mm)
+ok
+[G54:0.000,0.000,0.000]
+[G55:0.000,0.000,0.000]
+[G56:0.000,0.000,0.000]
+[G57:0.000,0.000,0.000]
+[G58:0.000,0.000,0.000]
+[G59:0.000,0.000,0.000]
+[G28:0.000,0.000,0.000]
+[G30:0.000,0.000,0.000]
+[G92:0.000,0.000,0.000]
+[TLO:0.000]
+[PRB:0.000,0.000,0.000:0]
+ok
+
