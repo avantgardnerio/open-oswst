@@ -10,12 +10,14 @@ needs LinuxCNC/Mach variables GRBL doesn't have. So we probe a grid with the
 bit itself (G38.2: the bit closes the probe circuit when it touches the
 copper) and add the measured height to every Z before sending the job.
 
-Setup: probe clip on the bit, probe lead on the copper blank.
+Setup: probe clip on the bit; the probe puck lies metal face down on the
+copper, so the whole copper sheet is the probe plate (thickness 0).
 
     cnc.py status
     cnc.py home
     cnc.py jog DX DY [DZ]          move by mm, e.g. to above the blank's corner
-    cnc.py zero                    here is work X0 Y0; probe down: copper = Z0
+    cnc.py zero                    tap test, then here is work X0 Y0; probe down
+                                   (from up to 45 mm): copper = Z0
     cnc.py probe W H map.json      probe a W x H mm grid from the origin
     cnc.py run job.nc map.json     stream the job, Z bent by the height map
 
@@ -43,7 +45,14 @@ SAFE_Z = 3.0  # mm above the copper for travel to and from the job
 PROBE_CLEARANCE = 1.0  # mm above the copper between grid points
 PROBE_DEPTH = -1.5  # mm: the deepest a grid probe looks before GRBL alarms
 PROBE_FEED = 50  # mm/min: slow, so the bit stops before it digs in
-ZERO_SEARCH = 15.0  # mm: how far `zero` probes down looking for the copper
+# `zero` finds the copper in two touches: a fast search down most of the Z
+# travel (the bit may start 30+ mm up), then back off and touch again slowly,
+# because the fast touch overshoots a little before GRBL stops
+ZERO_SEARCH = 45.0  # mm
+ZERO_FAST_FEED = 150  # mm/min
+ZERO_SLOW_FEED = 20  # mm/min
+ZERO_BACK_OFF = 1.0  # mm
+TAP_WAIT = 60  # s for the user to tap the puck on the bit before `zero` moves
 JOG_FEED = 600  # mm/min
 SEGMENT = 1.0  # mm: cuts are split so Z can follow the map between points
 
@@ -132,9 +141,9 @@ def work_position(grbl):
     return [machine - origin for machine, origin in zip(report["mpos"], offset)]
 
 
-def probe_down(grbl, depth):
+def probe_down(grbl, depth, feed=PROBE_FEED):
     """G38.2 down to `depth` (work Z, absolute); the work Z where it touched"""
-    extras = grbl.send(f"G90 G38.2 Z{depth:.3f} F{PROBE_FEED}", timeout=120)
+    extras = grbl.send(f"G90 G38.2 Z{depth:.3f} F{feed}", timeout=120)
     for line in extras:
         if line.startswith("[PRB:"):
             machine = [float(part) for part in line[5:].split(":")[0].split(",")]
@@ -169,14 +178,39 @@ def cmd_jog(grbl, args):
     print("work position:", [round(value, 3) for value in work_position(grbl)])
 
 
+def wait_for_tap(grbl):
+    """Prove the probe circuit works before driving the bit down: a fallen-off
+    clip would never close it, and the search would plunge the bit into the
+    board. The user taps the puck on the bit: closed, then open again"""
+    require_probe_open(grbl)
+    print(f"tap the puck against the bit (clip on the bit), within {TAP_WAIT} s ...", flush=True)
+    end = time.time() + TAP_WAIT
+    seen_closed = False
+    while time.time() < end:
+        closed = "P" in grbl.status()["pins"]
+        if closed and not seen_closed:
+            print("  probe closed", flush=True)
+            seen_closed = True
+        if seen_closed and not closed:
+            print("  probe open again: the circuit works")
+            return
+        time.sleep(0.05)
+    sys.exit("no tap seen: check the clip and the puck's plug, then run zero again")
+
+
 def cmd_zero(grbl, args):
+    wait_for_tap(grbl)
+    print("now lay the puck metal face down on the copper, clear of the job area; starting in 10 s", flush=True)
+    time.sleep(10)
     require_probe_open(grbl)
     grbl.send("G10 L20 P1 X0 Y0")
     # Search down from wherever we are: Z0 here isn't known yet, so relative
-    grbl.send(f"G91 G38.2 Z-{ZERO_SEARCH} F{PROBE_FEED}", timeout=120)
+    grbl.send(f"G91 G38.2 Z-{ZERO_SEARCH} F{ZERO_FAST_FEED}", timeout=120)
+    grbl.send(f"G0 Z{ZERO_BACK_OFF}")
+    grbl.send(f"G38.2 Z-{ZERO_BACK_OFF * 2} F{ZERO_SLOW_FEED}", timeout=60)
     grbl.send("G10 L20 P1 Z0")
     grbl.send(f"G90 G0 Z{SAFE_Z}")
-    print("work origin set: X0 Y0 here, Z0 on the copper")
+    print(f"work origin set: X0 Y0 here, Z0 on the copper; bit parked {SAFE_Z} mm above")
 
 
 def cmd_probe(grbl, args):
@@ -194,7 +228,9 @@ def cmd_probe(grbl, args):
         order = range(columns) if row % 2 == 0 else reversed(range(columns))
         for column in order:
             grbl.send(f"G0 X{grid_x[column]:.3f} Y{y_mm:.3f}")
-            heights[row][column] = probe_down(grbl, PROBE_DEPTH)
+            heights[row][column] = probe_down(grbl, PROBE_DEPTH, args.feed)
+            # Each point as it comes: a failing point shows a trend first
+            print(f"  ({grid_x[column]:5.1f}, {y_mm:5.1f}) {heights[row][column]:+.3f}", flush=True)
             grbl.send(f"G0 Z{PROBE_CLEARANCE}")
     grbl.send(f"G0 Z{SAFE_Z}")
 
@@ -330,6 +366,9 @@ def main():
     probe.add_argument("height", type=float)
     probe.add_argument("map")
     probe.add_argument("--step", type=float, default=10.0)
+    # Slower for a V-bit's fragile tip: 10 mm/min touched without harm all day
+    # 2026-10-16; 50 snapped one on unscrubbed copper
+    probe.add_argument("--feed", type=float, default=PROBE_FEED, help="mm/min")
     probe.set_defaults(run=cmd_probe)
     run = commands.add_parser("run")
     run.add_argument("job")
