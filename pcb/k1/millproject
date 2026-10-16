@@ -1,0 +1,54 @@
+# pcb2gcode settings for the K1 breakout on the Genmitsu 3018 (GRBL).
+# Run from this folder: pcb2gcode  (reads ./millproject), after board.py and
+# the KiCad gerber/drill export into out/. Output: out/back.ngc (isolation),
+# out/drill.ngc, out/outline.ngc, all mirrored (the copper is milled face up,
+# then the board is flipped: copper on the bottom, parts on top).
+
+metric=true
+metricoutput=true
+back=out/k1-breakout-B_Cu.gbr
+outline=out/k1-breakout-Edge_Cuts.gbr
+drill=out/k1-breakout.drl
+output-dir=out
+zero-start=true
+
+# GRBL has no G64 path blending, no G91.1, no G81 drill cycle
+nog64=true
+nog91-1=true
+nog81=true
+
+zsafe=2
+zchange=15
+spinup-time=3
+
+# Isolation: 20-degree V-bit. Groove test 2026-10-16: the sheet can sit up
+# to ~0.1 mm lower than probed, so 0.2 nominal always cuts through the
+# 0.035 mm copper. The groove is then ~0.17 mm wide (tip 0.1 + 2 x 0.2 x tan 10)
+zwork=-0.2
+mill-diameters=0.17
+mill-feed=150
+mill-vertfeed=30
+mill-speed=10000
+
+# Drilling: through 1.6 mm FR4 into a sacrificial board underneath
+zdrill=-2.0
+drill-feed=60
+drill-speed=10000
+drill-side=back
+
+# Board outline: 1/8" end mill, in 0.6 mm steps, 4 tabs holding the board
+cutter-diameter=3.175
+zcut=-1.8
+cut-feed=100
+cut-vertfeed=30
+cut-infeed=0.6
+cut-speed=10000
+cut-side=back
+bridges=2
+bridgesnum=4
+zbridges=-1.0
+
+# The back side is mirrored about this X: half the job's width (33.05 mm
+# with the cutter), so the mirrored job lands at X 0..33 instead of -33..0
+# (the height map and the work origin are at the job's front-left corner)
+mirror-axis=16.525

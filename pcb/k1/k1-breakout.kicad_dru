@@ -1,0 +1,16 @@
+(version 1)
+
+# Milled in-house with a 20-degree V-bit: wide gaps and tracks
+(rule "mill clearance"
+  (constraint clearance (min 0.4mm)))
+(rule "mill track width"
+  (constraint track_width (min 0.5mm)))
+(rule "mill hole to copper"
+  (constraint hole_clearance (min 0.4mm)))
+
+# The 2.5 jack's middle locating post sits 1.6-1.8 mm from three of its pins.
+# Its hole is unplated and connects nothing: it only must not cut into a
+# pad's ring. Kept at the 1.7 mm the 3D-printed test plate proved
+(rule "post hole to copper"
+  (condition "A.Pad_Type == 'NPTH, mechanical' || B.Pad_Type == 'NPTH, mechanical'")
+  (constraint hole_clearance (min 0.15mm)))

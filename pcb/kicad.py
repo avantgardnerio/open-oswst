@@ -118,6 +118,56 @@ class Board:
         self._add_connector(f"PinHeader_1x{pins}_P{pitch}mm", x, y, pins, pitch, 1.7, 1.0,
                             label, angle, pad_labels, pad_nets)
 
+    def add_footprint(self, name, x, y, pads, label=""):
+        """A footprint from explicit pads (positions relative to (x, y)). Each
+        pad is a dict: name, x, y, size, drill, net (or None), plated (default
+        True) and layers (default both sides). For parts with no library
+        footprint, measured by hand (pcb/k1/)."""
+        self._fp_id += 1
+        pad_lines = []
+        for pad in pads:
+            layers = pad.get("layers", "*.Cu *.Mask")
+            if pad.get("plated", True):
+                net = pad.get("net")
+                net_str = f'\n      (net {self._net(net)} "{net}")' if net else ""
+                pad_lines.append(
+                    f'    (pad "{pad["name"]}" thru_hole circle\n'
+                    f'      (at {pad["x"]} {pad["y"]})\n'
+                    f'      (size {pad["size"]} {pad["size"]})\n'
+                    f'      (drill {pad["drill"]})\n'
+                    f'      (layers {layers}){net_str}\n'
+                    f'    )'
+                )
+            else:
+                pad_lines.append(
+                    f'    (pad "" np_thru_hole circle\n'
+                    f'      (at {pad["x"]} {pad["y"]})\n'
+                    f'      (size {pad["drill"]} {pad["drill"]})\n'
+                    f'      (drill {pad["drill"]})\n'
+                    f'      (layers *.Cu *.Mask)\n'
+                    f'    )'
+                )
+        pads_text = "\n".join(pad_lines)
+        self.footprints.append(
+            f'  (footprint "{name}"\n'
+            f'    (layer "F.Cu")\n'
+            f"    (at {x} {y})\n"
+            f'    (fp_text reference "{label or f"U{self._fp_id}"}" (at 0 -2.5) (layer "F.SilkS") hide\n'
+            f"      (effects (font (size 1 1) (thickness 0.15)))\n"
+            f"    )\n"
+            f"{pads_text}\n"
+            f"  )"
+        )
+
+    def add_track(self, points, width, net, layer="B.Cu"):
+        """A copper track through the given (x, y) points"""
+        number = self._net(net)
+        for (x0, y0), (x1, y1) in zip(points, points[1:]):
+            self.graphics.append(
+                f"  (segment (start {x0} {y0}) (end {x1} {y1}) (width {width})"
+                f' (layer "{layer}") (net {number}))'
+            )
+
     def add_zone(self, net, points, layers=("F.Cu", "B.Cu"), clearance=0.5,
                  min_thickness=0.25, thermal_gap=0.5, thermal_bridge_width=0.5,
                  island_removal_mode=2, min_island_area=10):
