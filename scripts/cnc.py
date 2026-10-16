@@ -266,8 +266,10 @@ def bend(lines, height_map, start):
 def cmd_run(grbl, args):
     with open(args.map) as source:
         height_map = json.load(source)
+    # A dry run never touches the machine: pretend we start at the origin
+    start = [0.0, 0.0, 0.0] if args.dry else work_position(grbl)
     with open(args.job) as source:
-        lines = bend(source.read().splitlines(), height_map, work_position(grbl))
+        lines = bend(source.read().splitlines(), height_map, start)
     print(f"{len(lines)} lines after bending")
     if args.dry:
         print("\n".join(lines))
@@ -335,7 +337,8 @@ def main():
     run.add_argument("--dry", action="store_true", help="print the bent job, send nothing")
     run.set_defaults(run=cmd_run)
     args = parser.parse_args()
-    args.run(Grbl(), args)
+    dry = getattr(args, "dry", False)
+    args.run(None if dry else Grbl(), args)
 
 
 if __name__ == "__main__":
