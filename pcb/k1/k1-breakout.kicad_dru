@@ -1,10 +1,12 @@
 (version 1)
 
-# Milled in-house with a 20-degree V-bit: wide gaps and tracks
+# Milled in-house with a V-bit whose groove measured ~0.5 mm wide on the first
+# board (2026-10-16): copper may come as close as one groove, 0.45 mm (the
+# real groove shaves at most 0.025 mm off each edge)
 (rule "mill clearance"
-  (constraint clearance (min 0.4mm)))
+  (constraint clearance (min 0.45mm)))
 (rule "mill track width"
-  (constraint track_width (min 0.5mm)))
+  (constraint track_width (min 1.0mm)))
 (rule "mill hole to copper"
   (constraint hole_clearance (min 0.4mm)))
 

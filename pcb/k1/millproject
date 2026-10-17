@@ -21,32 +21,39 @@ zsafe=2
 zchange=15
 spinup-time=3
 
-# Isolation: 20-degree V-bit. Groove test 2026-10-16: the sheet can sit up
-# to ~0.1 mm lower than probed, so 0.2 nominal always cuts through the
-# 0.035 mm copper. The groove is then ~0.17 mm wide (tip 0.1 + 2 x 0.2 x tan 10)
+# Isolation: V-bit at 0.2 mm (the sheet can sit ~0.1 mm lower than probed, so
+# 0.2 always cuts through the 0.035 mm copper). Its groove measured ~0.5 mm
+# wide on the first board (pad as ruler), not the 0.17 a sharp 20-degree tip
+# would give: told 0.45, the bit's centre stays 0.225 mm off all copper. One
+# pass: where two traces are closer than two grooves, their grooves overlap,
+# and that's fine: each trace keeps its own border
 zwork=-0.2
-mill-diameters=0.17
+mill-diameters=0.45
+isolation-width=0.45
+# Always lift between grooves: by default pcb2gcode links nearby grooves at
+# cutting depth, which can slice through copper
+path-finding-limit=0
 mill-feed=150
 mill-vertfeed=30
 mill-speed=10000
 
-# Drilling: through 1.6 mm FR4 into a sacrificial board underneath
-zdrill=-2.0
+# Drilling: the sheet sits straight on the aluminium bed (no spoilboard), so
+# stop 0.2 mm short of it (1.6 mm FR4, +-0.1): the drill's point leaves a
+# centred dimple in the last 0.2-0.4 mm, finished by hand
+zdrill=-1.4
 drill-feed=60
 drill-speed=10000
 drill-side=back
 
-# Board outline: 1/8" end mill, in 0.6 mm steps, 4 tabs holding the board
+# Board outline: 1/8" end mill, in 0.6 mm steps, stopping 0.2 mm short of the
+# bed like the drills: the board snaps out along the groove, so no tabs
 cutter-diameter=3.175
-zcut=-1.8
+zcut=-1.4
 cut-feed=100
 cut-vertfeed=30
 cut-infeed=0.6
 cut-speed=10000
 cut-side=back
-bridges=2
-bridgesnum=4
-zbridges=-1.0
 
 # The back side is mirrored about this X: half the job's width (33.05 mm
 # with the cutter), so the mirrored job lands at X 0..33 instead of -33..0

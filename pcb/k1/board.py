@@ -4,8 +4,9 @@ every jack pin routed to a 10-pin 0.1" header that plugs into a breadboard.
 
     .venv/bin/python pcb/k1/board.py   ->   pcb/k1/k1-breakout.kicad_pcb
 
-Milled in-house, so: copper on the bottom only, 0.5 mm tracks, 0.4 mm
-clearance (k1-breakout.kicad_dru), two drill sizes. The parts sit on top;
+Milled in-house, so: copper on the bottom only, 1.0 mm tracks (for hand
+soldering: no mask or plating to hold thin copper down), 0.45 mm clearance =
+one real V-bit groove (k1-breakout.kicad_dru), two drill sizes. The parts sit on top;
 the header's long pins point down into the breadboard. All 10 jack pins come
 out, unnamed: which pin is tip/ring/sleeve/switch gets mapped on the bench.
 Jack positions come from the measured k1_jacks.json (top view, mm, origin =
@@ -21,11 +22,11 @@ sys.path.insert(0, str(HERE.parent))
 from kicad import Board  # noqa: E402
 
 OFFSET = (30.0, 30.0)  # the footprint frame sits here on the KiCad page
-TRACK = 0.5
+TRACK = 1.0
 # Pads: ring = (pad - drill) / 2. The 2.5's pins are only 1.9-2.0 mm apart,
-# so its pads stay at 1.5 to leave 0.4 mm between them
+# so its pads stay at 1.45 to leave one groove (0.45 mm) between them
 PIN_35 = {"size": 2.6, "drill": 1.7}  # 1.32 mm tabs; 1.7 fit the test plate
-PIN_25 = {"size": 1.5, "drill": 1.1}  # 0.76 mm pins
+PIN_25 = {"size": 1.45, "drill": 1.1}  # 0.76 mm pins
 POST_DRILL = 1.7  # the 2.5's plastic posts: holes, no copper
 HEADER = {"size": 1.8, "drill": 1.1}  # 0.64 mm square pins
 HEADER_Y = 21.0
@@ -43,11 +44,12 @@ ROUTES = [
     (3, "3.5", 3, []),
     (4, "3.5", 4, []),
     (5, "3.5", 5, []),
-    (6, "2.5", 2, [(6.2, 6.6), (6.2, 9.2), (7.3, 11.6), (7.3, 19.6)]),  # left of 2.5 pin 1, right of 3.5 pin 5
-    (7, "2.5", 1, [(8.6, 9.0), (8.6, 19.6)]),  # behind the post at (9.32, 7.02)
-    (8, "2.5", 3, [(11.2, 5.6), (11.2, 19.6)]),  # between the two post columns
+    # Left round 2.5 pin 1, then right again before 3.5 pin 5's pad
+    (6, "2.5", 2, [(6.03, 6.6), (6.03, 9.0), (7.55, 11.06), (7.55, 19.0)]),
+    (7, "2.5", 1, [(9.0, 9.4), (9.0, 19.6)]),  # behind the post at (9.32, 7.02)
+    (8, "2.5", 3, [(11.0, 5.6), (11.0, 19.6)]),  # between the two post columns
     (9, "2.5", 4, [(15.02, 19.4)]),
-    (10, "2.5", 5, [(16.5, 5.9), (16.5, 19.6)]),  # round the outside of 2.5 pin 4
+    (10, "2.5", 5, [(16.75, 5.9), (16.75, 19.6)]),  # round the outside of 2.5 pin 4
 ]
 
 
