@@ -35,10 +35,12 @@ use esp_idf_svc::sys::{
 /// Where the card appears in `std::fs` paths
 pub const ROOT: &str = "/data/sd";
 
-/// SD bus clock. 5 MHz is what the breadboard's jumper wires run reliably
-/// (20 MHz failed multi-block writes there, 2026-10-09); ~0.5 MB/s, far
-/// more than the logs need. Try faster on a real board
-const BUS_KHZ: u32 = 5_000;
+/// SD bus clock: 40 MHz, SD high speed. On the rev 9 board sd_test passed
+/// every speed from 5 to 40 MHz with all bytes read back intact
+/// (2026-10-19); reads ran 1.34 MB/s. Writes stay ~0.3 MB/s at any clock:
+/// the card's own busy time sets them. 5 MHz is the most the breadboard's
+/// jumper wires ran reliably (20 MHz failed multi-block writes there)
+const BUS_KHZ: u32 = 40_000;
 
 /// How often waiting log lines go to the card: often enough that a power
 /// cut loses at most this much, rarely enough that the card isn't woken

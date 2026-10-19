@@ -21,6 +21,12 @@
 //!    Once with an fsync per chunk (the logger's pattern: every chunk safe on
 //!    the card), once with one fsync at the end (raw throughput). Logs MB/s
 //!    and the average and worst time per chunk.
+//! 5. Read speed: SPEED.BIN read back in 32 KiB chunks, every byte checked
+//!    against the pattern written, so a bus too fast for the board shows up
+//!    as a mismatch, not just as a slow number.
+//!
+//! All of it runs once per bus clock in BUS_KHZ, card re-initialised each
+//! time, to find how fast the real board's traces can go.
 //!
 //! Build & flash: cargo build --bin sd_test && espflash flash -p <PORT> --bootloader target/xtensa-esp32s3-espidf/debug/build/esp-idf-sys-*/out/build/bootloader/bootloader.bin --partition-table target/xtensa-esp32s3-espidf/debug/partition-table.bin target/xtensa-esp32s3-espidf/debug/sd_test
 
@@ -43,8 +49,13 @@ const SPEED_PATH: &str = "/sdcard/SPEED.BIN";
 const SPEED_TOTAL: usize = 1024 * 1024;
 const SPEED_CHUNKS: [usize; 3] = [512, 4 * 1024, 32 * 1024];
 
-/// SD bus clock. ESP-IDF's default is 20 MHz
-const BUS_KHZ: u32 = 5_000;
+/// SD bus clocks to try, slowest first. ESP-IDF's default is 20 MHz; 40 MHz
+/// is SD high speed (the card has to support it)
+const BUS_KHZ: [u32; 4] = [5_000, 10_000, 20_000, 40_000];
+
+/// Read speed chunk size: the same as the last write's chunk (see
+/// read_speed)
+const READ_CHUNK: usize = 32 * 1024;
 
 fn main() {
     esp_idf_svc::sys::link_patches();
@@ -66,26 +77,45 @@ fn main() {
     vext.set_low().unwrap();
     thread::sleep(Duration::from_millis(100));
 
-    // 1. Talk to the card. The S3's SDMMC host routes through the GPIO
-    // matrix, so any pins work. Internal pull-ups on CMD and D0 in case the
-    // breakout has none (the SD bus is open-drain during init).
-    let host = SdMmcHostDriver::new_1bit(
-        p.sdmmc1,
-        p.pins.gpio43, // CMD
-        p.pins.gpio45, // CLK
-        p.pins.gpio44, // D0
-        None::<AnyIOPin>,
-        None::<AnyIOPin>,
-        &SdMmcHostConfiguration::new(),
-    )
-    .unwrap();
+    let mut slot = p.sdmmc1;
+    let mut cmd = p.pins.gpio43;
+    let mut clk = p.pins.gpio45;
+    let mut d0 = p.pins.gpio44;
+    for bus_khz in BUS_KHZ {
+        log::info!("=== Bus {bus_khz} kHz ===");
+        // SAFETY: the previous speed's card and host driver were dropped at
+        // the end of its run, so nothing else holds the slot or the pins
+        let host = unsafe {
+            SdMmcHostDriver::new_1bit(
+                slot.reborrow(),
+                cmd.reborrow(),
+                clk.reborrow(),
+                d0.reborrow(),
+                None::<AnyIOPin>,
+                None::<AnyIOPin>,
+                &SdMmcHostConfiguration::new(),
+            )
+        }
+        .unwrap();
+        test_card(host, bus_khz);
+    }
+    log::info!("Done");
+
+    idle();
+}
+
+/// One speed run on a freshly initialised host: card info, mount, a small
+/// write and read back, then the write and read speed tests. The card and
+/// the mount drop at the end, freeing the host for the next speed.
+fn test_card(host: SdMmcHostDriver<'_>, bus_khz: u32) {
+    // 1. Talk to the card
     let mut card_config = SdCardConfiguration::new();
-    card_config.speed_khz = BUS_KHZ;
+    card_config.speed_khz = bus_khz;
     let card = match SdCardDriver::new_mmc(host, &card_config) {
         Ok(card) => card,
         Err(err) => {
             log::error!("No card: {err} (check wiring, D3 high, card seated)");
-            idle();
+            return;
         }
     };
 
@@ -115,7 +145,7 @@ fn main() {
         Ok(mounted) => mounted,
         Err(err) => {
             log::error!("Mount failed: {err} (card not FAT? exFAT won't mount)");
-            idle();
+            return;
         }
     };
     log::info!("Mounted at /sdcard");
@@ -123,26 +153,24 @@ fn main() {
     // 3. Write, read back, compare
     let message = format!("Hello from open-oswst, {} ms after boot\n", boot_ms());
     let started = Instant::now();
-    fs::File::create(PATH)
-        .and_then(|mut file| file.write_all(message.as_bytes()))
-        .unwrap();
+    if let Err(err) = fs::File::create(PATH).and_then(|mut file| file.write_all(message.as_bytes()))
+    {
+        log::error!("Write failed: {err}");
+        return;
+    }
     log::info!("Wrote {} B in {:?}", message.len(), started.elapsed());
 
     let mut read_back = String::new();
-    fs::File::open(PATH)
-        .and_then(|mut file| file.read_to_string(&mut read_back))
-        .unwrap();
+    if let Err(err) = fs::File::open(PATH).and_then(|mut file| file.read_to_string(&mut read_back))
+    {
+        log::error!("Read failed: {err}");
+        return;
+    }
     log::info!("Read back: {:?}", read_back);
     if read_back == message {
         log::info!("PASS: read matches write");
     } else {
         log::error!("FAIL: read doesn't match write");
-    }
-
-    for entry in fs::read_dir("/sdcard").unwrap() {
-        let entry = entry.unwrap();
-        let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
-        log::info!("  {:?} {} B", entry.file_name(), size);
     }
 
     // 4. Write speed
@@ -153,17 +181,19 @@ fn main() {
             }
         }
     }
-    let _ = fs::remove_file(SPEED_PATH);
-    log::info!("Done");
 
-    idle();
+    // 5. Read speed, every byte checked
+    if let Err(err) = read_speed() {
+        log::error!("Read: FAILED: {err}");
+    }
+    let _ = fs::remove_file(SPEED_PATH);
 }
 
 /// Writes SPEED_TOTAL bytes in `chunk`-byte writes to a fresh file and logs
 /// the throughput and the time per chunk. With `fsync_each`, every chunk is
 /// flushed to the card (data and FAT) before the next one.
 fn write_speed(chunk: usize, fsync_each: bool) -> std::io::Result<()> {
-    let data = vec![0xA5u8; chunk];
+    let data: Vec<u8> = (0..chunk).map(pattern).collect();
     let mut file = fs::File::create(SPEED_PATH)?;
 
     let mut worst = Duration::ZERO;
@@ -191,6 +221,55 @@ fn write_speed(chunk: usize, fsync_each: bool) -> std::io::Result<()> {
         worst
     );
     Ok(())
+}
+
+/// Reads SPEED_PATH back in READ_CHUNK pieces, checks every byte against
+/// the pattern, and logs the throughput and the number of bad bytes
+fn read_speed() -> std::io::Result<()> {
+    let mut buffer = vec![0u8; READ_CHUNK];
+    let mut file = fs::File::open(SPEED_PATH)?;
+
+    let mut bad_bytes = 0usize;
+    let mut offset = 0usize;
+    let mut worst = Duration::ZERO;
+    // Only the reads are timed, not the checking
+    let mut total = Duration::ZERO;
+    while offset < SPEED_TOTAL {
+        let chunk_started = Instant::now();
+        file.read_exact(&mut buffer)?;
+        let chunk_time = chunk_started.elapsed();
+        worst = worst.max(chunk_time);
+        total += chunk_time;
+        // The last write used 32 KiB chunks, the same as READ_CHUNK, so
+        // every chunk read holds the pattern from index 0
+        bad_bytes += buffer
+            .iter()
+            .enumerate()
+            .filter(|&(index, &byte)| byte != pattern(index))
+            .count();
+        offset += READ_CHUNK;
+    }
+
+    log::info!(
+        "Read {} KiB in {} B chunks: {:.2} MB/s | worst chunk {:?} | {}",
+        SPEED_TOTAL / 1024,
+        READ_CHUNK,
+        SPEED_TOTAL as f64 / total.as_secs_f64() / 1e6,
+        worst,
+        if bad_bytes == 0 {
+            "PASS: all bytes match".to_string()
+        } else {
+            format!("FAIL: {bad_bytes} bad bytes")
+        }
+    );
+    Ok(())
+}
+
+/// Test data by index within a write chunk: varies byte to byte and repeats
+/// every 251 B (a prime, so it never lines up with 512 B sectors), so a
+/// slipped or flipped bit shows up
+fn pattern(index: usize) -> u8 {
+    (index % 251) as u8
 }
 
 /// Time since boot, from ESP-IDF's microsecond timer
