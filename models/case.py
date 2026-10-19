@@ -57,6 +57,9 @@ post_y2 = post_y1 - 34.6  # 2nd post 34.6mm below (moved up 0.9mm to clear board
 # Perfboard posts — 50x70mm board, landscape (70mm across width, 50mm along length)
 PERF_W = 70
 PERF_L = 50
+# Rev 10 grew the board 9mm at its south edge (pcb/board.py), and its bottom holes moved down with
+# it. Everything else here still measures from the 50mm board, so nothing else moves
+PERF_GROWN_SOUTH = 9
 PERF_HOLE_FROM_LR = 5      # mm from left & right edges of board
 PERF_HOLE_FROM_TB = 2.5    # mm from top & bottom edges of board
 # The Heltec hangs under our board in female header sockets (#47) instead of being soldered on, so
@@ -77,7 +80,7 @@ for py in [post_y1, post_y2]:
 for px in [perf_center_x - PERF_W / 2 + PERF_HOLE_FROM_LR,
            perf_center_x + PERF_W / 2 - PERF_HOLE_FROM_LR]:
     for py in [perf_center_y + PERF_L / 2 - PERF_HOLE_FROM_TB,
-               perf_center_y - PERF_L / 2 + PERF_HOLE_FROM_TB]:
+               perf_center_y - PERF_L / 2 - PERF_GROWN_SOUTH + PERF_HOLE_FROM_TB]:
         all_posts.append((px, py, PERF_POST_HEIGHT))
 
 # Add all posts then drill all holes
@@ -224,7 +227,11 @@ bottom = bottom - kenwood_recess
 USBC_W = 15.0   # along Y — 11.2 overmold + 1.9 per side
 USBC_H = 8.5    # along Z — 6.0 overmold + 1.25 per side
 usbc_center_z = floor_z + PERF_POST_HEIGHT - HELTEC_SOCKET_H - 2.50 - 1.60 - 1.60
-usbc_center_y = perf_top_post_y - 18.5
+# The Heltec's short-axis centreline sits 21.5mm below the top board post (pcb/board.py: J3 at
+# HY, J2 at HY + 22.86). Rev 10 moved the Heltec 3mm down the board (was 18.5): the screen window
+# and this hole follow it
+HELTEC_CENTER_BELOW_TOP_POST = 21.5
+usbc_center_y = perf_top_post_y - HELTEC_CENTER_BELOW_TOP_POST
 usbc_hole = Pos(WIDTH / 2, usbc_center_y, usbc_center_z) * Box(
     WALL * 3, USBC_W, USBC_H  # oversized in X to cut clean through
 )
@@ -248,7 +255,7 @@ SCREEN_W = 34.5   # 33.00 glass + 0.75mm per side
 SCREEN_H = 20.0   # 18.60 glass + 0.70mm per side
 perf_left_post_x = perf_center_x - PERF_W / 2 + PERF_HOLE_FROM_LR
 screen_center_x = 5.32                      # glass centre; fixed in X, nothing upstream moves it
-screen_center_y = perf_top_post_y - 18.5    # follows the board, like mic_y
+screen_center_y = perf_top_post_y - HELTEC_CENTER_BELOW_TOP_POST  # follows the board, like mic_y
 screen_hole = Pos(screen_center_x, screen_center_y, -HEIGHT / 2) * Box(
     SCREEN_W, SCREEN_H, WALL * 3  # oversized in Z to cut clean through
 )
