@@ -114,12 +114,20 @@ SLIDER_W = 7    # along X (slide direction) — just the slider nub
 SLIDER_H = 3.5  # along Z
 slider_center_x = ant_right_x + 20 / 2 + 5  # shifted 5mm toward encoders
 
-# Encoder hole: 7mm dia, 15mm knob, 3mm gap from the power switch's screwdowns. One encoder only:
-# the second one, farther from the switch, was dropped
+# Encoder hole: one Adafruit seesaw knob board (25.6 x 25.3mm) stands behind the top wall. Its PEC11
+# encoder has an M7x0.75 bushing (docs/knob/pec11.pdf), the same neck as the old EC11, so the hole
+# keeps its size. The board is big, so the hole goes in the middle of the free stretch of top wall:
+# in X from the power switch's body to the top-right lid post, in Z from the floor to the lid's
+# ceiling. Assumes the encoder sits in the middle of its board
 ENCODER_DIA = 7.2
-KNOB_DIA = 15
-KNOB_GAP = 3
-encoder_center_x = ant_right_x + 20 + KNOB_GAP + KNOB_DIA / 2
+SLIDER_BODY_L = 19.7  # SS12F15 body along X
+KNOB_BOARD_W = 25.6
+free_left_x = slider_center_x + SLIDER_BODY_L / 2
+free_right_x = WIDTH / 2 - WALL - AMP_POST_OD  # left edge of the top-right lid post
+encoder_center_x = (free_left_x + free_right_x) / 2
+encoder_z = (floor_z + (HEIGHT / 2 - WALL)) / 2
+assert free_right_x - free_left_x > KNOB_BOARD_W, "knob board doesn't fit beside the switch"
+assert encoder_z + KNOB_BOARD_W / 2 < split_z, "knob board crosses into the lid"
 
 # Cut slider
 slider_z = controls_z - 3  # shifted 3mm toward bed
@@ -164,7 +172,7 @@ for sx in [-1, +1]:
     bottom = bottom - screw
 
 # Cut encoder hole
-enc_hole = Pos(encoder_center_x, LENGTH / 2, controls_z) * Rot(90, 0, 0) * Cylinder(
+enc_hole = Pos(encoder_center_x, LENGTH / 2, encoder_z) * Rot(90, 0, 0) * Cylinder(
     radius=ENCODER_DIA / 2, height=WALL * 3
 )
 bottom = bottom - enc_hole
