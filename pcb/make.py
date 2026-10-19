@@ -39,8 +39,8 @@ ROUTING_PASSES = 100
 
 GERBER_LAYERS = ["F.Cu", "B.Cu", "F.Silkscreen", "B.Silkscreen",
                  "F.Mask", "B.Mask", "Edge.Cuts"]
-# Mounting holes, the only non-plated holes
-NPTH_HOLES = 4
+# Non-plated holes: 4 mounting holes + the 2.5 K1 jack's 3 plastic posts (rev 10)
+NPTH_HOLES = 7
 
 
 def main():
@@ -134,7 +134,7 @@ def check_fab():
     plated = hits(OUT / f"{NAME}-PTH.drl")
     unplated = hits(OUT / f"{NAME}-NPTH.drl")
     if unplated != NPTH_HOLES:
-        fail(f"{unplated} unplated holes, expected {NPTH_HOLES} (the mounting holes)")
+        fail(f"{unplated} unplated holes, expected {NPTH_HOLES} (mounting holes + jack posts)")
     print(f"   {len(names)} files, {plated} plated holes (pads and vias),"
           f" {unplated} unplated")
     return fab
