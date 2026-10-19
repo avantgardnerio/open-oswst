@@ -1,11 +1,12 @@
 //! Input pins whose interrupt wakes the task waiting on them, from IRAM:
 //! the radio's DIO1 and BUSY, PTT and the encoder.
 //!
-//! A flash write (a log flush, an OTA, a config save) turns the caches off
-//! on both cores for its length, and only interrupts that live in IRAM run
-//! meanwhile. DIO1's interrupt notes when a packet ended (`fired_at_us`), so
-//! it must run on time: with the handler in flash, a flush stamped a packet
-//! ~7.8 ms late and threw a whole transmission off its slot grid (#36).
+//! A flash write (an OTA, a config save) turns the caches off on both cores
+//! for its length, and only interrupts that live in IRAM run meanwhile.
+//! DIO1's interrupt notes when a packet ended (`fired_at_us`), so it must
+//! run on time: with the handler in flash, a log flush (back when logs went
+//! to the flash) stamped a packet ~7.8 ms late and threw a whole
+//! transmission off its slot grid (#36).
 //!
 //! So the whole GPIO interrupt path is IRAM-safe:
 //! - the GPIO interrupt service is installed with ESP_INTR_FLAG_IRAM, and

@@ -29,12 +29,12 @@ use std::sync::{Mutex, OnceLock};
 
 /// Most written per `flush_chunk()`, cut at a line end
 const CHUNK_BYTES: usize = 512;
-/// Delete old log files until the partition is below this full. The rest
-/// is kept for an update bundle's download (bundle.rs, ~1.4MB of ~10MB)
+/// Delete old log files until the storage is below this full. The rest is
+/// kept for what else lives on the SD card: the web app and an update
+/// bundle's download (bundle.rs, ~1.4MB)
 const MAX_USED_PERCENT: usize = 60;
 /// A file this big continues in the next one. An hour's walk logs ~500KB
-/// (2026-10-04): 1MB keeps one in a single file. MAX_USED_PERCENT still
-/// caps the total (~6 files this size on the 10MB partition)
+/// (2026-10-04): 1MB keeps one in a single file
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 /// Most log files kept: weeks of walks. Was 50 on the 10MB flash; the SD
 /// card's MAX_USED_PERCENT is gigabytes

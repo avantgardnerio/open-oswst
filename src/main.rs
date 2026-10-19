@@ -68,10 +68,13 @@ fn get_mac() -> [u8; 6] {
     mac
 }
 
-/// Log lines waiting for the file, in PSRAM: minutes of talking at the
-/// ~1-2KB/s a busy radio logs (2026-10-08 logs), against ~10s in the 16KB of
-/// internal RAM it had before
-const LOG_BUFFER_BYTES: usize = 1024 * 1024;
+/// Log lines waiting for the file, in PSRAM. The "log" thread writes them to
+/// the SD card every second (sd::LOG_WRITE_PERIOD), and a write keeps the
+/// card busy up to ~230 ms (2026-10-19), so at the ~1-2KB/s a busy radio
+/// logs (2026-10-08 logs) a few KB would do: 64KB leaves ~30 s for a slow
+/// card. It was 1MB when logs went to the chip's flash and their writes
+/// waited for the radio to go quiet
+const LOG_BUFFER_BYTES: usize = 64 * 1024;
 /// Without PSRAM (a board that has none): what the internal heap can spare
 const LOG_BUFFER_FALLBACK_BYTES: usize = 16 * 1024;
 

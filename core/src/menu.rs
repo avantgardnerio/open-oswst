@@ -90,7 +90,7 @@ static ROOT: &[Item] = &[
                 ],
             ),
             Item::Submenu(
-                "Log to flash",
+                "Log to SD card",
                 &[
                     Item::Choice("on", Setting::LogToFlash, 1),
                     Item::Choice("off", Setting::LogToFlash, 0),

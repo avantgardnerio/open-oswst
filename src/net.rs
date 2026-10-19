@@ -196,8 +196,7 @@ fn stay_joined(
     http: &mut HttpApi,
 ) -> Stop {
     // Logged only when it changes: away from the networks, every scan would
-    // say the same "none joined" (~every 20s on a walk), and each line in
-    // the log costs a flash write that stalls both cores
+    // say the same "none joined" (~every 20s on a walk), filling the log
     let mut joined: Option<String> = None;
     let mut searching_logged = false;
     loop {
