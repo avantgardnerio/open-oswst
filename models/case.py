@@ -73,10 +73,10 @@ perf_center_y = post_y2 - PERF_GAP_FROM_AMP - PERF_L / 2
 perf_center_x = 0  # centered in case
 perf_top_post_y = perf_center_y + PERF_L / 2 - PERF_HOLE_FROM_TB
 
-# Collect all post locations: (x, y, height)
+# Collect all post locations: (x, y, height). The Air Buddy amp's two posts are gone (no amp since
+# 2026-10-08; they hit the SD card reader). post_x/post_y1/post_y2 stay as datums: the board's
+# position and the SMA hole are measured from them
 all_posts = []
-for py in [post_y1, post_y2]:
-    all_posts.append((post_x, py, AMP_POST_HEIGHT))
 for px in [perf_center_x - PERF_W / 2 + PERF_HOLE_FROM_LR,
            perf_center_x + PERF_W / 2 - PERF_HOLE_FROM_LR]:
     for py in [perf_center_y + PERF_L / 2 - PERF_HOLE_FROM_TB,
