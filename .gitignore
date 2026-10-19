@@ -17,3 +17,6 @@ boards.toml
 
 # Python bytecode caches (scripts/, pcb/, models/)
 __pycache__/
+
+# Digilent WaveForms (AD3) USB error log, written to the working directory
+DebugErc.log
