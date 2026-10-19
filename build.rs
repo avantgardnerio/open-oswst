@@ -8,11 +8,13 @@ fn main() {
     );
 
     // This build's version, for firmware.rs VERSION: the git hash, -dirty
-    // with uncommitted changes. Worked out again whenever the code or git's
-    // state changes (ESP-IDF's own version, esp_app_desc, is only worked
-    // out when its CMake step reruns, which Rust changes don't make it do)
+    // with uncommitted changes. Tags are left out (--exclude), so a tag like
+    // pcb-rev9 never turns it into "pcb-rev9-12-g<hash>". Worked out again
+    // whenever the code or git's state changes (ESP-IDF's own version,
+    // esp_app_desc, is only worked out when its CMake step reruns, which
+    // Rust changes don't make it do)
     let version = std::process::Command::new("git")
-        .args(["describe", "--always", "--dirty"])
+        .args(["describe", "--always", "--dirty", "--exclude=*"])
         .output()
         .ok()
         .filter(|output| output.status.success())
