@@ -37,23 +37,27 @@ mill-feed=150
 mill-vertfeed=30
 mill-speed=10000
 
-# Drilling: the sheet sits straight on the aluminium bed (no spoilboard), so
-# stop 0.2 mm short of it (1.6 mm FR4, +-0.1): the drill's point leaves a
-# centred dimple in the last 0.2-0.4 mm, finished by hand
-zdrill=-1.4
+# Drilling: through into a scrap copper sheet laid under the board (2026-10-17;
+# before that the sheet sat on the bare bed and holes stopped at -1.4): 0.4 mm
+# into the scrap, so the drill clears the board fully
+zdrill=-2.0
 drill-feed=60
 drill-speed=10000
 drill-side=back
 
-# Board outline: 1/8" end mill, in 0.6 mm steps, stopping 0.2 mm short of the
-# bed like the drills: the board snaps out along the groove, so no tabs
+# Board outline: 1/8" end mill, in 0.6 mm steps, all the way through into the
+# scrap sheet underneath (since 2026-10-17); 2 tabs left 0.8 mm thick hold the
+# board in the sheet until it's snapped out (user: 2 snap out easier than 4)
 cutter-diameter=3.175
-zcut=-1.4
+zcut=-1.8
 cut-feed=100
 cut-vertfeed=30
 cut-infeed=0.6
 cut-speed=10000
 cut-side=back
+bridges=2
+bridgesnum=2
+zbridges=-1.0
 
 # The back side is mirrored about this X: half the job's width (33.05 mm
 # with the cutter), so the mirrored job lands at X 0..33 instead of -33..0
