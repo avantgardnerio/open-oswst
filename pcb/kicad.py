@@ -43,13 +43,15 @@ class Board:
         )
 
     def add_text(self, x, y, text, layer="F.SilkS", size=1, thickness=0.15, angle=0):
-        """Add a text string at (x, y) on the given layer."""
+        """Add a text string at (x, y) on the given layer. Text on a back
+        layer is mirrored, so it reads right from the back of the board."""
         at_str = f"(at {x} {y})" if angle == 0 else f"(at {x} {y} {angle})"
+        mirror = " (justify mirror)" if layer.startswith("B.") else ""
         self.graphics.append(
             f'  (gr_text "{text}"\n'
             f"    {at_str}\n"
             f'    (layer "{layer}")\n'
-            f"    (effects (font (size {size} {size}) (thickness {thickness})))\n"
+            f"    (effects (font (size {size} {size}) (thickness {thickness})){mirror})\n"
             f"  )"
         )
 
