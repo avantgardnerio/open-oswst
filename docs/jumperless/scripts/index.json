@@ -1,0 +1,134 @@
+{
+  "scripts": [
+    {
+      "name": "Basic ADC (Analog-to-Digital Converter) operations",
+      "description": "This example shows how to read analog voltages.",
+      "url": "https://docs.jumperless.org/scripts/adc_basics.py"
+    },
+    {
+      "name": "Async Read",
+      "description": "Demo of using select.poll() to check for input on stdin without blocking.",
+      "url": "https://docs.jumperless.org/scripts/async_read.py"
+    },
+    {
+      "name": "Clickwheel Menu",
+      "description": "Menu navigation with clickwheel: turn to select, press to choose, double-click to exit.",
+      "url": "https://docs.jumperless.org/scripts/clickwheel_menu.py"
+    },
+    {
+      "name": "Basic DAC (Digital-to-Analog Converter) operations",
+      "description": "This example shows how to set DAC voltages.",
+      "url": "https://docs.jumperless.org/scripts/dac_basics.py"
+    },
+    {
+      "name": "Basic GPIO (General Purpose Input/Output) operations",
+      "description": "This example shows digital I/O, direction control, and pull resistors.",
+      "url": "https://docs.jumperless.org/scripts/gpio_basics.py"
+    },
+    {
+      "name": "Interactive Demo - Control connections with probe, encoder, and buttons",
+      "description": "This example shows how to use all the interactive controls together.",
+      "url": "https://docs.jumperless.org/scripts/interaction_demo.py"
+    },
+    {
+      "name": "LED Brightness Control Demo",
+      "description": "Touch breadboard pads 1-60 to control LED brightness levels.",
+      "url": "https://docs.jumperless.org/scripts/led_brightness_control.py"
+    },
+    {
+      "name": "Lipo Char",
+      "description": "LiPo Cell Characterizer for Jumperless V5",
+      "url": "https://docs.jumperless.org/scripts/lipo_char.py"
+    },
+    {
+      "name": "Node connection and routing operations",
+      "description": "This example shows how to connect/disconnect nodes and check connections.",
+      "url": "https://docs.jumperless.org/scripts/node_connections.py"
+    },
+    {
+      "name": "Oled Copy Print",
+      "description": "Debug output to OLED: print() appears on both serial and OLED.",
+      "url": "https://docs.jumperless.org/scripts/oled_copy_print.py"
+    },
+    {
+      "name": "Oled Framebuffer Save Restore",
+      "description": "Capture OLED to file, clear display, then restore from file.",
+      "url": "https://docs.jumperless.org/scripts/oled_framebuffer_save_restore.py"
+    },
+    {
+      "name": "Oled Pixel Graphics",
+      "description": "Draw a diagonal line and a box using oled_set_pixel.",
+      "url": "https://docs.jumperless.org/scripts/oled_pixel_graphics.py"
+    },
+    {
+      "name": "Oled Screen Capture",
+      "description": "Capture OLED framebuffer, invert pixels, display, then restore original.",
+      "url": "https://docs.jumperless.org/scripts/oled_screen_capture.py"
+    },
+    {
+      "name": "Jumperless Oscilloscope Demo",
+      "description": "=============================",
+      "url": "https://docs.jumperless.org/scripts/oscilloscope.py"
+    },
+    {
+      "name": "Overlay Probe Move",
+      "description": "Move a graphic overlay by touching breadboard pads with the probe.",
+      "url": "https://docs.jumperless.org/scripts/overlay_probe_move.py"
+    },
+    {
+      "name": "Probe Button Net Color",
+      "description": "Probe button: hold Connect/Remove to change net 0 hue. Stop with Ctrl+C.",
+      "url": "https://docs.jumperless.org/scripts/probe_button_net_color.py"
+    },
+    {
+      "name": "Probe Switch Demo",
+      "description": "Respond to probe switch: Measure mode shows ADC voltage; Select mode shows touched pad.",
+      "url": "https://docs.jumperless.org/scripts/probe_switch_demo.py"
+    },
+    {
+      "name": "Probe Touch Demo",
+      "description": "Wait for probe touch, then wait for probe button. Uses global API (no j. prefix).",
+      "url": "https://docs.jumperless.org/scripts/probe_touch_demo.py"
+    },
+    {
+      "name": "PSRAM Test Script for Jumperless v5",
+      "description": "This script tests whether external PSRAM is available and working.",
+      "url": "https://docs.jumperless.org/scripts/psram_test.py"
+    },
+    {
+      "name": "Simple FakeGPIO Node-Based API Test",
+      "description": "Quick test to verify the new node-based FakeGPIO API works correctly.",
+      "url": "https://docs.jumperless.org/scripts/simple_fake_gpio_test.py"
+    },
+    {
+      "name": "Jumperless Stylophone",
+      "description": "Musical instrument using probe and GPIO to generate audio tones.",
+      "url": "https://docs.jumperless.org/scripts/stylophone.py"
+    },
+    {
+      "name": "Interactive NeoPixel Demo",
+      "description": "This also shows how you can grab modules",
+      "url": "https://docs.jumperless.org/scripts/test_neopixel.py"
+    },
+    {
+      "name": "Test script for new OLED MicroPython features",
+      "description": "Run this on the Jumperless device to test all new OLED functions",
+      "url": "https://docs.jumperless.org/scripts/test_oled_features.py"
+    },
+    {
+      "name": "Basic UART operations",
+      "description": "This example shows how to use UART.",
+      "url": "https://docs.jumperless.org/scripts/uart_basics.py"
+    },
+    {
+      "name": "UART Loopback Demo",
+      "description": "",
+      "url": "https://docs.jumperless.org/scripts/uart_loopback.py"
+    },
+    {
+      "name": "Voltage Monitor Demo",
+      "description": "Monitor voltage on ADC with real-time OLED display.",
+      "url": "https://docs.jumperless.org/scripts/voltage_monitor.py"
+    }
+  ]
+}
