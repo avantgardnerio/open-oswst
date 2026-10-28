@@ -34,6 +34,8 @@ writer = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"mp4v"), frames_pe
 
 frame_count = 0
 start = time.time()
+# The start time, so other recordings (e.g. ad3_record.py) can be lined up with the video.
+pathlib.Path(output_path + ".json").write_text(f'{{"start": {start:.3f}, "fps": {frames_per_second:.3f}}}\n')
 while not stop_path.exists() and time.time() - start < max_seconds:
     ok, frame = capture.read()
     if ok:
