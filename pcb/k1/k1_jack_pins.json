@@ -1,0 +1,18 @@
+{
+ "about": "What each K1 jack pin does. Pin numbers = the order of 'pins' in k1_jacks.json (rev 10 header: 1-5 = 3.5 pins 2,1,3,4,5; 6-10 = 2.5 pins 2,1,3,4,5). Mapped 2026-10-27 on a rev 10 board with a Jumperless V5 continuity sweep, plugs in and plugs out; every connection seen from both ends. A switch pin touches its contact pin with no plug in and opens when a plug goes in.",
+ "assumption": "2.5 tip/ring/sleeve assumes its plug pigtail uses the colours checked on the 3.5 pigtail (red = tip, white = ring, black = sleeve).",
+ "3.5": {
+  "1": {"contact": "tip switch", "closed_to_without_plug": 2},
+  "2": {"contact": "tip", "k1": "PTT power"},
+  "3": {"contact": "sleeve", "k1": "PTT line"},
+  "4": {"contact": "ring switch", "closed_to_without_plug": 5},
+  "5": {"contact": "ring", "k1": "MIC+"}
+ },
+ "2.5": {
+  "1": {"contact": "tip switch", "closed_to_without_plug": 2},
+  "2": {"contact": "tip", "k1": "SPK"},
+  "3": {"contact": "sleeve", "k1": "GND, mic return"},
+  "4": {"contact": "ring", "k1": "unused"},
+  "5": {"contact": "ring switch", "closed_to_without_plug": 4}
+ }
+}

@@ -6,3 +6,6 @@ esptool
 folium
 matplotlib
 pyclipper
+opencv-python
+imageio-ffmpeg
+pillow
