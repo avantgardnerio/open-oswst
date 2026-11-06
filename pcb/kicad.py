@@ -84,8 +84,12 @@ class Board:
         )
 
     def _add_connector(self, footprint_name, x, y, pins, pitch, pad_size, drill,
-                        label="", angle=0, pad_labels=None, pad_nets=None):
-        """Generic through-hole connector footprint."""
+                        label="", angle=0, pad_labels=None, pad_nets=None,
+                        ref_at=(0, -2.5), ref_hidden=False, ref_layer="F.SilkS"):
+        """Generic through-hole connector footprint. Its name (the reference)
+        goes at `ref_at`, in the footprint's own frame (it turns with `angle`):
+        above the pin row by default. On a back layer (`ref_layer`) it's
+        mirrored, for a part that goes in from the back"""
         self._fp_id += 1
         half_span = pitch * (pins - 1) / 2
 
@@ -103,23 +107,27 @@ class Board:
             f'  (footprint "{footprint_name}"\n'
             f'    (layer "F.Cu")\n'
             f"    {at_str}\n"
-            f'    (fp_text reference "{ref_text}" (at 0 -2.5) (layer "F.SilkS")\n'
-            f"      (effects (font (size 1 1) (thickness 0.15)))\n"
+            f'    (fp_text reference "{ref_text}" (at {ref_at[0]} {ref_at[1]})'
+            f' (layer "{ref_layer}"){" hide" if ref_hidden else ""}\n'
+            f"      (effects (font (size 1 1) (thickness 0.15))"
+            f'{" (justify mirror)" if ref_layer.startswith("B.") else ""})\n'
             f"    )\n"
             f"{pads}\n"
             f"  )"
         )
 
-    def add_jst_ph(self, x, y, pins=2, label="", angle=0, pad_labels=None, pad_nets=None):
+    def add_jst_ph(self, x, y, pins=2, label="", angle=0, pad_labels=None, pad_nets=None,
+                   **ref):
         """Add a JST-PH through-hole header (2.0mm pitch) at (x, y)."""
         self._add_connector(f"JST_PH_B{pins}B", x, y, pins, 2.0, 1.5, 0.8,
-                            label, angle, pad_labels, pad_nets)
+                            label, angle, pad_labels, pad_nets, **ref)
 
 
-    def add_header(self, x, y, pins, label="", angle=0, pad_labels=None, pad_nets=None, pitch=2.54):
+    def add_header(self, x, y, pins, label="", angle=0, pad_labels=None, pad_nets=None, pitch=2.54,
+                   **ref):
         """Add a pin header (default 2.54mm pitch) at (x, y)."""
         self._add_connector(f"PinHeader_1x{pins}_P{pitch}mm", x, y, pins, pitch, 1.7, 1.0,
-                            label, angle, pad_labels, pad_nets)
+                            label, angle, pad_labels, pad_nets, **ref)
 
     def add_footprint(self, name, x, y, pads, label=""):
         """A footprint from explicit pads (positions relative to (x, y)). Each

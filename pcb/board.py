@@ -63,7 +63,16 @@ board.add_jst_ph(cx, cy, pins=2, label="SW",
                  pad_nets=["VBAT", "VSW"]); cx += JST2_STEP
 board.add_jst_ph(cx, cy, pins=2, label="HBAT",
                  pad_labels=["+", "-"], pad_nets=["VSW", "GND"]); cx += JST2_STEP
-board.add_jst_ph(cx, cy, pins=2, label="PTT",
+
+# PTT (rev 10.1): top-left corner, under the screw, beside the K1 jack whose
+# sleeve is wired to it. At the top right, the PTT net ran the whole top
+# edge from the jack, an RF pickup, and freerouting then found no way round
+# for VBAT. Horizontal: the 5.7 mm between the screw head and the 3.5 jack's
+# body is too short for the 6 mm housing standing along the edge. The
+# button is in the right wall, so its cable is long now (~60 mm)
+PTT_X = BX + 2.5
+PTT_Y = BY + 7.3
+board.add_jst_ph(PTT_X, PTT_Y, pins=2, label="PTT",
                  pad_nets=["PTT", "GND"])
 
 # (CHNL encoder was on the top edge once, dropped: its pins GPIO7/GPIO5
@@ -119,10 +128,16 @@ board.add_header(BX + BW - 3 - J2_SPAN / 2, HY + HELTEC_WIDTH, pins=18, label="J
 # reaching east. Its own capsule is gone: the clone's two capsule pads come
 # down on short flying leads to MIC_IN below, and the mic is the K1 jack's
 # ring (or the board's capsule through the ring's NC switch). Clone layout
-# (measured 2026-10-20): header 5.74 mm in from one short edge, capsule
-# pads 10.62 mm past the header, across the 14.1 mm width's middle
+# (measured off a marked-up photo 2026-11-06, the capsule pads checked
+# with the real board on a printed coupon, models/mic_coupon.py): from its
+# header, the capsule pads (Q1) 18.7 mm on, centred on GAIN, 2.54 apart;
+# its far edge 23.5 mm on, its near edge 1.6 mm behind; 13.8 mm wide
 MIC_X = BX + 34   # the outline's west edge clear of the SPK connector
 MIC_Y = BY + 47
+MIC_Q1 = 18.7
+MIC_FAR_EDGE = 23.5
+MIC_NEAR_EDGE = 1.6
+MIC_WIDTH = 13.8
 # GAIN to VDD = 40 dB: 60 dB (floating) swung rail to rail on the bench, 50
 # clipped the Disco32. GND is the mic ground (JP1 joins it to the board's)
 board.add_header(MIC_X, MIC_Y, pins=5, label="MIC", angle=90,
@@ -133,23 +148,26 @@ board.add_header(MIC_X, MIC_Y, pins=5, label="MIC", angle=90,
 # the amp board's ground, which on the bench had to be the ground of every
 # mic part (the bias filter cap's above all: anywhere else put the Heltec
 # USB frames' 25 Hz into the ring, 2026-11-05)
-board.add_header(MIC_X + 10.62, MIC_Y, pins=2, label="MIC_IN", angle=90,
-                 pad_labels=["+", "-"], pad_nets=["MIC_IN", "MIC_GND"])
+# Names turned with the header (frame (0, -y) = y mm west, (x, 0) = x mm
+# north), clear of the pads and the amp board's outline
+board.add_header(MIC_X + MIC_Q1, MIC_Y, pins=2, label="MIC_IN", angle=90,
+                 pad_labels=["+", "-"], pad_nets=["MIC_IN", "MIC_GND"], ref_at=(0, -4.5))
 # The board's own mic: the 9x7 mm electret capsule, on the K1 3.5 jack's
 # ring NC switch (net CAPSULE, K1_NETS): plugging a headset in opens the
 # switch and the headset's mic, on the ring, takes over. Between MIC_IN and
 # VOL, east of the amp board's outline
 CAPSULE_X = BX + 58.5
 board.add_header(CAPSULE_X, MIC_Y, pins=2, label="CAPSULE", angle=90,
-                 pad_labels=["+", "-"], pad_nets=["CAPSULE", "MIC_GND"])
+                 pad_labels=["+", "-"], pad_nets=["CAPSULE", "MIC_GND"], ref_at=(3.5, 0))
 # Which hole is which, on both sides (the amp board sits on the back): the
 # 2-pin headers turned 90 degrees put "+" (pin 1) south
 for layer in ("F.SilkS", "B.SilkS"):
-    for x_mm in (MIC_X + 10.62, CAPSULE_X):
+    for x_mm in (MIC_X + MIC_Q1, CAPSULE_X):
         board.add_text(x_mm + 1.8, MIC_Y + 1.27, "+", layer=layer, size=0.8, thickness=0.12)
         board.add_text(x_mm + 1.8, MIC_Y - 1.27, "-", layer=layer, size=0.8, thickness=0.12)
 # The amp board's outline, so nothing else lands under it
-board.add_rect(MIC_X - 5.74, MIC_Y - 14.1 / 2, 25.4, 14.1, layer="F.SilkS", width=0.12)
+board.add_rect(MIC_X - MIC_NEAR_EDGE, MIC_Y - MIC_WIDTH / 2, MIC_NEAR_EDGE + MIC_FAR_EDGE,
+               MIC_WIDTH, layer="F.SilkS", width=0.12)
 AMP_X = BX + 3 + 3 * 2.54
 # Down by the bottom-left mounting hole (rev 10, clearing the top left for
 # the Kenwood jacks): the header row stays 4.5 mm above the hole, room for
@@ -160,6 +178,16 @@ board.add_header(AMP_X, AMP_Y, pins=7, label="AMP", angle=180,
                  pad_nets=["Ve", "GND", None, None, "DIN", "BCLK", "LRC"])
 board.add_header(AMP_X, AMP_Y - 12.954, pins=2, label="AMP_SPK", angle=180,
                  pitch=3.5, pad_labels=["+", "-"], pad_nets=["SPK+", "SPK-"])
+# The breakout's outline, so nothing else lands under it (measured off a
+# marked-up photo 2026-11-06): 0.93 mm past the end pins, 16.1 mm north of
+# the pin row (the speaker terminal end), ~2.2 mm south of it (not marked)
+AMP_PIN_SPAN = 6 * 2.54
+AMP_SIDE_EDGE = 0.93
+AMP_FAR_EDGE = 16.1
+AMP_NEAR_EDGE = 2.2
+board.add_rect(AMP_X - AMP_PIN_SPAN / 2 - AMP_SIDE_EDGE, AMP_Y - AMP_FAR_EDGE,
+               AMP_PIN_SPAN + 2 * AMP_SIDE_EDGE, AMP_FAR_EDGE + AMP_NEAR_EDGE,
+               layer="F.SilkS", width=0.12)
 
 # SPK connector (rotated 90°), just right of the amp breakout, beside its
 # AMP_SPK terminals (rev 10: the left edge went to the Kenwood jacks)
@@ -223,11 +251,48 @@ for layer in ("F.SilkS", "B.SilkS"):
         x_mm, y_mm = k1_at(bore_x, 15.0)
         board.add_text(x_mm, y_mm, jack, layer=layer, size=0.8, thickness=0.12)
 
+# Each jack's body outline on the back (floor side), where the jacks sit, so
+# nothing else lands under them: the measured bodies (k1_jacks.json) plus a
+# margin. On the fab layer, not the silkscreen: the bodies sit over their
+# own pins and past the board edge, so a printed outline would cross both. A marked-up photo (2026-11-06) put the back edges up to 0.8 mm
+# further out, most of it parallax off the 10 mm tall bodies
+# Then squared with the real parts (user, 2026-11-06): the 3.5's grows to
+# cover its own pads whole, and the 2.5's, which in real life overhangs
+# neither the board edge nor the 3.5, slides onto the board and down to
+# where the 3.5's ends
+K1_BODY_MARGIN = 0.5
+k1_outlines = {}
+for jack, pad_style in (("3.5", K1_PIN_35), ("2.5", K1_PIN_25)):
+    corners = [k1_at(x_mm, y_mm) for x_mm, y_mm in K1[jack]["body"]]
+    corners += [k1_at(pin["x"], pin["y"]) for pin in K1[jack]["pins"]]
+    pad_radius = pad_style["size"] / 2
+    left = min(x_mm for x_mm, _ in corners) - K1_BODY_MARGIN
+    top = min(y_mm for _, y_mm in corners) - K1_BODY_MARGIN
+    right = max(x_mm for x_mm, _ in corners) + K1_BODY_MARGIN
+    bottom = max(y_mm for _, y_mm in corners) + K1_BODY_MARGIN
+    if jack == "3.5":
+        # every pad whole inside: pads reach pad_radius past their centres
+        pads = [k1_at(pin["x"], pin["y"]) for pin in K1[jack]["pins"]]
+        left = min(left, min(x_mm for x_mm, _ in pads) - pad_radius)
+        top = min(top, min(y_mm for _, y_mm in pads) - pad_radius)
+        right = max(right, max(x_mm for x_mm, _ in pads) + pad_radius)
+        bottom = max(bottom, max(y_mm for _, y_mm in pads) + pad_radius)
+    else:
+        shift_x = max(0, BX - left)
+        shift_y = max(0, k1_outlines["3.5"][3] - top)
+        left, right = left + shift_x, right + shift_x
+        top, bottom = top + shift_y, bottom + shift_y
+    k1_outlines[jack] = (left, top, right, bottom)
+    board.add_rect(left, top, right - left, bottom - top, layer="B.Fab", width=0.12)
+
 # The mic's passives (rev 11), bench-proven 2026-11-05 on the Heltec ADC with
 # the capsule, a BTECH lapel and a Disco32 + Peltor (memory: mic-board).
 # Through-hole, legs 2.54 mm apart (resistors stand up), in the strip
 # between the K1 jacks' bodies (on the back, to x+15) and the Heltec's
-# headers. Each value on the silkscreen beside its holes
+# headers. Each value on the silkscreen beside its holes. They go in from
+# the BACK, pointing down into the case: the front has only a few mm under
+# the lid (rev 10.1), so their labels are on the back silkscreen
+BACK_SILK = "B.SilkS"
 PASSIVE = []  # (label, x, y, pin 1 net, pin 2 net, value, pitch)
 # Ring bias: a radio-like ~3 V through ~3k, and FILTERED: the Disco32 is
 # nearly silent on the MAX9814's own ~2 V / 2.2k bias, and an unfiltered
@@ -248,26 +313,31 @@ PASSIVE.append(("C2", BX + 21.0, BY + 28.8, "ADC", "MIC_GND", "104", 2.54))
 # South of the 2.5 jack's body (it ends at y+32)
 PASSIVE.append(("C3", BX + 12.0, BY + 34.5, "MIC_IN", "MIC_GND", "1n", 2.54))
 PASSIVE.append(("C4", BX + 15.5, BY + 34.5, "MIC_IN", "MIC_GND", "470p", 2.54))
-board.add_text(BX + 13.75, BY + 31.8, "DNP", size=0.7, thickness=0.12)
+board.add_text(BX + 18.6, BY + 37.4, "DNP", layer=BACK_SILK, size=0.8,
+               thickness=0.12)  # after C4's value
 for label, x_mm, y_mm, net_1, net_2, value, pitch in PASSIVE:
     if pitch == 2.54:
-        # Standing up, north-south: pin 1 south
+        # Standing up, north-south: pin 1 south. Its name above the north
+        # pin (frame (x, 0) = x mm north), its value below the south one
         board.add_header(x_mm, y_mm, pins=2, label=label, angle=90,
-                         pad_labels=["1", "2"], pad_nets=[net_1, net_2])
-        board.add_text(x_mm, y_mm + 2.6, value, size=0.7, thickness=0.12)
+                         pad_labels=["1", "2"], pad_nets=[net_1, net_2], ref_at=(2.9, 0),
+                         ref_layer=BACK_SILK)
+        board.add_text(x_mm, y_mm + 2.9, value, layer=BACK_SILK, size=0.8, thickness=0.12)
     else:
         # The can: + (pin 1) west
         board.add_header(x_mm, y_mm, pins=2, label=label, pitch=pitch,
-                         pad_labels=["+", "-"], pad_nets=[net_1, net_2])
-        board.add_text(x_mm - 2.6, y_mm, "+", size=0.8, thickness=0.12)
-        board.add_text(x_mm, y_mm + 2.0, value, size=0.7, thickness=0.12)
+                         pad_labels=["+", "-"], pad_nets=[net_1, net_2], ref_layer=BACK_SILK)
+        board.add_text(x_mm - 2.6, y_mm, "+", layer=BACK_SILK, size=0.8, thickness=0.12)
+        board.add_text(x_mm, y_mm + 2.0, value, layer=BACK_SILK, size=0.8, thickness=0.12)
 
 # The ONE place the mic's ground meets the board's: beside the amp board's
 # GND pin, as on the bench (the amp's GND row, one wire to the Heltec). A
 # wire link, so a star-ground mistake can be undone with a cutter
+# Its name and value as one label: above it are J2's pins, below the amp board
+# Fitted from the back with the passives, so labelled there
 board.add_header(MIC_X + 1.27, BY + 38.4, pins=2, label="JP1",
-                 pad_labels=["MIC_GND", "GND"], pad_nets=["MIC_GND", "GND"])
-board.add_text(MIC_X + 1.27, BY + 37.0, "0R", size=0.7, thickness=0.12)
+                 pad_labels=["MIC_GND", "GND"], pad_nets=["MIC_GND", "GND"], ref_hidden=True)
+board.add_text(MIC_X + 1.27, BY + 37.0, "JP1 0R", layer=BACK_SILK, size=0.8, thickness=0.12)
 
 # Silkscreen — project name, revision and git SHA
 board.add_text(BX + BW / 2, BY + BH - 2, f"open-oswst  rev{REV}  {git_sha}", size=0.8, thickness=0.12)
