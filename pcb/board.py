@@ -10,10 +10,11 @@ from kicad import Board
 board = Board()
 git_sha = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
 
-# Board revision: one per fab order, counting every JLCPCB order so far (A/B
-# tests included), so it only ever goes up. Bump it when work on the next
-# order starts, before anything else changes
-REV = 10
+# Board revision, MAJOR.MINOR: the major goes up only when firmware for the
+# last board can't run this one (pins or drivers change); a compatible order
+# bumps the minor. Set it when work on the next order starts, before anything
+# else changes
+REV = "10.1"
 
 # 70x59mm landscape, on A4 (297x210mm)
 BX, BY = 113, 113  # board origin
@@ -96,7 +97,8 @@ board.add_header(BX + BW - 3 - J3_SPAN / 2, HY, pins=18, label="J3",
                  # knob's I2C bus. GPIO45 (the wired encoder's switch once)
                  # is the SD card's CLK: a strapping pin, and CLK needs no
                  # pull-up, so nothing holds it high at reset.
-                 pad_nets=[None, "KNOB_SCL", None, "MIC_OUT", "KNOB_SDA", None,
+                 # GPIO4: the mic, through the anti-alias RC (R3, C2)
+                 pad_nets=[None, "KNOB_SCL", None, "ADC", "KNOB_SDA", None,
                            None, None, None, None, None, None,
                            "SD_CLK", None, None, None, None, "GND"])
 
@@ -112,10 +114,42 @@ board.add_header(BX + BW - 3 - J2_SPAN / 2, HY + HELTEC_WIDTH, pins=18, label="J
                            "DIN", None, None, None, "PTT", None,
                            "SD_CMD", "SD_D0", "Ve", "Ve", None, "GND"])
 
-# Board headers along bottom edge
-board.add_header(BX + BW / 2, BY + BH_REV9 - 9, pins=5, label="MIC",
+# MAX9814 mic amp (Amazon clone of Adafruit 1713), turned 90 degrees (rev
+# 11): its header runs north-south and the board lies flat over this one,
+# reaching east. Its own capsule is gone: the clone's two capsule pads come
+# down on short flying leads to MIC_IN below, and the mic is the K1 jack's
+# ring (or the board's capsule through the ring's NC switch). Clone layout
+# (measured 2026-10-20): header 5.74 mm in from one short edge, capsule
+# pads 10.62 mm past the header, across the 14.1 mm width's middle
+MIC_X = BX + 34   # the outline's west edge clear of the SPK connector
+MIC_Y = BY + 47
+# GAIN to VDD = 40 dB: 60 dB (floating) swung rail to rail on the bench, 50
+# clipped the Disco32. GND is the mic ground (JP1 joins it to the board's)
+board.add_header(MIC_X, MIC_Y, pins=5, label="MIC", angle=90,
                  pad_labels=["AR", "OUT", "GAIN", "VDD", "GND"],
-                 pad_nets=[None, "MIC_OUT", None, "Ve", "GND"])
+                 pad_nets=[None, "MIC_OUT", "Ve", "Ve", "MIC_GND"])
+# Flying-lead holes, right under the clone's old capsule pads. "+" is the
+# amp's input (MICBIAS through its 2.2k, into MICIN through 0.1 uF); "-" is
+# the amp board's ground, which on the bench had to be the ground of every
+# mic part (the bias filter cap's above all: anywhere else put the Heltec
+# USB frames' 25 Hz into the ring, 2026-11-05)
+board.add_header(MIC_X + 10.62, MIC_Y, pins=2, label="MIC_IN", angle=90,
+                 pad_labels=["+", "-"], pad_nets=["MIC_IN", "MIC_GND"])
+# The board's own mic: the 9x7 mm electret capsule, on the K1 3.5 jack's
+# ring NC switch (net CAPSULE, K1_NETS): plugging a headset in opens the
+# switch and the headset's mic, on the ring, takes over. Between MIC_IN and
+# VOL, east of the amp board's outline
+CAPSULE_X = BX + 58.5
+board.add_header(CAPSULE_X, MIC_Y, pins=2, label="CAPSULE", angle=90,
+                 pad_labels=["+", "-"], pad_nets=["CAPSULE", "MIC_GND"])
+# Which hole is which, on both sides (the amp board sits on the back): the
+# 2-pin headers turned 90 degrees put "+" (pin 1) south
+for layer in ("F.SilkS", "B.SilkS"):
+    for x_mm in (MIC_X + 10.62, CAPSULE_X):
+        board.add_text(x_mm + 1.8, MIC_Y + 1.27, "+", layer=layer, size=0.8, thickness=0.12)
+        board.add_text(x_mm + 1.8, MIC_Y - 1.27, "-", layer=layer, size=0.8, thickness=0.12)
+# The amp board's outline, so nothing else lands under it
+board.add_rect(MIC_X - 5.74, MIC_Y - 14.1 / 2, 25.4, 14.1, layer="F.SilkS", width=0.12)
 AMP_X = BX + 3 + 3 * 2.54
 # Down by the bottom-left mounting hole (rev 10, clearing the top left for
 # the Kenwood jacks): the header row stays 4.5 mm above the hole, room for
@@ -135,9 +169,9 @@ board.add_jst_ph(BX + 24, BY + 46, pins=2, label="SPK", angle=90,
 # Kenwood K1 jacks (rev 10): the homemade breakout (pcb/k1/board.py) copied
 # onto this board, to race it: the same measured footprints
 # (pcb/k1/k1_jacks.json, top view, origin = the 3.5 bore's nose tip, bores
-# pointing -y) and the same 10-pin header map, every jack pin to its own
-# header pin and nothing else. Which pin is tip/ring/sleeve/switch gets
-# mapped on the bench. Bores out the left edge, and MIRRORED (user,
+# pointing -y). Rev 10 broke every jack pin out to a 10-pin header for the
+# bench mapping; rev 11 wires the mic pins in (K1_NETS). Bores out the left
+# edge, and MIRRORED (user,
 # 2026-10-19): the frame's (x, y) lands at (K1_X + y, K1_Y + x), so the 2.5
 # is below the 3.5 and the jacks mount from the BACK (B side) of this
 # view. As on the homemade board, the jack faces sit at the board edge and
@@ -148,20 +182,23 @@ K1_Y = BY + 16    # header clear of SD above, 2.5 body clear of the amp below
 K1_PIN_35 = {"size": 2.6, "drill": 1.7}   # 1.32 mm tabs; 1.7 fit the test plate
 K1_PIN_25 = {"size": 1.45, "drill": 1.1}  # 0.76 mm pins, only 1.9-2.0 mm apart
 K1_POST_DRILL = 1.7                       # the 2.5's plastic posts: holes, no copper
-K1_HEADER = {"size": 1.7, "drill": 1.0}
-# Header pin -> (jack, jack pin), as on the homemade board
-K1_HEADER_MAP = [("3.5", 2), ("3.5", 1), ("3.5", 3), ("3.5", 4), ("3.5", 5),
-                 ("2.5", 2), ("2.5", 1), ("2.5", 3), ("2.5", 4), ("2.5", 5)]
-K1_HEADER_Y = 21.0       # in the jack frame, from the homemade board
-K1_HEADER_FIRST_X = -6.43
 
 
 def k1_at(x_mm, y_mm):
     return (round(K1_X + y_mm, 3), round(K1_Y + x_mm, 3))
 
 
+# The jack pins the mic half uses (rev 11), by (jack, pin) from the bench map
+# (rev 10 header pin -> function, 2026-10-27/11-05): 3.5 sleeve = PTT to
+# ground, 3.5 ring = the headset mic, 3.5 ring's NC switch = the board's
+# capsule (open with a plug in), 2.5 sleeve = the headset mic's ground. The
+# rest (the speaker half) go nowhere yet
+K1_NETS = {("3.5", 3): "PTT", ("3.5", 4): "CAPSULE", ("3.5", 5): "MIC_IN",
+           ("2.5", 3): "MIC_GND"}
+
+
 def k1_net(jack, number):
-    return f"K1_{jack.replace('.', '')}_{number}"
+    return K1_NETS.get((jack, number), f"K1_{jack.replace('.', '')}_{number}")
 
 
 for jack, pad_style in (("3.5", K1_PIN_35), ("2.5", K1_PIN_25)):
@@ -175,24 +212,62 @@ for jack, pad_style in (("3.5", K1_PIN_35), ("2.5", K1_PIN_25)):
         pads.append({"name": "", "x": x_mm, "y": y_mm, "drill": K1_POST_DRILL, "plated": False})
     board.add_footprint(f"K1_Jack_{jack}mm_measured", 0, 0, pads, label=f"K1_{jack}")
 
-k1_header = []
-for header, (jack, number) in enumerate(K1_HEADER_MAP, 1):
-    x_mm, y_mm = k1_at(K1_HEADER_FIRST_X + (header - 1) * 2.54, K1_HEADER_Y)
-    k1_header.append({"name": str(header), "x": x_mm, "y": y_mm, **K1_HEADER,
-                      "net": k1_net(jack, number)})
-board.add_footprint("PinHeader_1x10_P2.54mm", 0, 0, k1_header, label="K1")
+# (Rev 10's 10-pin header, every jack pin out for breadboard jumpers, is gone
+# in rev 11: the mic pins go straight to the circuit, K1_NETS)
 
-# Labels on both silkscreens: the jacks go in from the back, the header may be
-# soldered from either side. Pin 1 and 10 beside the header's ends (pin 1 is
-# the top end), each jack's size beside its body
+# Each jack's size beside its body, on both silkscreens: the jacks go in from
+# the back
 for layer in ("F.SilkS", "B.SilkS"):
-    for header in (1, 10):
-        x_mm, y_mm = k1_at(K1_HEADER_FIRST_X + (header - 1) * 2.54, K1_HEADER_Y)
-        board.add_text(round(x_mm + 2.2, 3), y_mm, str(header), layer=layer, size=0.8, thickness=0.12)
     for jack in ("3.5", "2.5"):
         bore_x = K1[jack]["bore"][0][0]
         x_mm, y_mm = k1_at(bore_x, 15.0)
         board.add_text(x_mm, y_mm, jack, layer=layer, size=0.8, thickness=0.12)
+
+# The mic's passives (rev 11), bench-proven 2026-11-05 on the Heltec ADC with
+# the capsule, a BTECH lapel and a Disco32 + Peltor (memory: mic-board).
+# Through-hole, legs 2.54 mm apart (resistors stand up), in the strip
+# between the K1 jacks' bodies (on the back, to x+15) and the Heltec's
+# headers. Each value on the silkscreen beside its holes
+PASSIVE = []  # (label, x, y, pin 1 net, pin 2 net, value, pitch)
+# Ring bias: a radio-like ~3 V through ~3k, and FILTERED: the Disco32 is
+# nearly silent on the MAX9814's own ~2 V / 2.2k bias, and an unfiltered
+# resistor from 3V3 puts the USB frames' 25 Hz on the ring
+PASSIVE.append(("R1", BX + 17.5, BY + 16.8, "Ve", "BIAS", "1k", 2.54))
+PASSIVE.append(("R2", BX + 21.0, BY + 16.8, "BIAS", "MIC_IN", "2k", 2.54))
+# The bias filter's can: its - leg on the MIC ground (MIC_GND), never
+# elsewhere: on any other ground point it put the 25 Hz back
+PASSIVE.append(("C1", BX + 19.25, BY + 22.5, "BIAS", "MIC_GND", "100u", 2.5))
+# Anti-alias at the ADC: the MAX9814 output carries ~70 mV at 20-500 kHz,
+# which the ESP32's ADC folds into the voice band (1k + 100n: quiet floor
+# 92 -> 14 mV). 104 can become 47n (3.4 kHz) without touching the board.
+# Its ground is the MIC ground, as on the bench
+PASSIVE.append(("R3", BX + 17.5, BY + 28.8, "MIC_OUT", "ADC", "1k", 2.54))
+PASSIVE.append(("C2", BX + 21.0, BY + 28.8, "ADC", "MIC_GND", "104", 2.54))
+# RF bypass at the ring, as OpenVLM has it: NOT fitted unless the radio's own
+# transmissions get into the mic (the open 160 ms chop, 2026-11-05)
+# South of the 2.5 jack's body (it ends at y+32)
+PASSIVE.append(("C3", BX + 12.0, BY + 34.5, "MIC_IN", "MIC_GND", "1n", 2.54))
+PASSIVE.append(("C4", BX + 15.5, BY + 34.5, "MIC_IN", "MIC_GND", "470p", 2.54))
+board.add_text(BX + 13.75, BY + 31.8, "DNP", size=0.7, thickness=0.12)
+for label, x_mm, y_mm, net_1, net_2, value, pitch in PASSIVE:
+    if pitch == 2.54:
+        # Standing up, north-south: pin 1 south
+        board.add_header(x_mm, y_mm, pins=2, label=label, angle=90,
+                         pad_labels=["1", "2"], pad_nets=[net_1, net_2])
+        board.add_text(x_mm, y_mm + 2.6, value, size=0.7, thickness=0.12)
+    else:
+        # The can: + (pin 1) west
+        board.add_header(x_mm, y_mm, pins=2, label=label, pitch=pitch,
+                         pad_labels=["+", "-"], pad_nets=[net_1, net_2])
+        board.add_text(x_mm - 2.6, y_mm, "+", size=0.8, thickness=0.12)
+        board.add_text(x_mm, y_mm + 2.0, value, size=0.7, thickness=0.12)
+
+# The ONE place the mic's ground meets the board's: beside the amp board's
+# GND pin, as on the bench (the amp's GND row, one wire to the Heltec). A
+# wire link, so a star-ground mistake can be undone with a cutter
+board.add_header(MIC_X + 1.27, BY + 38.4, pins=2, label="JP1",
+                 pad_labels=["MIC_GND", "GND"], pad_nets=["MIC_GND", "GND"])
+board.add_text(MIC_X + 1.27, BY + 37.0, "0R", size=0.7, thickness=0.12)
 
 # Silkscreen — project name, revision and git SHA
 board.add_text(BX + BW / 2, BY + BH - 2, f"open-oswst  rev{REV}  {git_sha}", size=0.8, thickness=0.12)
