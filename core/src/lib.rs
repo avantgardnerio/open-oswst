@@ -15,6 +15,7 @@ pub mod double_click;
 pub mod echo;
 pub mod fec;
 pub mod gzip;
+pub mod highpass;
 pub mod logger;
 pub mod management;
 pub mod menu;

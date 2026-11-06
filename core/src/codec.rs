@@ -1,3 +1,4 @@
+use crate::highpass::{self, Highpass};
 use codec2::{Codec2, Codec2Mode};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
@@ -79,12 +80,16 @@ pub fn run(rx: Receiver<CodecRequest>) {
     log::info!("Codec2 encoder initialized (thread)");
     let mut decoder = Box::new(Codec2::new(Codec2Mode::MODE_1200));
     log::info!("Codec2 decoder initialized (thread)");
+    // The mic's DC offset and anything below the voice band, out before the
+    // encoder (highpass.rs says why)
+    let mut highpass = Highpass::new(highpass::CUTOFF_HZ, highpass::SAMPLE_RATE_HZ);
 
     log::info!("Codec thread ready");
 
     while let Ok(req) = rx.recv() {
         match req {
-            CodecRequest::Encode { header, pcm } => {
+            CodecRequest::Encode { header, mut pcm } => {
+                highpass.run(&mut pcm);
                 let mut packet = heapless::Vec::<u8, 255>::new();
                 let _ = packet.extend_from_slice(&header);
 
