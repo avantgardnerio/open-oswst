@@ -177,10 +177,11 @@ MIC_Q1 = 18.7
 MIC_FAR_EDGE = 23.5
 MIC_NEAR_EDGE = 1.6
 MIC_WIDTH = 13.8
-CAPSULE_FROM_HEADER = 25.0  # 1.5 mm past the amp board's far edge, clear of MIC_IN's joints
-# Far enough east that the capsule, past the amp board's far (west) edge,
-# clears the speaker amp's outline (AMP_* below, x 132.2): its holes by 0.15 mm
-MIC_X = BX + 45.2
+# The capsule just east of the speaker amp's outline (AMP_* below, x 132.2:
+# its holes clear it by 0.15 mm); the amp board 2 mm further east than it
+# needs to be, a margin for the capsule's legs (user, 2026-11-06)
+CAPSULE_X = BX + 20.2
+MIC_X = BX + 47.2
 MIC_Y = BY + 47
 # CAPSULE turned 270 degrees: pin 1 north (frame (0, -y) = y mm east,
 # (x, 0) = x mm south); MIC_IN 90, like the amp's header: pin 1 south
@@ -209,11 +210,11 @@ board.add_header(MIC_X - MIC_Q1, MIC_Y, pins=2, label="MIC_IN", angle=90,
 # 9.74 mm across (micrometer, 2026-11-06), on the floor side: 1 mm north of
 # the amp boards' row keeps its edge ~1 mm off the speaker amp's Vin pin,
 # which is soldered on this side
-CAPSULE_X = MIC_X - CAPSULE_FROM_HEADER
 CAPSULE_Y = MIC_Y - 1.0
 CAPSULE_DIAMETER = 9.74
+CAPSULE_PITCH = 3.1  # its legs, off a marked-up photo (3.1-3.2 mm, 2026-11-06)
 board.add_circle(CAPSULE_X, CAPSULE_Y, CAPSULE_DIAMETER, layer="B.SilkS", width=0.12)
-board.add_header(CAPSULE_X, CAPSULE_Y, pins=2, label="CAPSULE", angle=270,
+board.add_header(CAPSULE_X, CAPSULE_Y, pins=2, label="CAPSULE", angle=270, pitch=CAPSULE_PITCH,
                  pad_labels=["+", "-"], pad_nets=["CAPSULE", "MIC_GND"], ref_at=(-8.0, 0),
                  ref_layer="B.SilkS")  # its name on its own side, clear of both outlines
 # Which hole is which, on both sides (the capsule faces the floor, the amp
@@ -221,9 +222,10 @@ board.add_header(CAPSULE_X, CAPSULE_Y, pins=2, label="CAPSULE", angle=270,
 for layer in ("F.SilkS", "B.SilkS"):
     # MIC_IN's marks east of it, "+" south; the capsule's west (east is the
     # amp board's edge), "+" north
-    for x_mm, y_mm, plus_south in ((MIC_X - MIC_Q1 + 1.8, MIC_Y, True),
-                                   (CAPSULE_X - 1.8, CAPSULE_Y, False)):
-        plus_dy = 1.27 if plus_south else -1.27
+    for x_mm, y_mm, half_pitch, plus_south in ((MIC_X - MIC_Q1 + 1.8, MIC_Y, 1.27, True),
+                                               (CAPSULE_X - 1.8, CAPSULE_Y, CAPSULE_PITCH / 2,
+                                                False)):
+        plus_dy = half_pitch if plus_south else -half_pitch
         board.add_text(x_mm, y_mm + plus_dy, "+", layer=layer, size=0.8, thickness=0.12)
         board.add_text(x_mm, y_mm - plus_dy, "-", layer=layer, size=0.8, thickness=0.12)
 # The amp board's outline, so nothing else lands under it
