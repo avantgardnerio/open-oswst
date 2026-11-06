@@ -20,3 +20,9 @@ __pycache__/
 
 # Digilent WaveForms (AD3) USB error log, written to the working directory
 DebugErc.log
+
+# The Jumperless skill caches its serial port here
+.jumperless_port
+
+# KiCad autosaves while a board is open
+_autosave-*
