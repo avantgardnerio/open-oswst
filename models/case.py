@@ -6,7 +6,6 @@ from pathlib import Path
 OUT = Path(__file__).parent
 
 # Overall dimensions
-WIDTH = 80
 # 145 -> 140: the south end had 7.80mm of dead space past the MIC daughterboard, which is the
 # southernmost part in the case (it hangs 12.1mm off the PCB's south edge). Trimmed 5mm, leaving
 # 2.80mm of margin for the mic wiring. Worth doing because the case only just fits its pouch.
@@ -16,6 +15,10 @@ WIDTH = 80
 # while the south wall walks north by the other half: the south gap closes 1:1 with the trim, and
 # every north-end clearance (the RF/antenna section) is unchanged. Verified with fitcheck.py.
 LENGTH = 140
+# 80 -> 75: rev 10's K1 jack noses stick 2.5mm out past the board's left edge. The left wall moved
+# in until the noses sit flush with its outside face (so the plug seats fully), and the right wall
+# came in the same 2.5mm to keep the board centred, 0.5mm clear of each inner wall
+WIDTH = 75
 HEIGHT = 34
 WALL = 2
 FILLET_R = 3
@@ -23,7 +26,7 @@ LID_HEIGHT = 4  # how much of the total height is lid
 
 # Amp screw post
 AMP_POST_FROM_TOP = 8.5    # mm from top inside wall (Y axis)
-AMP_POST_FROM_LEFT = 18    # mm from left inside wall (X axis) — shifted inward to clear 4th lid post
+AMP_POST_FROM_LEFT = 15.5  # mm from left inside wall (X axis); was 18 at WIDTH 80, keeps post_x (and the SMA hole) at -20
 AMP_POST_HEIGHT = 18      # tops sit 6mm below case side tops
 AMP_POST_OD = 4.5          # outer diameter — trimmed for module clearance
 AMP_POST_ID = 1.8          # pilot hole for M2 screw
@@ -189,26 +192,34 @@ ptt_hole = Pos(WIDTH / 2, ptt_y, ptt_z) * Rot(0, 90, 0) * Cylinder(
 )
 bottom = bottom - ptt_hole
 
-# Kenwood jack through left wall (negative X), 3.5mm on top, 2.5mm below, 12mm apart
-KENWOOD_SPACING = 12
-kenwood_recess_w = 10                     # Z span of recess
-kenwood_recess_h = KENWOOD_SPACING + 10  # Y span — covers both jacks with margin
-kenwood_y_top = (perf_top_post_y + AMP_POST_OD / 2 + 3  # 3mm above top perf post edge
-                 + KENWOOD_SPACING / 2 + kenwood_recess_h / 2)  # offset so recess bottom clears
-kenwood_z = -HEIGHT / 2 + FILLET_R + kenwood_recess_w / 2 + 2  # recess clears fillet + 2mm margin
-for jack_dia, y_off in [(6.4, 0), (4.6, -KENWOOD_SPACING)]:
-    jack = Pos(-WIDTH / 2, kenwood_y_top + y_off, kenwood_z) * Rot(0, 90, 0) * Cylinder(
-        radius=jack_dia / 2, height=WALL * 3
-    )
-    bottom = bottom - jack
-
-# Kenwood recess — thin wall from 2mm to 1mm for nut clearance
-KENWOOD_RECESS_DEPTH = 1.0   # mm to remove from outer wall
-kenwood_mid_y = kenwood_y_top - KENWOOD_SPACING / 2  # midpoint between the two jacks
-kenwood_recess = Pos(-WIDTH / 2, kenwood_mid_y, kenwood_z) * Box(
-    KENWOOD_RECESS_DEPTH * 2, kenwood_recess_h, kenwood_recess_w
+# Kenwood K1 jacks: rev 10 solders them on our board's left edge (pcb/board.py K1_*), bores
+# pointing out through the left wall. Bore centres measured on the real jacks (pcb/k1/k1_jacks.json):
+# the 3.5 sits 16.0mm and the 2.5 26.9mm below the board's top edge.
+#
+# The jacks sit on the board's front face (the Heltec side), so the bores land below the board
+# (its front face is at floor_z + PERF_POST_HEIGHT = 4.5). Their noses end flush with the wall's
+# outside face, inside one closed, square-cornered window: the board goes in jack side first at an
+# angle, noses into the window, then drops onto its posts. Square, not two round holes, so it takes
+# whatever the real jacks turn out to be; wall stays solid above and below it.
+#
+# Size from calipers on the real jacks (2026-10-29): worst case they fill 26mm along the board edge
+# and 9mm below the board's front face. Centred on the two bores, plus 1mm of play all round (read
+# off the caliper's printed scale, so +-0.5mm).
+board_top_y = perf_center_y + PERF_L / 2
+board_front_z = floor_z + PERF_POST_HEIGHT
+K1_BORE_35_Y = board_top_y - 16.0
+K1_BORE_25_Y = board_top_y - 26.9
+K1_JACKS_ALONG_EDGE = 26
+K1_JACKS_BELOW_BOARD = 9
+K1_WINDOW_PLAY = 1.0
+K1_WINDOW_BOTTOM_Z = board_front_z - K1_JACKS_BELOW_BOARD - K1_WINDOW_PLAY
+K1_WINDOW_TOP_Z = board_front_z + K1_WINDOW_PLAY
+k1_window_y = (K1_BORE_35_Y + K1_BORE_25_Y) / 2
+k1_window_h = K1_JACKS_ALONG_EDGE + 2 * K1_WINDOW_PLAY
+k1_window = Pos(-WIDTH / 2, k1_window_y, (K1_WINDOW_BOTTOM_Z + K1_WINDOW_TOP_Z) / 2) * Box(
+    WALL * 3, k1_window_h, K1_WINDOW_TOP_Z - K1_WINDOW_BOTTOM_Z
 )
-bottom = bottom - kenwood_recess
+bottom = bottom - k1_window
 
 # USB-C hole through right wall (positive X) — centred on the Heltec's receptacle.
 #
@@ -422,6 +433,7 @@ plate = Compound(children=[bottom, lid])
 if __name__ == "__main__":
     export_step(plate, str(OUT / "case.step"))
     export_stl(plate, str(OUT / "case.stl"))
+    export_stl(bottom, str(OUT / "out" / "case_bottom.stl"))  # fitment prints: bottom half only
     print(f"Exported case: {WIDTH}x{LENGTH}x{HEIGHT}mm, lid={LID_HEIGHT}mm, wall={WALL}mm")
 
 # CQ-editor preview
