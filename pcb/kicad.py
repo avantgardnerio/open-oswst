@@ -62,6 +62,22 @@ class Board:
             f' (layer "{layer}"))'
         )
 
+    def add_circle(self, x, y, diameter, layer="F.Fab", width=0.1):
+        """An unfilled circle centred at (x, y), e.g. a round part's body"""
+        self.graphics.append(
+            f'  (gr_circle (center {x} {y}) (end {x + diameter / 2} {y})'
+            f' (stroke (width {width}) (type solid)) (fill none)'
+            f' (layer "{layer}"))'
+        )
+
+    def add_outline(self, points, layer="F.Fab", width=0.1):
+        """A closed outline through the given (x, y) points"""
+        for (x0, y0), (x1, y1) in zip(points, points[1:] + points[:1]):
+            self.graphics.append(
+                f'  (gr_line (start {x0} {y0}) (end {x1} {y1})'
+                f' (stroke (width {width}) (type solid)) (layer "{layer}"))'
+            )
+
     def add_mounting_hole(self, x, y, drill=3.2):
         """Add a non-plated through-hole at (x, y) with given drill diameter in mm."""
         self._fp_id += 1
