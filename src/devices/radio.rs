@@ -54,6 +54,10 @@ const HEADER_WAIT: Duration = Duration::from_millis(35);
 /// someone else would still be on the air when this runs out.
 const PACKET_END_WAIT: Duration = Duration::from_millis(60);
 
+/// Debug: true = never transmit (on_tx). With mic.rs's RECORD_TO_FLASH,
+/// records the mic with the radio's own RF out of the picture
+const DEBUG_NO_TX: bool = false;
+
 /// How often to log the receiver's state (or, sweeping, the sweep's)
 const RX_STATE_EVERY_SECS: u64 = 10;
 
@@ -716,6 +720,12 @@ impl Driver {
 
     /// The app wants a packet sent: wait for clear air, then send it.
     async fn on_tx(&mut self, tx_req: TxRequest) {
+        // The app encodes and queues every
+        // packet as usual, but nothing goes on the air
+        if DEBUG_NO_TX {
+            log::info!("DEBUG_NO_TX: dropped a {}-byte packet", tx_req.data.len());
+            return;
+        }
         if tx_req.clear_air_first {
             self.wait_for_clear_air().await;
         }
