@@ -177,11 +177,18 @@ MIC_Q1 = 18.7
 MIC_FAR_EDGE = 23.5
 MIC_NEAR_EDGE = 1.6
 MIC_WIDTH = 13.8
-# The capsule just east of the speaker amp's outline (AMP_* below, x 132.2:
-# its holes clear it by 0.15 mm); the amp board 2 mm further east than it
-# needs to be, a margin for the capsule's legs (user, 2026-11-06)
-CAPSULE_X = BX + 20.2
-MIC_X = BX + 47.2
+# The speaker amp's header and its outline's width (its header and outline
+# are drawn further down): the capsule sits east of it
+AMP_X = BX + 3 + 3 * 2.54
+AMP_PIN_SPAN = 6 * 2.54
+AMP_SIDE_EDGE = 0.93
+amp_east_edge = AMP_X + AMP_PIN_SPAN / 2 + AMP_SIDE_EDGE
+# The capsule just east of the speaker amp's outline (where it fit the
+# printed board coupon), and the mic amp board 4 mm further east than that
+# fit: on the coupon MIC_IN's pins touched the capsule's grounded can
+# (user, 2026-11-07)
+CAPSULE_X = amp_east_edge + 2.27
+MIC_X = BX + 51.2
 MIC_Y = BY + 47
 # CAPSULE turned 270 degrees: pin 1 north (frame (0, -y) = y mm east,
 # (x, 0) = x mm south); MIC_IN 90, like the amp's header: pin 1 south
@@ -231,7 +238,6 @@ for layer in ("F.SilkS", "B.SilkS"):
 # The amp board's outline, so nothing else lands under it
 board.add_rect(MIC_X - MIC_FAR_EDGE, MIC_Y - MIC_WIDTH / 2, MIC_FAR_EDGE + MIC_NEAR_EDGE,
                MIC_WIDTH, layer="F.SilkS", width=0.12)
-AMP_X = BX + 3 + 3 * 2.54
 # Down by the bottom-left mounting hole (rev 10, clearing the top left for
 # the Kenwood jacks): the header row stays 4.5 mm above the hole, room for
 # the M2 screw head (3.8 mm), the breakout's edge past its pins, and 1 mm
@@ -245,8 +251,6 @@ board.add_header(AMP_X, AMP_Y - 12.954, pins=2, label="AMP_SPK", angle=180,
 # The breakout's outline, so nothing else lands under it (measured off a
 # marked-up photo 2026-11-06): 0.93 mm past the end pins, 16.1 mm north of
 # the pin row (the speaker terminal end), ~2.2 mm south of it (not marked)
-AMP_PIN_SPAN = 6 * 2.54
-AMP_SIDE_EDGE = 0.93
 AMP_FAR_EDGE = 16.1
 AMP_NEAR_EDGE = 2.2
 board.add_rect(AMP_X - AMP_PIN_SPAN / 2 - AMP_SIDE_EDGE, AMP_Y - AMP_FAR_EDGE,
@@ -349,7 +353,7 @@ for jack, pad_style in (("3.5", K1_PIN_35), ("2.5", K1_PIN_25)):
 
 # The mic's passives (rev 11), bench-proven 2026-11-05 on the Heltec ADC with
 # the capsule, a BTECH lapel and a Disco32 + Peltor (memory: mic-board).
-# Through-hole, legs 2.54 mm apart (resistors stand up), beside the K1
+# Through-hole, resistors lying flat (RESISTOR_PITCH), beside the K1
 # jacks. Each value on the silkscreen beside its holes. They go in from the
 # BACK (KiCad's B: the floor side, the Heltec's and the screen's), pointing
 # down into the case: the lid side has only a few mm. Anything up to
@@ -359,6 +363,9 @@ for jack, pad_style in (("3.5", K1_PIN_35), ("2.5", K1_PIN_25)):
 # the Heltec, below the 3.5 jack
 BACK_SILK = "B.SilkS"
 C1_DIAMETER = 6.52
+# A real resistor's body is ~7 mm: its legs bent down past it need 7.62 mm
+# (0.3") between holes (user, 2026-11-07). Ceramic caps stand on 2.54
+RESISTOR_PITCH = 7.62
 PASSIVE = []  # (label, x, y, pin 1 net, pin 2 net, value, pitch)
 # Ring bias: a radio-like ~3 V through ~3k, and FILTERED: the Disco32 is
 # nearly silent on the MAX9814's own ~2 V / 2.2k bias, and an unfiltered
@@ -366,8 +373,8 @@ PASSIVE = []  # (label, x, y, pin 1 net, pin 2 net, value, pitch)
 # West end of the Heltec's outline: its antenna tip (x 132.24) plus the
 # labels' half width and a margin, leaving the east end to AMP2
 PASSIVE_ROW_Y = BY + 24.0
-PASSIVE.append(("R1", BX + 21.0, PASSIVE_ROW_Y, "Ve", "BIAS", "1k", 2.54))
-PASSIVE.append(("R2", BX + 24.5, PASSIVE_ROW_Y, "BIAS", "MIC_IN", "2k", 2.54))
+PASSIVE.append(("R1", BX + 21.0, PASSIVE_ROW_Y, "Ve", "BIAS", "1k", RESISTOR_PITCH))
+PASSIVE.append(("R2", BX + 24.5, PASSIVE_ROW_Y, "BIAS", "MIC_IN", "2k", RESISTOR_PITCH))
 # The bias filter's can: its - leg on the MIC ground (MIC_GND), never
 # elsewhere: on any other ground point it put the 25 Hz back
 PASSIVE.append(("C1", BX + 15.0, BY + 26.6, "BIAS", "MIC_GND", "100u", 2.5))
@@ -375,7 +382,7 @@ PASSIVE.append(("C1", BX + 15.0, BY + 26.6, "BIAS", "MIC_GND", "100u", 2.5))
 # which the ESP32's ADC folds into the voice band (1k + 100n: quiet floor
 # 92 -> 14 mV). 104 can become 47n (3.4 kHz) without touching the board.
 # Its ground is the MIC ground, as on the bench
-PASSIVE.append(("R3", BX + 28.0, PASSIVE_ROW_Y, "MIC_OUT", "ADC", "1k", 2.54))
+PASSIVE.append(("R3", BX + 28.0, PASSIVE_ROW_Y, "MIC_OUT", "ADC", "1k", RESISTOR_PITCH))
 PASSIVE.append(("C2", BX + 31.5, PASSIVE_ROW_Y, "ADC", "MIC_GND", "104", 2.54))
 # RF bypass at the ring, as OpenVLM has it: NOT fitted unless the radio's own
 # transmissions get into the mic (the open 160 ms chop, 2026-11-05)
@@ -386,15 +393,16 @@ PASSIVE.append(("C4", BX + 15.5, BY + 33.5, "MIC_IN", "MIC_GND", "470p", 2.54))
 board.add_text(BX + 18.6, BY + 36.4, "DNP", layer=BACK_SILK, size=0.8,
                thickness=0.12)  # after C4's value
 # Labels beside a pin: name north of the north pin (frame (x, 0) = x mm
-# north), value south of the south one
-LABEL_GAP = 2.9
+# north), value south of the south one, this far past the pin
+LABEL_GAP = 1.63
 for label, x_mm, y_mm, net_1, net_2, value, pitch in PASSIVE:
-    if pitch == 2.54:
-        # Standing up, north-south: pin 1 south
-        board.add_header(x_mm, y_mm, pins=2, label=label, angle=90,
-                         pad_labels=["1", "2"], pad_nets=[net_1, net_2], ref_at=(LABEL_GAP, 0),
+    if label != "C1":
+        # North-south: pin 1 south
+        label_dy = pitch / 2 + LABEL_GAP
+        board.add_header(x_mm, y_mm, pins=2, label=label, angle=90, pitch=pitch,
+                         pad_labels=["1", "2"], pad_nets=[net_1, net_2], ref_at=(label_dy, 0),
                          ref_layer=BACK_SILK)
-        board.add_text(x_mm, y_mm + LABEL_GAP, value, layer=BACK_SILK, size=0.8, thickness=0.12)
+        board.add_text(x_mm, y_mm + label_dy, value, layer=BACK_SILK, size=0.8, thickness=0.12)
     else:
         # The can: + (pin 1) west, standing on the floor side, its body
         # outlined (6.52 mm across, micrometer 2026-11-06)

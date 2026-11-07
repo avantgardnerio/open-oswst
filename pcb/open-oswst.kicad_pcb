@@ -78,48 +78,48 @@
     (layer "F.SilkS")
     (effects (font (size 1 1) (thickness 0.15)))
   )
-  (gr_circle (center 133.2 159.0) (end 138.07 159.0) (stroke (width 0.12) (type solid)) (fill none) (layer "B.SilkS"))
+  (gr_circle (center 134.44000000000003 159.0) (end 139.31000000000003 159.0) (stroke (width 0.12) (type solid)) (fill none) (layer "B.SilkS"))
   (gr_text "+"
-    (at 143.3 161.27)
+    (at 147.3 161.27)
     (layer "F.SilkS")
     (effects (font (size 0.8 0.8) (thickness 0.12)))
   )
   (gr_text "-"
-    (at 143.3 158.73)
+    (at 147.3 158.73)
     (layer "F.SilkS")
     (effects (font (size 0.8 0.8) (thickness 0.12)))
   )
   (gr_text "+"
-    (at 131.39999999999998 157.45)
+    (at 132.64000000000001 157.45)
     (layer "F.SilkS")
     (effects (font (size 0.8 0.8) (thickness 0.12)))
   )
   (gr_text "-"
-    (at 131.39999999999998 160.55)
+    (at 132.64000000000001 160.55)
     (layer "F.SilkS")
     (effects (font (size 0.8 0.8) (thickness 0.12)))
   )
   (gr_text "+"
-    (at 143.3 161.27)
+    (at 147.3 161.27)
     (layer "B.SilkS")
     (effects (font (size 0.8 0.8) (thickness 0.12)) (justify mirror))
   )
   (gr_text "-"
-    (at 143.3 158.73)
+    (at 147.3 158.73)
     (layer "B.SilkS")
     (effects (font (size 0.8 0.8) (thickness 0.12)) (justify mirror))
   )
   (gr_text "+"
-    (at 131.39999999999998 157.45)
+    (at 132.64000000000001 157.45)
     (layer "B.SilkS")
     (effects (font (size 0.8 0.8) (thickness 0.12)) (justify mirror))
   )
   (gr_text "-"
-    (at 131.39999999999998 160.55)
+    (at 132.64000000000001 160.55)
     (layer "B.SilkS")
     (effects (font (size 0.8 0.8) (thickness 0.12)) (justify mirror))
   )
-  (gr_rect (start 136.7 153.1) (end 161.79999999999998 166.9) (stroke (width 0.12) (type solid)) (fill none) (layer "F.SilkS"))
+  (gr_rect (start 140.7 153.1) (end 165.79999999999998 166.9) (stroke (width 0.12) (type solid)) (fill none) (layer "F.SilkS"))
   (gr_rect (start 115.07 148.9) (end 132.17 167.20000000000002) (stroke (width 0.12) (type solid)) (fill none) (layer "F.SilkS"))
   (gr_text "3.5"
     (at 125.5 129.0)
@@ -149,12 +149,12 @@
     (effects (font (size 0.8 0.8) (thickness 0.12)) (justify mirror))
   )
   (gr_text "1k"
-    (at 134.0 139.9)
+    (at 134.0 142.44)
     (layer "B.SilkS")
     (effects (font (size 0.8 0.8) (thickness 0.12)) (justify mirror))
   )
   (gr_text "2k"
-    (at 137.5 139.9)
+    (at 137.5 142.44)
     (layer "B.SilkS")
     (effects (font (size 0.8 0.8) (thickness 0.12)) (justify mirror))
   )
@@ -170,7 +170,7 @@
     (effects (font (size 0.8 0.8) (thickness 0.12)) (justify mirror))
   )
   (gr_text "1k"
-    (at 141.0 139.9)
+    (at 141.0 142.44)
     (layer "B.SilkS")
     (effects (font (size 0.8 0.8) (thickness 0.12)) (justify mirror))
   )
@@ -190,11 +190,11 @@
     (effects (font (size 0.8 0.8) (thickness 0.12)) (justify mirror))
   )
   (gr_text "JP1 0R"
-    (at 161.47 153.0)
+    (at 165.47 153.0)
     (layer "B.SilkS")
     (effects (font (size 0.8 0.8) (thickness 0.12)) (justify mirror))
   )
-  (gr_text "open-oswst  rev10.1  f350435"
+  (gr_text "open-oswst  rev10.1  31c3ad5"
     (at 148.0 170)
     (layer "F.SilkS")
     (effects (font (size 0.8 0.8) (thickness 0.12)))
@@ -709,7 +709,7 @@
   )
   (footprint "PinHeader_1x5_P2.54mm"
     (layer "F.Cu")
-    (at 160.2 160 90)
+    (at 164.2 160 90)
     (fp_text reference "MIC" (at 0 -4.0) (layer "F.SilkS")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -750,7 +750,7 @@
   )
   (footprint "PinHeader_1x2_P2.54mm"
     (layer "F.Cu")
-    (at 141.5 160 90)
+    (at 145.5 160 90)
     (fp_text reference "MIC_IN" (at 0 4.5) (layer "F.SilkS")
       (effects (font (size 1 1) (thickness 0.15)))
     )
@@ -771,7 +771,7 @@
   )
   (footprint "PinHeader_1x2_P3.1mm"
     (layer "F.Cu")
-    (at 133.2 159.0 270)
+    (at 134.44000000000003 159.0 270)
     (fp_text reference "CAPSULE" (at -8.0 0) (layer "B.SilkS")
       (effects (font (size 1 1) (thickness 0.15)) (justify mirror))
     )
@@ -967,42 +967,42 @@
       (layers *.Cu *.Mask)
     )
   )
-  (footprint "PinHeader_1x2_P2.54mm"
+  (footprint "PinHeader_1x2_P7.62mm"
     (layer "F.Cu")
     (at 134.0 137.0 90)
-    (fp_text reference "R1" (at 2.9 0) (layer "B.SilkS")
+    (fp_text reference "R1" (at 5.4399999999999995 0) (layer "B.SilkS")
       (effects (font (size 1 1) (thickness 0.15)) (justify mirror))
     )
     (pad "1" thru_hole circle
-      (at -1.27 0)
+      (at -3.81 0)
       (size 1.7 1.7)
       (drill 1.0)
       (layers *.Cu *.Mask)
       (net 1 "Ve")
     )
     (pad "2" thru_hole circle
-      (at 1.27 0)
+      (at 3.81 0)
       (size 1.7 1.7)
       (drill 1.0)
       (layers *.Cu *.Mask)
       (net 27 "BIAS")
     )
   )
-  (footprint "PinHeader_1x2_P2.54mm"
+  (footprint "PinHeader_1x2_P7.62mm"
     (layer "F.Cu")
     (at 137.5 137.0 90)
-    (fp_text reference "R2" (at 2.9 0) (layer "B.SilkS")
+    (fp_text reference "R2" (at 5.4399999999999995 0) (layer "B.SilkS")
       (effects (font (size 1 1) (thickness 0.15)) (justify mirror))
     )
     (pad "1" thru_hole circle
-      (at -1.27 0)
+      (at -3.81 0)
       (size 1.7 1.7)
       (drill 1.0)
       (layers *.Cu *.Mask)
       (net 27 "BIAS")
     )
     (pad "2" thru_hole circle
-      (at 1.27 0)
+      (at 3.81 0)
       (size 1.7 1.7)
       (drill 1.0)
       (layers *.Cu *.Mask)
@@ -1030,21 +1030,21 @@
       (net 18 "MIC_GND")
     )
   )
-  (footprint "PinHeader_1x2_P2.54mm"
+  (footprint "PinHeader_1x2_P7.62mm"
     (layer "F.Cu")
     (at 141.0 137.0 90)
-    (fp_text reference "R3" (at 2.9 0) (layer "B.SilkS")
+    (fp_text reference "R3" (at 5.4399999999999995 0) (layer "B.SilkS")
       (effects (font (size 1 1) (thickness 0.15)) (justify mirror))
     )
     (pad "1" thru_hole circle
-      (at -1.27 0)
+      (at -3.81 0)
       (size 1.7 1.7)
       (drill 1.0)
       (layers *.Cu *.Mask)
       (net 17 "MIC_OUT")
     )
     (pad "2" thru_hole circle
-      (at 1.27 0)
+      (at 3.81 0)
       (size 1.7 1.7)
       (drill 1.0)
       (layers *.Cu *.Mask)
@@ -1116,7 +1116,7 @@
   )
   (footprint "PinHeader_1x2_P2.54mm"
     (layer "F.Cu")
-    (at 161.47 151.4)
+    (at 165.47 151.4)
     (fp_text reference "JP1" (at 0 -2.5) (layer "F.SilkS") hide
       (effects (font (size 1 1) (thickness 0.15)))
     )
