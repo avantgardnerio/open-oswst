@@ -10,6 +10,16 @@ rust-version = "1.82"
 name = "open-oswst"
 harness = false # do not use the built-in cargo test harness -> resolve rust-analyzer errors
 
+# Plays a voice clip that is NOT in the repo (target/voice_clip.raw, a
+# recording of a person), so it only builds when asked:
+# cargo build --bin voice_test --features voice-clip
+[[bin]]
+name = "voice_test"
+required-features = ["voice-clip"]
+
+[features]
+voice-clip = []
+
 [profile.release]
 opt-level = "s"
 
