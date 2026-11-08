@@ -19,8 +19,27 @@ pub struct Peripherals {
     pub spk_ws: AnyIOPin<'static>,
 }
 
-fn pcm_as_bytes(pcm: &[i16]) -> &[u8] {
-    unsafe { core::slice::from_raw_parts(pcm.as_ptr() as *const u8, pcm.len() * 2) }
+/// Codec2 and the app run at 8 kHz; I2S runs at twice that, because the
+/// PCM5102A's PLL (SCK grounded) can't lock below 16 kHz (datasheet table
+/// 11). The MAX98357A takes 16 kHz too, so one firmware drives either
+const I2S_RATE_HZ: u32 = 16000;
+const UPSAMPLE: usize = 2;
+
+fn pcm_as_bytes(pcm: &[i32]) -> &[u8] {
+    unsafe { core::slice::from_raw_parts(pcm.as_ptr() as *const u8, pcm.len() * 4) }
+}
+
+/// 8 kHz 16-bit samples -> 16 kHz in 32-bit slots (the sample in the top
+/// half): each sample, then the midpoint to the next. `previous` carries the
+/// last sample across frames, so frame edges interpolate too
+fn upsample(pcm: &[i16], previous: &mut i16, out: &mut Vec<i32>) {
+    out.clear();
+    for &sample in pcm {
+        let midpoint = (*previous as i32 + sample as i32) / 2;
+        out.push(midpoint << 16);
+        out.push((sample as i32) << 16);
+        *previous = sample;
+    }
 }
 
 pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
@@ -28,16 +47,17 @@ pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
     // blocks until DMA finishes the 1st — gives us 40ms pacing.
     let i2s_chan_cfg = I2sChannelConfig::new()
         .dma_buffer_count(2)
-        .frames_per_buffer(320)
+        .frames_per_buffer((FRAME_SAMPLES * UPSAMPLE) as u32)
         .auto_clear(true);
     let std_config = StdConfig::new(
         i2s_chan_cfg,
-        StdClkConfig::from_sample_rate_hz(8000),
+        StdClkConfig::from_sample_rate_hz(I2S_RATE_HZ),
         // Mono, sent on both slots: the I2S hardware repeats each sample on
         // left and right, so our buffers hold mono, half the memory. Not the
         // default mono mask (Left only), which sends zeros on the right: the
-        // MAX98357A plays (L + R) / 2, and it came out 6 dB quiet
-        StdSlotConfig::philips_slot_default(DataBitWidth::Bits16, SlotMode::Mono)
+        // MAX98357A plays (L + R) / 2, and it came out 6 dB quiet. 32-bit
+        // slots: BCLK = 64 x the rate, which the PCM5102A's PLL needs
+        StdSlotConfig::philips_slot_default(DataBitWidth::Bits32, SlotMode::Mono)
             .slot_mode_mask(SlotMode::Mono, StdSlotMask::Both),
         StdGpioConfig::default(),
     );
@@ -50,7 +70,7 @@ pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
         p.spk_ws,
     )
     .unwrap();
-    log::info!("I2S TX configured (8kHz mono on both slots, 16-bit Philips, 2 DMA bufs)");
+    log::info!("I2S TX configured (16kHz mono on both slots, 32-bit Philips, 2 DMA bufs)");
 
     async move {
         i2s_tx.tx_enable().unwrap();
@@ -65,6 +85,8 @@ pub async fn init(p: Peripherals) -> impl Future<Output = ()> {
 async fn speaker_loop(mut i2s_tx: I2sDriver<'_, I2sTx>) {
     let mut last_frame = std::time::Instant::now();
     let mut scaled: Vec<i16> = Vec::new();
+    let mut upsampled: Vec<i32> = Vec::new();
+    let mut previous: i16 = 0;
     loop {
         // Underrun: mid-stream (a frame played recently) but nothing was
         // queued, so the DMA ran dry waiting for the next audio
@@ -79,7 +101,8 @@ async fn speaker_loop(mut i2s_tx: I2sDriver<'_, I2sTx>) {
 
         for frame in audio.chunks(FRAME_SAMPLES) {
             scale(frame, &mut scaled);
-            i2s_tx.write_async(pcm_as_bytes(&scaled)).await.unwrap();
+            upsample(&scaled, &mut previous, &mut upsampled);
+            i2s_tx.write_async(pcm_as_bytes(&upsampled)).await.unwrap();
         }
         last_frame = std::time::Instant::now();
     }
