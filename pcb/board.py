@@ -14,7 +14,7 @@ git_sha = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=
 # last board can't run this one (pins or drivers change); a compatible order
 # bumps the minor. Set it when work on the next order starts, before anything
 # else changes
-REV = "10.1"
+REV = "10.2"
 
 # 70x59mm landscape, on A4 (297x210mm)
 BX, BY = 113, 113  # board origin
@@ -58,8 +58,7 @@ board.add_header(BX + 23 - 2.54, cy, pins=9, label="SD",
 # Heltec's battery input accepts 3.3-4.2V (per datasheet 3.2), so raw LiPo is correct here.
 cx = BX + 36.3
 JST2_STEP = 7.4  # one 2-pin housing (6 mm) and the gap to the next
-board.add_jst_ph(cx, cy, pins=2, label="SPK",
-                 pad_labels=["-", "+"], pad_nets=["SPK-", "SPK+"]); cx += JST2_STEP
+cx += JST2_STEP  # rev 10.1's SPK slot, empty since rev 10.2 (beside PTT now)
 board.add_jst_ph(cx, cy, pins=2, label="BAT",
                  pad_labels=["+", "-"], pad_nets=["VBAT", "GND"]); cx += JST2_STEP
 board.add_jst_ph(cx, cy, pins=2, label="SW",
@@ -77,6 +76,13 @@ PTT_X = BX + 2.5
 PTT_Y = BY + 7.3
 board.add_jst_ph(PTT_X, PTT_Y, pins=2, label="PTT",
                  pad_nets=["PTT", "GND"])
+# The internal speaker (rev 10.2), beside PTT: it hangs off the K1 2.5 jack's
+# tip switch below. Up on the top edge beside SD the SD bus and the PCM's
+# traces boxed it in. Its cable has to reach here (user, 2026-11-08: the
+# newer speakers' cables are longer)
+board.add_jst_ph(PTT_X + JST2_STEP, PTT_Y, pins=2, label="SPK",
+                 pad_labels=["-", "+"], pad_nets=["GND", "SPK+"],
+                 ref_at=(0, 2.4))  # its name below: copper above it
 
 # (CHNL encoder was on the top edge once, dropped: its pins GPIO7/GPIO5
 # belong to the V4.3's RF front end. Channel is picked from the menu instead.)
@@ -125,7 +131,7 @@ board.add_header(BX + BW - 3 - J2_SPAN / 2, HY + HELTEC_WIDTH, pins=18, label="J
                  pad_nets=[None, None, None, None, "LRC", "BCLK",
                            "DIN", None, None, None, "PTT", None,
                            "SD_CMD", "SD_D0", "Ve", "Ve", None, "GND"],
-                 ref_at=(-12, 2.5))  # below the row, west: AMP2's outline is above it
+                 ref_at=(-12, 2.5))  # below the row, west: the PCM's outline is above it
 
 # The Heltec's outline on the floor side, where it hangs on its sockets, so
 # nothing tall lands under it. Measured (micrometer and a marked-up pin map,
@@ -150,17 +156,67 @@ board.add_outline([(heltec_usb_x, heltec_top), (heltec_chamfer_x, heltec_top),
                    (heltec_chamfer_x, heltec_bottom), (heltec_usb_x, heltec_bottom)],
                   layer="B.SilkS", width=0.12)
 
-# Room for a second amp board later, on the lid side against the east edge,
-# centred between the Heltec's header rows (not fitted in rev 10.1, only
-# outlined): 31.41 x 16.54 (user's measurement, 2026-11-06). The passive
-# row under the Heltec keeps well west of it: their joints are on this side
-AMP2_LENGTH = 31.41
-AMP2_WIDTH = 16.54
-amp2_right = BX + BW - 0.3
-amp2_centre_y = HY + HELTEC_WIDTH / 2
-board.add_rect(amp2_right - AMP2_LENGTH, amp2_centre_y - AMP2_WIDTH / 2, AMP2_LENGTH,
-               AMP2_WIDTH, layer="F.SilkS", width=0.12)
-board.add_text(amp2_right - AMP2_LENGTH / 2, amp2_centre_y, "AMP2", size=1, thickness=0.15)
+# Rev 10.2: the PCM5102A DAC board (purple "GY-PCM5102"), the speaker
+# path's I2S end, where rev 10.1 kept AMP2's room: against the east edge
+# between the Heltec's header rows, centred between the rows, on the lid
+# side face up with the other daughter boards (user, 2026-11-09, after the
+# coupon fit). 31.46 x 16.60 mm, 6.23 mm tall with its 3.5 mm jack (calipers).
+# The jack stays soldered on, but the plastic it had sticking 3.6 mm past
+# one long edge is clipped off (user, 2026-11-08): no plug fits it in the
+# case anyway. Holes off a derotated photo (OpenCV, scaled by their 2.54
+# pitch): a 6-pin I2S column 1.1 mm in from its short edge, a 9-hole row
+# 1.44 mm in from the long edge away from the jack.
+# PCM frame: as printed, jack top-left, I2S column at the right, the 9-hole
+# row along the bottom. Here it lies turned half way round: the I2S column
+# west, by J2's GPIO33/47/48; the 9-hole row north, the jack south-east
+PCM_W = 31.46
+PCM_H = 16.60
+PCM_RIGHT = BX + BW - 0.3
+PCM_BOTTOM = HY + HELTEC_WIDTH / 2 + PCM_H / 2
+PCM_LEFT = PCM_RIGHT - PCM_W
+PCM_TOP = PCM_BOTTOM - PCM_H
+
+
+def pcm_at(x_mm, y_mm):
+    """A point in the PCM's printed frame, turned half way round onto this view."""
+    return PCM_RIGHT - x_mm, PCM_BOTTOM - y_mm
+
+
+PCM_I2S = [("VIN", "Ve"), ("GND", "GND"), ("LCK", "LRC"), ("DIN", "DIN"), ("BCK", "BCLK"),
+           ("SCK", "GND")]  # SCK grounded: its PLL clocks off BCK
+# The 9-hole row from the jack end: line out (L only: the firmware sends mono
+# to both slots), its analog 3.3 V (unmarked), then the mode pins. XSMT must
+# be HIGH (low = muted: the bench board was silent until it was); FLT, DEMP,
+# FMT low.
+# Named as its own silkscreen marks them: 4 FMT, 3 XSMT, 2 DEMP, 1 FLT. Its G
+# holes are its own ground, which reaches ours through the I2S column's GND
+PCM_ROW = [("L", "AMP_IN"), ("G", None), ("R", None), ("G", None), ("", None),
+           ("4", "GND"), ("3", "Ve"), ("2", "GND"), ("1", "GND")]
+pcm_pads = []
+for number, (name, net) in enumerate(PCM_I2S):
+    x_mm, y_mm = pcm_at(PCM_W - 1.1, PCM_H - 2.02 - (5 - number) * 2.54)
+    pcm_pads.append((name, x_mm, y_mm, net))
+for number, (name, net) in enumerate(PCM_ROW):
+    x_mm, y_mm = pcm_at(3.32 + number * 2.54, PCM_H - 1.44)
+    pcm_pads.append((name, x_mm, y_mm, net))
+# The pins only tied to ground (SCK and the mode pins) join the ground fill
+# solidly: the I2S traces fanning past the 9-hole row kept boxing them in to
+# one thermal spoke (DRC: starved thermal, 2026-11-08). They carry no
+# current; their joints just take a little more heat. Its GND pin, the
+# supply return, keeps its spokes
+PCM_TIES = {"SCK", "4", "2", "1"}
+board.add_footprint("PCM5102A_GY", 0, 0,
+                    [{"name": str(number + 1), "x": x_mm, "y": y_mm, "size": 1.7, "drill": 1.0,
+                      "net": net, "solid": name in PCM_TIES}
+                     for number, (name, x_mm, y_mm, net) in enumerate(pcm_pads)],
+                    label="PCM")
+board.add_rect(PCM_LEFT, PCM_TOP, PCM_W, PCM_H, layer="F.SilkS", width=0.12)
+for name, x_mm, y_mm, _ in pcm_pads:
+    in_row = y_mm < PCM_TOP + 2
+    board.add_text(x_mm + (0 if in_row else 2.4), y_mm + (1.6 if in_row else 0), name,
+                   layer="F.SilkS", size=0.8, thickness=0.12)
+board.add_text(PCM_LEFT + PCM_W / 2, PCM_BOTTOM - 6, "PCM5102A", layer="F.SilkS", size=1,
+               thickness=0.15)
 
 # MAX9814 mic amp (Amazon clone of Adafruit 1713), turned (rev 10.1): its
 # header runs north-south (AR south) and the board lies flat over this one
@@ -177,19 +233,20 @@ MIC_Q1 = 18.7
 MIC_FAR_EDGE = 23.5
 MIC_NEAR_EDGE = 1.6
 MIC_WIDTH = 13.8
-# The speaker amp's header and its outline's width (its header and outline
-# are drawn further down): the capsule sits east of it
-AMP_X = BX + 3 + 3 * 2.54
-AMP_PIN_SPAN = 6 * 2.54
-AMP_SIDE_EDGE = 0.93
-amp_east_edge = AMP_X + AMP_PIN_SPAN / 2 + AMP_SIDE_EDGE
-# The capsule just east of the speaker amp's outline (where it fit the
-# printed board coupon), and the mic amp board 4 mm further east than that
-# fit: on the coupon MIC_IN's pins touched the capsule's grounded can
-# (user, 2026-11-07)
-CAPSULE_X = amp_east_edge + 2.27
-MIC_X = BX + 51.2
+# Rev 10.2: along the south edge, west to east, the mic amp board (lid side),
+# the capsule (floor side) and the LM386 (lid side, drawn further down). The capsule
+# sits between the two amps, centred in the gap between the mic amp's
+# header pads and the LM386's west edge (~1.9 mm each side of its can): out
+# of the corner, for the sound (user, 2026-11-08), at the cost of a longer
+# high-impedance CAPSULE trace from the K1 3.5 jack's ring switch
+LM386_W = 21.04
+LM386_H = 12.78
+LM386_LEFT = BX + BW - 3.5 - 5.0 - LM386_W  # 5 mm west of VOL's pins: its housing, its name
+LM386_TOP = BY + BH - 4.8 - LM386_H         # the MAX98357A's south edge, north of the screw
+MIC_X = BX + 26.0  # its outline's west end ~2.5 mm in from the edge
 MIC_Y = BY + 47
+CAPSULE_DIAMETER = 9.74  # micrometer, 2026-11-06
+CAPSULE_X = (MIC_X + 0.85 + LM386_LEFT) / 2
 # CAPSULE turned 270 degrees: pin 1 north (frame (0, -y) = y mm east,
 # (x, 0) = x mm south); MIC_IN 90, like the amp's header: pin 1 south
 # (frame (0, y) = y mm east). Names clear of pads and outlines
@@ -214,15 +271,12 @@ board.add_header(MIC_X - MIC_Q1, MIC_Y, pins=2, label="MIC_IN", angle=90,
 # ring NC switch (net CAPSULE, K1_NETS): plugging a headset in opens the
 # switch and the headset's mic, on the ring, takes over. Between the two amp
 # boards; it faces the floor, so the case's mic hole follows it
-# 9.74 mm across (micrometer, 2026-11-06), on the floor side: 1 mm north of
-# the amp boards' row keeps its edge ~1 mm off the speaker amp's Vin pin,
-# which is soldered on this side
+# On the floor side, 1 mm north of the mic amp's row (rev 10.1's fit)
 CAPSULE_Y = MIC_Y - 1.0
-CAPSULE_DIAMETER = 9.74
 CAPSULE_PITCH = 3.1  # its legs, off a marked-up photo (3.1-3.2 mm, 2026-11-06)
 board.add_circle(CAPSULE_X, CAPSULE_Y, CAPSULE_DIAMETER, layer="B.SilkS", width=0.12)
 board.add_header(CAPSULE_X, CAPSULE_Y, pins=2, label="CAPSULE", angle=270, pitch=CAPSULE_PITCH,
-                 pad_labels=["+", "-"], pad_nets=["CAPSULE", "MIC_GND"], ref_at=(-8.0, 0),
+                 pad_labels=["+", "-"], pad_nets=["CAPSULE", "MIC_GND"], ref_at=(6.5, 0),
                  ref_layer="B.SilkS")  # its name on its own side, clear of both outlines
 # Which hole is which, on both sides (the capsule faces the floor, the amp
 # board's leads come from the lid side): "+" (pin 1) north
@@ -238,24 +292,43 @@ for layer in ("F.SilkS", "B.SilkS"):
 # The amp board's outline, so nothing else lands under it
 board.add_rect(MIC_X - MIC_FAR_EDGE, MIC_Y - MIC_WIDTH / 2, MIC_FAR_EDGE + MIC_NEAR_EDGE,
                MIC_WIDTH, layer="F.SilkS", width=0.12)
-# Down by the bottom-left mounting hole (rev 10, clearing the top left for
-# the Kenwood jacks): the header row stays 4.5 mm above the hole, room for
-# the M2 screw head (3.8 mm), the breakout's edge past its pins, and 1 mm
-AMP_Y = BY + BH - INSET_TB - 4.5
-board.add_header(AMP_X, AMP_Y, pins=7, label="AMP", angle=180,
-                 pad_labels=["Vin", "GND", "SD", "GAIN", "DIN", "BCLK", "LRC"],
-                 pad_nets=["Ve", "GND", None, None, "DIN", "BCLK", "LRC"],
-                 ref_at=(0, -4.6))  # turned 180: south, below the breakout's outline
-board.add_header(AMP_X, AMP_Y - 12.954, pins=2, label="AMP_SPK", angle=180,
-                 pitch=3.5, pad_labels=["+", "-"], pad_nets=["SPK+", "SPK-"])
-# The breakout's outline, so nothing else lands under it (measured off a
-# marked-up photo 2026-11-06): 0.93 mm past the end pins, 16.1 mm north of
-# the pin row (the speaker terminal end), ~2.2 mm south of it (not marked)
-AMP_FAR_EDGE = 16.1
-AMP_NEAR_EDGE = 2.2
-board.add_rect(AMP_X - AMP_PIN_SPAN / 2 - AMP_SIDE_EDGE, AMP_Y - AMP_FAR_EDGE,
-               AMP_PIN_SPAN + 2 * AMP_SIDE_EDGE, AMP_FAR_EDGE + AMP_NEAR_EDGE,
-               layer="F.SilkS", width=0.12)
+# Rev 10.2 (WIP): the MAX98357A is gone (its BTL output was the harsh sound,
+# 2026-11-07). The speaker amp is now the green mini LM386 module
+# (GODIYMODULES "Adjustable Mini LM386 3-12V"), on the lid side, face up, in
+# the south-east corner, just west of VOL (user, 2026-11-08): its volume
+# trimmer gets set at assembly and stays reachable with the lid off, and it
+# fit there on the printed coupon. 21.04 x
+# 12.78 mm, 7.26 mm tall at its 220 uF cap (calipers, user 2026-11-08). Six
+# pads in three pairs, 2.54 apart within a pair; where the pairs sit came
+# off a bench photo scaled to the calipers' outline (+-0.3 mm): a coupon
+# before fab. Gain 20 as shipped (its "ADD-dB" pads, pins 1-8, are empty).
+# Turned 180 degrees from its silkscreen's reading: IN/GND west, OUT north,
+# the supply pads south. Its silkscreen calls both
+# output pads OUT: the one by the 220 uF cap is the signal (OUT+, to the K1
+# 2.5 tip), the other is ground (bench, 2026-11-08). Its supply is Ve, the
+# Heltec's 3.3 V, like the mic amp beside it and the MAX98357A before it:
+# it ran clean from the Heltec on the bench, the loudest level usable with
+# its trimmer set at assembly (user, 2026-11-08); the battery's 3.4-4.2 V
+# would have bought ~1-2.5 dB but a 0.5 mm power trace round the Heltec.
+# Its three ground pads are one node on the module. IN waits for the
+# PCM5102A (AMP_IN)
+LM386_PADS = [("GND", 2.06, 2.02, "GND"), ("IN", 2.06, 4.56, "AMP_IN"),      # west column
+              ("OUT-", 8.05, 1.61, "GND"), ("OUT+", 10.59, 1.61, "AMP_OUT"),  # north row
+              ("-", 8.05, 10.79, "GND"), ("+", 10.59, 10.79, "Ve")]          # south row: supply
+board.add_footprint("LM386_mini", LM386_LEFT, LM386_TOP,
+                    [{"name": str(number + 1), "x": x_mm, "y": y_mm, "size": 1.7,
+                      "drill": 1.0, "net": net}
+                     for number, (_, x_mm, y_mm, net) in enumerate(LM386_PADS)],
+                    label="LM386")
+board.add_rect(LM386_LEFT, LM386_TOP, LM386_W, LM386_H, layer="F.SilkS", width=0.12)
+for name, x_mm, y_mm, _ in LM386_PADS:
+    board.add_text(LM386_LEFT + x_mm + (2.4 if x_mm < 5 else 0),
+                   LM386_TOP + y_mm + (0 if x_mm < 5 else (1.6 if y_mm < 5 else -1.6)),
+                   name.removeprefix("OUT"), layer="F.SilkS", size=0.8, thickness=0.12)
+board.add_text(LM386_LEFT + 9.32, LM386_TOP + 4.8, "OUT", layer="F.SilkS", size=0.8,
+               thickness=0.12)
+board.add_text(LM386_LEFT + LM386_W / 2 + 3, LM386_TOP + LM386_H / 2, "LM386",
+               layer="F.SilkS", size=1, thickness=0.15)
 
 
 # Kenwood K1 jacks (rev 10): the homemade breakout (pcb/k1/board.py) copied
@@ -283,10 +356,13 @@ def k1_at(x_mm, y_mm):
 # The jack pins the mic half uses (rev 11), by (jack, pin) from the bench map
 # (rev 10 header pin -> function, 2026-10-27/11-05): 3.5 sleeve = PTT to
 # ground, 3.5 ring = the headset mic, 3.5 ring's NC switch = the board's
-# capsule (open with a plug in), 2.5 sleeve = the headset mic's ground. The
-# rest (the speaker half) go nowhere yet
+# capsule (open with a plug in), 2.5 sleeve = the headset mic's ground.
+# Rev 10.2, the speaker half: 2.5 tip = the LM386's output (the headset's
+# earpiece), and the 2.5 tip's NC switch = the internal speaker (SPK), cut
+# off with a plug in. The earpiece returns on the 2.5 sleeve (MIC_GND, as
+# the K1 standard shares it): fine, the radio never talks and listens at once
 K1_NETS = {("3.5", 3): "PTT", ("3.5", 4): "CAPSULE", ("3.5", 5): "MIC_IN",
-           ("2.5", 3): "MIC_GND"}
+           ("2.5", 1): "SPK+", ("2.5", 2): "AMP_OUT", ("2.5", 3): "MIC_GND"}
 
 
 def k1_net(jack, number):
@@ -440,5 +516,10 @@ board.add_zone("GND", [
 for x in (BX + 37, BX + 45, BX + 53, BX + 61):
     for y in (HY + 7, HY + 15):
         board.add_via(x, y, "GND")
+# And just under BAT's GND pad: rev 10.2's routes boxed the pad in (VBAT
+# over its top to SW, SD_CLK right under the connector row), leaving one
+# thermal spoke (DRC: starved thermal, 2026-11-08). The via pushes SD_CLK
+# further south and gives the pad a spoke down to it
+board.add_via(BX + 44.7, BY + 5.9, "GND")
 
 board.save("open-oswst.kicad_pcb")

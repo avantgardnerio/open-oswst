@@ -47,10 +47,6 @@ with BuildPart() as coupon:
     with Locations(at(edge["x"] + edge["width"] / 2, edge["y"] + edge["height"] / 2,
                       THICKNESS / 2)):
         Box(edge["width"], edge["height"], THICKNESS)
-    for hole in data["holes"]:
-        with Locations(at(hole["x"], hole["y"], THICKNESS / 2)):
-            Cylinder(radius=(hole["drill"] + HOLE_SLACK) / 2, height=THICKNESS,
-                     mode=Mode.SUBTRACT)
     for line in data["lines"]:
         (x0, y0), (x1, y1) = line["from"], line["to"]
         length = math.hypot(x1 - x0, y1 - y0)
@@ -64,6 +60,15 @@ with BuildPart() as coupon:
         with Locations(at(circle["x"], circle["y"], face_z(circle["side"]))):
             Cylinder(radius=circle["radius"] + GROOVE / 2, height=ENGRAVE, mode=Mode.SUBTRACT)
             Cylinder(radius=circle["radius"] - GROOVE / 2, height=ENGRAVE, mode=Mode.ADD)
+    # The holes last, and taller than the plate: cut before the circles, the
+    # disc each ring's engraving adds back capped the holes inside it (the
+    # capsule's, C1's), and cylinders exactly the plate's height leave skins
+    # at the faces. Rev 10.1's coupon needed those holes drilled (user,
+    # 2026-11-08)
+    for hole in data["holes"]:
+        with Locations(at(hole["x"], hole["y"], THICKNESS / 2)):
+            Cylinder(radius=(hole["drill"] + HOLE_SLACK) / 2, height=THICKNESS + 2,
+                     mode=Mode.SUBTRACT)
 
 size = coupon.part.bounding_box().size
 print(f"board coupon {size.X:.1f} x {size.Y:.1f} x {size.Z:.1f} mm, "

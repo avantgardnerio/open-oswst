@@ -148,8 +148,9 @@ class Board:
     def add_footprint(self, name, x, y, pads, label=""):
         """A footprint from explicit pads (positions relative to (x, y)). Each
         pad is a dict: name, x, y, size, drill, net (or None), plated (default
-        True) and layers (default both sides). For parts with no library
-        footprint, measured by hand (pcb/k1/)."""
+        True), layers (default both sides) and solid (default False: True
+        joins the pad to its net's copper fill solidly, no thermal spokes).
+        For parts with no library footprint, measured by hand (pcb/k1/)."""
         self._fp_id += 1
         pad_lines = []
         for pad in pads:
@@ -157,12 +158,13 @@ class Board:
             if pad.get("plated", True):
                 net = pad.get("net")
                 net_str = f'\n      (net {self._net(net)} "{net}")' if net else ""
+                solid_str = "\n      (zone_connect 2)" if pad.get("solid") else ""
                 pad_lines.append(
                     f'    (pad "{pad["name"]}" thru_hole circle\n'
                     f'      (at {pad["x"]} {pad["y"]})\n'
                     f'      (size {pad["size"]} {pad["size"]})\n'
                     f'      (drill {pad["drill"]})\n'
-                    f'      (layers {layers}){net_str}\n'
+                    f'      (layers {layers}){net_str}{solid_str}\n'
                     f'    )'
                 )
             else:
